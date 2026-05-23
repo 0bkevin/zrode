@@ -1,16 +1,21 @@
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
+import { scopeThreadRef } from "@zrode/client-runtime";
+import { useEffect, useMemo } from "react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import {
   startNewLocalThreadFromContext,
+  startNewTerminalThreadFromContext,
   startNewThreadFromContext,
 } from "../lib/chatThreadActions";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { resolveShortcutCommand } from "../keybindings";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
+import { resolveThreadRouteTarget } from "../threadRoutes";
 import { resolveSidebarNewThreadEnvMode } from "~/components/Sidebar.logic";
 import { useSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "~/rpc/serverState";
@@ -63,6 +68,21 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
+      if (command === "chat.newTerminal") {
+        event.preventDefault();
+        event.stopPropagation();
+        void startNewTerminalThreadFromContext({
+          activeDraftThread,
+          activeThread,
+          defaultProjectRef,
+          defaultThreadEnvMode: resolveSidebarNewThreadEnvMode({
+            defaultEnvMode: appSettings.defaultThreadEnvMode,
+          }),
+          handleNewThread,
+        });
+        return;
+      }
+
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
@@ -98,6 +118,24 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
+  const routeTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const draftSession = useComposerDraftStore((store) =>
+    routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
+  );
+  const activeThreadRef = useMemo(
+    () =>
+      routeTarget?.kind === "server"
+        ? routeTarget.threadRef
+        : draftSession
+          ? scopeThreadRef(draftSession.environmentId, draftSession.threadId)
+          : null,
+    [draftSession, routeTarget],
+  );
+  useDisposableThreadLifecycle(activeThreadRef);
+
   return (
     <>
       <ChatRouteGlobalShortcuts />

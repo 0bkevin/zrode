@@ -3,7 +3,9 @@ import { EnvironmentId, ProjectId } from "@zrode/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   resolveThreadActionProjectRef,
+  startNewDisposableThreadFromContext,
   startNewLocalThreadFromContext,
+  startNewTerminalThreadFromContext,
   startNewThreadFromContext,
   type ChatThreadActionContext,
 } from "./chatThreadActions";
@@ -89,6 +91,52 @@ describe("chatThreadActions", () => {
     expect(handleNewThread).toHaveBeenCalledWith(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), {
       envMode: "worktree",
     });
+  });
+
+  it("starts a terminal thread with active thread context in a fresh draft", async () => {
+    const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
+
+    const didStart = await startNewTerminalThreadFromContext(
+      createContext({
+        activeThread: {
+          environmentId: ENVIRONMENT_ID,
+          projectId: PROJECT_ID,
+          branch: "feature/terminal",
+          worktreePath: "/tmp/terminal-worktree",
+        },
+        handleNewThread,
+      }),
+    );
+
+    expect(didStart).toBe(true);
+    expect(handleNewThread).toHaveBeenCalledWith(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID), {
+      branch: "feature/terminal",
+      worktreePath: "/tmp/terminal-worktree",
+      envMode: "worktree",
+      entryPoint: "terminal",
+      fresh: true,
+    });
+  });
+
+  it("starts a disposable thread in a fresh draft", async () => {
+    const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
+
+    const didStart = await startNewDisposableThreadFromContext(
+      createContext({
+        defaultThreadEnvMode: "worktree",
+        handleNewThread,
+      }),
+    );
+
+    expect(didStart).toBe(true);
+    expect(handleNewThread).toHaveBeenCalledWith(
+      scopeProjectRef(ENVIRONMENT_ID, FALLBACK_PROJECT_ID),
+      {
+        envMode: "worktree",
+        temporary: true,
+        fresh: true,
+      },
+    );
   });
 
   it("does not start a thread when there is no project context", async () => {

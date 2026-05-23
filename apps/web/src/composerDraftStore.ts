@@ -187,6 +187,7 @@ const PersistedDraftThreadState = Schema.Struct({
       }),
     ),
   ),
+  isTemporary: Schema.optionalKey(Schema.Boolean),
 });
 type PersistedDraftThreadState = typeof PersistedDraftThreadState.Type;
 
@@ -249,6 +250,7 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   promotedTo?: ScopedThreadRef | null;
+  isTemporary?: boolean;
 }
 
 export type DraftThreadState = DraftSessionState;
@@ -311,6 +313,7 @@ interface ComposerDraftStoreState {
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -325,6 +328,23 @@ interface ComposerDraftStoreState {
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
+    },
+  ) => void;
+  /** Creates or updates draft-session metadata without making it the reusable project draft. */
+  setDetachedDraftThread: (
+    projectRef: ScopedProjectRef,
+    draftId: DraftId,
+    logicalProjectKey: string,
+    options?: {
+      threadId?: ThreadId;
+      branch?: string | null;
+      worktreePath?: string | null;
+      createdAt?: string;
+      envMode?: DraftThreadEnvMode;
+      runtimeMode?: RuntimeMode;
+      interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
     },
   ) => void;
   /** Updates mutable draft-session metadata without touching composer content. */
@@ -338,6 +358,7 @@ interface ComposerDraftStoreState {
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -1158,6 +1179,7 @@ function createDraftThreadState(
     envMode?: DraftThreadEnvMode;
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
+    isTemporary?: boolean;
   },
 ): DraftThreadState {
   const projectChanged =
@@ -1176,6 +1198,7 @@ function createDraftThreadState(
         ? null
         : (existingThread?.branch ?? null)
       : (options.branch ?? null);
+  const isTemporary = options?.isTemporary ?? existingThread?.isTemporary;
   return {
     threadId,
     environmentId: projectRef.environmentId,
@@ -1195,6 +1218,7 @@ function createDraftThreadState(
           ? "local"
           : (existingThread?.envMode ?? "local")),
     promotedTo: null,
+    ...(isTemporary === undefined ? {} : { isTemporary }),
   };
 }
 
@@ -1225,6 +1249,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
+    left.isTemporary === right.isTemporary &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -1367,6 +1392,7 @@ function normalizePersistedDraftThreads(
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
         promotedTo,
+        ...(candidateDraftThread.isTemporary === true ? { isTemporary: true } : {}),
       };
     }
   }
@@ -1932,6 +1958,7 @@ function toHydratedDraftThreadState(
           persistedDraftThread.promotedTo.threadId as ThreadId,
         )
       : null,
+    ...(persistedDraftThread.isTemporary === true ? { isTemporary: true } : {}),
   };
 }
 
@@ -2076,6 +2103,31 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             options,
           );
         },
+        setDetachedDraftThread: (projectRef, draftId, logicalProjectKey, options) => {
+          const normalizedLogicalProjectKey = logicalProjectDraftKey(logicalProjectKey);
+          if (normalizedLogicalProjectKey.length === 0 || draftId.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existingThread = state.draftThreadsByThreadKey[draftId];
+            const nextDraftThread = createDraftThreadState(
+              projectRef,
+              options?.threadId ?? existingThread?.threadId ?? ThreadId.make(draftId),
+              normalizedLogicalProjectKey,
+              existingThread,
+              options,
+            );
+            if (draftThreadsEqual(existingThread, nextDraftThread)) {
+              return state;
+            }
+            return {
+              draftThreadsByThreadKey: {
+                ...state.draftThreadsByThreadKey,
+                [draftId]: nextDraftThread,
+              },
+            };
+          });
+        },
         setDraftThreadContext: (threadRef, options) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -2111,6 +2163,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   ? null
                   : existing.branch
                 : (options.branch ?? null);
+            const isTemporary = options.isTemporary ?? existing.isTemporary;
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -2132,6 +2185,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     ? "local"
                     : (existing.envMode ?? "local")),
               promotedTo: existing.promotedTo ?? null,
+              ...(isTemporary === undefined ? {} : { isTemporary }),
             };
             const isUnchanged =
               nextDraftThread.environmentId === existing.environmentId &&
@@ -2143,6 +2197,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.branch === existing.branch &&
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
+              nextDraftThread.isTemporary === existing.isTemporary &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;

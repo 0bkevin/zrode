@@ -1,14 +1,22 @@
-import { scopedProjectKey, scopeProjectRef } from "@zrode/client-runtime";
-import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@zrode/contracts";
+import { scopedProjectKey, scopeProjectRef, scopeThreadRef } from "@zrode/client-runtime";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_RUNTIME_MODE,
+  ProviderInstanceId,
+  type ScopedProjectRef,
+  type ThreadId,
+} from "@zrode/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   type DraftThreadEnvMode,
   type DraftThreadState,
+  DraftId,
   useComposerDraftStore,
 } from "../composerDraftStore";
-import { newDraftId, newThreadId } from "../lib/utils";
+import { newCommandId, newDraftId, newThreadId } from "../lib/utils";
+import { readEnvironmentApi } from "../environmentApi";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -17,9 +25,27 @@ import {
 } from "../logicalProject";
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
-import { resolveThreadRouteTarget } from "../threadRoutes";
+import {
+  buildDraftThreadRouteParams,
+  buildThreadRouteParams,
+  resolveThreadRouteTarget,
+} from "../threadRoutes";
+import { DEFAULT_THREAD_TERMINAL_ID } from "../types";
 import { useUiStateStore } from "../uiStateStore";
+import { useTemporaryThreadStore } from "../temporaryThreadStore";
+import { useTerminalStateStore } from "../terminalStateStore";
 import { useSettings } from "./useSettings";
+
+export type NewThreadEntryPoint = "chat" | "terminal";
+
+export interface NewThreadOptions {
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode?: DraftThreadEnvMode;
+  entryPoint?: NewThreadEntryPoint;
+  temporary?: boolean;
+  fresh?: boolean;
+}
 
 function useNewThreadState() {
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
@@ -31,23 +57,19 @@ function useNewThreadState() {
   }, [router]);
 
   return useCallback(
-    (
-      projectRef: ScopedProjectRef,
-      options?: {
-        branch?: string | null;
-        worktreePath?: string | null;
-        envMode?: DraftThreadEnvMode;
-      },
-    ): Promise<void> => {
+    async (projectRef: ScopedProjectRef, options?: NewThreadOptions): Promise<void> => {
       const {
         getDraftSessionByLogicalProjectKey,
         getDraftSession,
         getDraftThread,
         applyStickyState,
+        setDetachedDraftThread,
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
       } = useComposerDraftStore.getState();
       const currentRouteTarget = getCurrentRouteTarget();
+      const entryPoint = options?.entryPoint ?? "chat";
+      const shouldCreateDetachedDraft = options?.fresh === true || options?.temporary === true;
       const project = projects.find(
         (candidate) =>
           candidate.id === projectRef.projectId &&
@@ -59,12 +81,78 @@ function useNewThreadState() {
       const hasBranchOption = options?.branch !== undefined;
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
-      const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+      const storedDraftThread = shouldCreateDetachedDraft
+        ? null
+        : getDraftSessionByLogicalProjectKey(logicalProjectKey);
       const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
         ? currentRouteTarget.kind === "server"
           ? getDraftThread(currentRouteTarget.threadRef)
           : getDraftSession(currentRouteTarget.draftId)
         : null;
+      const activateDraftThread = async (draftId: DraftId, threadId: ThreadId) => {
+        const threadRef = scopeThreadRef(projectRef.environmentId, threadId);
+        if (options?.temporary === true) {
+          useTemporaryThreadStore.getState().markTemporaryThread(threadRef);
+        }
+        await router.navigate({
+          to: "/draft/$draftId",
+          params: buildDraftThreadRouteParams(draftId),
+        });
+      };
+
+      if (entryPoint === "terminal") {
+        const api = readEnvironmentApi(projectRef.environmentId);
+        if (!api) {
+          return;
+        }
+        const threadId = newThreadId();
+        const threadRef = scopeThreadRef(projectRef.environmentId, threadId);
+        const createdAt = new Date().toISOString();
+        useTerminalStateStore.getState().openTerminalThreadPage(threadRef);
+        useTerminalStateStore
+          .getState()
+          .ensureTerminal(threadRef, DEFAULT_THREAD_TERMINAL_ID, { open: true, active: true });
+        await api.orchestration.dispatchCommand({
+          type: "thread.create",
+          commandId: newCommandId(),
+          threadId,
+          projectId: projectRef.projectId,
+          title: "New terminal",
+          modelSelection: project?.defaultModelSelection ?? {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: DEFAULT_MODEL,
+          },
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: "default",
+          branch: options?.branch ?? null,
+          worktreePath: options?.worktreePath ?? null,
+          createdAt,
+        });
+        await router.navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(threadRef),
+        });
+        return;
+      }
+
+      if (shouldCreateDetachedDraft) {
+        const draftId = newDraftId();
+        const threadId = newThreadId();
+        const createdAt = new Date().toISOString();
+        setDetachedDraftThread(projectRef, draftId, logicalProjectKey, {
+          threadId,
+          createdAt,
+          branch: options?.branch ?? null,
+          worktreePath: options?.worktreePath ?? null,
+          envMode: options?.envMode ?? "local",
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          ...(options?.temporary === true ? { isTemporary: true } : {}),
+        });
+        applyStickyState(draftId);
+        await activateDraftThread(draftId, threadId);
+        return;
+      }
+
       if (storedDraftThread) {
         return (async () => {
           if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
@@ -94,6 +182,7 @@ function useNewThreadState() {
         latestActiveDraftThread &&
         currentRouteTarget?.kind === "draft" &&
         latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
+        latestActiveDraftThread.isTemporary !== true &&
         latestActiveDraftThread.promotedTo == null
       ) {
         if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {

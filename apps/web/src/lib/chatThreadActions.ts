@@ -1,6 +1,7 @@
 import { scopeProjectRef } from "@zrode/client-runtime";
 import type { EnvironmentId, ProjectId, ScopedProjectRef } from "@zrode/contracts";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
+import type { NewThreadEntryPoint } from "../hooks/useHandleNewThread";
 
 interface ThreadContextLike {
   environmentId: EnvironmentId;
@@ -20,6 +21,9 @@ interface NewThreadHandler {
       branch?: string | null;
       worktreePath?: string | null;
       envMode?: DraftThreadEnvMode;
+      entryPoint?: NewThreadEntryPoint;
+      temporary?: boolean;
+      fresh?: boolean;
     },
   ): Promise<void>;
 }
@@ -94,5 +98,37 @@ export async function startNewLocalThreadFromContext(
   }
 
   await context.handleNewThread(projectRef, buildDefaultThreadOptions(context));
+  return true;
+}
+
+export async function startNewTerminalThreadFromContext(
+  context: ChatThreadActionContext,
+): Promise<boolean> {
+  const projectRef = resolveThreadActionProjectRef(context);
+  if (!projectRef) {
+    return false;
+  }
+
+  await context.handleNewThread(projectRef, {
+    ...buildContextualThreadOptions(context),
+    entryPoint: "terminal",
+    fresh: true,
+  });
+  return true;
+}
+
+export async function startNewDisposableThreadFromContext(
+  context: ChatThreadActionContext,
+): Promise<boolean> {
+  const projectRef = resolveThreadActionProjectRef(context);
+  if (!projectRef) {
+    return false;
+  }
+
+  await context.handleNewThread(projectRef, {
+    ...buildDefaultThreadOptions(context),
+    temporary: true,
+    fresh: true,
+  });
   return true;
 }
