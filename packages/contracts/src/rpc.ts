@@ -53,6 +53,18 @@ import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
+  ProjectCopyPathInput,
+  ProjectCreatePathInput,
+  ProjectDeletePathInput,
+  ProjectFileSystemError,
+  ProjectPathResult,
+  ProjectReadDirInput,
+  ProjectReadDirResult,
+  ProjectReadFileInput,
+  ProjectReadFileResult,
+  ProjectRenamePathInput,
+  ProjectStatInput,
+  ProjectStatResult,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -105,7 +117,15 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsSearchEntries: "projects.searchEntries",
+  projectsReadDir: "projects.readDir",
+  projectsReadFile: "projects.readFile",
+  projectsStatPath: "projects.statPath",
   projectsWriteFile: "projects.writeFile",
+  projectsCreateFile: "projects.createFile",
+  projectsCreateDirectory: "projects.createDirectory",
+  projectsRenamePath: "projects.renamePath",
+  projectsCopyPath: "projects.copyPath",
+  projectsDeletePath: "projects.deletePath",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -270,10 +290,58 @@ export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntr
   error: ProjectSearchEntriesError,
 });
 
+export const WsProjectsReadDirRpc = Rpc.make(WS_METHODS.projectsReadDir, {
+  payload: ProjectReadDirInput,
+  success: ProjectReadDirResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
+  payload: ProjectReadFileInput,
+  success: ProjectReadFileResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsStatPathRpc = Rpc.make(WS_METHODS.projectsStatPath, {
+  payload: ProjectStatInput,
+  success: ProjectStatResult,
+  error: ProjectFileSystemError,
+});
+
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
   error: ProjectWriteFileError,
+});
+
+export const WsProjectsCreateFileRpc = Rpc.make(WS_METHODS.projectsCreateFile, {
+  payload: ProjectCreatePathInput,
+  success: ProjectPathResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
+  payload: ProjectCreatePathInput,
+  success: ProjectPathResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsRenamePathRpc = Rpc.make(WS_METHODS.projectsRenamePath, {
+  payload: ProjectRenamePathInput,
+  success: ProjectPathResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsCopyPathRpc = Rpc.make(WS_METHODS.projectsCopyPath, {
+  payload: ProjectCopyPathInput,
+  success: ProjectPathResult,
+  error: ProjectFileSystemError,
+});
+
+export const WsProjectsDeletePathRpc = Rpc.make(WS_METHODS.projectsDeletePath, {
+  payload: ProjectDeletePathInput,
+  success: ProjectPathResult,
+  error: ProjectFileSystemError,
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -489,7 +557,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
   WsProjectsSearchEntriesRpc,
+  WsProjectsReadDirRpc,
+  WsProjectsReadFileRpc,
+  WsProjectsStatPathRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsCreateFileRpc,
+  WsProjectsCreateDirectoryRpc,
+  WsProjectsRenamePathRpc,
+  WsProjectsCopyPathRpc,
+  WsProjectsDeletePathRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeVcsStatusRpc,
