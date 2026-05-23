@@ -4,12 +4,12 @@ import {
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
-} from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime";
+} from "@zrode/contracts";
+import { scopeThreadRef } from "@zrode/client-runtime";
 import { memo } from "react";
 import GitActionsControl from "../GitActionsControl";
 import { type DraftId } from "~/composerDraftStore";
-import { DiffIcon, TerminalSquareIcon } from "lucide-react";
+import { DiffIcon, FolderTreeIcon, TerminalSquareIcon } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
@@ -32,6 +32,8 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   terminalAvailable: boolean;
   terminalOpen: boolean;
+  fileNavigatorAvailable: boolean;
+  fileNavigatorOpen: boolean;
   terminalToggleShortcutLabel: string | null;
   diffToggleShortcutLabel: string | null;
   gitCwd: string | null;
@@ -41,6 +43,7 @@ interface ChatHeaderProps {
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onDeleteProjectScript: (scriptId: string) => Promise<void>;
   onToggleTerminal: () => void;
+  onToggleFileNavigator: () => void;
   onToggleDiff: () => void;
 }
 
@@ -70,6 +73,8 @@ export const ChatHeader = memo(function ChatHeader({
   availableEditors,
   terminalAvailable,
   terminalOpen,
+  fileNavigatorAvailable,
+  fileNavigatorOpen,
   terminalToggleShortcutLabel,
   diffToggleShortcutLabel,
   gitCwd,
@@ -79,6 +84,7 @@ export const ChatHeader = memo(function ChatHeader({
   onUpdateProjectScript,
   onDeleteProjectScript,
   onToggleTerminal,
+  onToggleFileNavigator,
   onToggleDiff,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -135,6 +141,28 @@ export const ChatHeader = memo(function ChatHeader({
             {...(draftId ? { draftId } : {})}
           />
         )}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="shrink-0"
+                pressed={fileNavigatorOpen}
+                onPressedChange={onToggleFileNavigator}
+                aria-label="Toggle file navigator"
+                variant="outline"
+                size="xs"
+                disabled={!fileNavigatorAvailable}
+              >
+                <FolderTreeIcon className="size-3" />
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {!fileNavigatorAvailable
+              ? "File navigator is unavailable until this thread has an active project."
+              : "Toggle file navigator"}
+          </TooltipPopup>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
