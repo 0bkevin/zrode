@@ -10,7 +10,10 @@ import {
   type ServerProviderUpdatedPayload,
   type ServerSettings,
 } from "@zrode/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@zrode/shared/keybindings";
+import {
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  mergeWithDefaultKeybindings,
+} from "@zrode/shared/keybindings";
 import { Atom } from "effect/unstable/reactivity";
 import { useCallback, useRef } from "react";
 
@@ -48,7 +51,9 @@ const EMPTY_SERVER_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const selectAvailableEditors = (config: ServerConfig | null): ReadonlyArray<EditorId> =>
   config?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
 const selectKeybindings = (config: ServerConfig | null) =>
-  config?.keybindings ?? DEFAULT_RESOLVED_KEYBINDINGS;
+  config?.keybindings
+    ? mergeWithDefaultKeybindings(config.keybindings)
+    : DEFAULT_RESOLVED_KEYBINDINGS;
 const selectKeybindingsConfigPath = (config: ServerConfig | null) =>
   config?.keybindingsConfigPath ?? null;
 const selectObservability = (config: ServerConfig | null) => config?.observability ?? null;

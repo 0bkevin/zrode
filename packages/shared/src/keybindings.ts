@@ -21,13 +21,15 @@ type WhenToken =
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+j", command: "terminal.toggle" },
   { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
-  { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
+  { key: "mod+shift+d", command: "terminal.splitDown", when: "terminalFocus" },
+  { key: "mod+t", command: "terminal.new", when: "terminalFocus" },
   { key: "mod+w", command: "terminal.close", when: "terminalFocus" },
   { key: "mod+d", command: "diff.toggle", when: "!terminalFocus" },
   { key: "mod+k", command: "commandPalette.toggle", when: "!terminalFocus" },
   { key: "mod+n", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+o", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus" },
+  { key: "mod+shift+t", command: "chat.newTerminal", when: "!terminalFocus" },
   { key: "mod+shift+m", command: "modelPicker.toggle", when: "!terminalFocus" },
   { key: "mod+o", command: "editor.openFavorite" },
   { key: "mod+shift+[", command: "thread.previous" },
@@ -281,3 +283,23 @@ export function compileResolvedKeybindingsConfig(
 }
 
 export const DEFAULT_RESOLVED_KEYBINDINGS = compileResolvedKeybindingsConfig(DEFAULT_KEYBINDINGS);
+
+export function mergeWithDefaultKeybindings(
+  custom: ResolvedKeybindingsConfig,
+): ResolvedKeybindingsConfig {
+  if (custom.length === 0) {
+    return [...DEFAULT_RESOLVED_KEYBINDINGS];
+  }
+
+  const overriddenCommands = new Set(custom.map((binding) => binding.command));
+  const retainedDefaults = DEFAULT_RESOLVED_KEYBINDINGS.filter(
+    (binding) => !overriddenCommands.has(binding.command),
+  );
+  const merged = [...retainedDefaults, ...custom];
+
+  if (merged.length <= MAX_KEYBINDINGS_COUNT) {
+    return merged;
+  }
+
+  return merged.slice(-MAX_KEYBINDINGS_COUNT);
+}

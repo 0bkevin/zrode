@@ -355,6 +355,14 @@ export function isTerminalSplitShortcut(
   return matchesCommandShortcut(event, keybindings, "terminal.split", options);
 }
 
+export function isTerminalSplitDownShortcut(
+  event: ShortcutEventLike,
+  keybindings: ResolvedKeybindingsConfig,
+  options?: ShortcutMatchOptions,
+): boolean {
+  return matchesCommandShortcut(event, keybindings, "terminal.splitDown", options);
+}
+
 export function isTerminalNewShortcut(
   event: ShortcutEventLike,
   keybindings: ResolvedKeybindingsConfig,
@@ -393,6 +401,14 @@ export function isChatNewLocalShortcut(
   options?: ShortcutMatchOptions,
 ): boolean {
   return matchesCommandShortcut(event, keybindings, "chat.newLocal", options);
+}
+
+export function isChatNewTerminalShortcut(
+  event: ShortcutEventLike,
+  keybindings: ResolvedKeybindingsConfig,
+  options?: ShortcutMatchOptions,
+): boolean {
+  return matchesCommandShortcut(event, keybindings, "chat.newTerminal", options);
 }
 
 export function isOpenFavoriteEditorShortcut(

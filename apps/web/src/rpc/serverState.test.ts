@@ -148,6 +148,25 @@ describe("serverState", () => {
     expect(getServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
   });
 
+  it("merges current default keybindings into stale server snapshots", async () => {
+    serverApi.getConfig.mockResolvedValueOnce({
+      ...baseServerConfig,
+      keybindings: DEFAULT_RESOLVED_KEYBINDINGS.filter(
+        (binding) => binding.command !== "terminal.splitDown",
+      ),
+    });
+
+    const stop = startServerStateSync(serverApi);
+
+    await waitFor(() => {
+      expect(
+        getServerKeybindings().some((binding) => binding.command === "terminal.splitDown"),
+      ).toBe(true);
+    });
+
+    stop();
+  });
+
   it("bootstraps the server config snapshot and replays it to late subscribers", async () => {
     serverApi.getConfig.mockResolvedValueOnce(baseServerConfig);
 
