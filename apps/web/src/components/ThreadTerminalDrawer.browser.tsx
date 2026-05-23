@@ -175,6 +175,7 @@ async function mountTerminalViewport(props: {
       onAddTerminalContext={() => undefined}
       focusRequestId={0}
       autoFocus={false}
+      visible
       resizeEpoch={0}
       drawerHeight={320}
       keybindings={[]}
@@ -195,6 +196,7 @@ async function mountTerminalViewport(props: {
           onAddTerminalContext={() => undefined}
           focusRequestId={0}
           autoFocus={false}
+          visible
           resizeEpoch={0}
           drawerHeight={320}
           keybindings={[]}
