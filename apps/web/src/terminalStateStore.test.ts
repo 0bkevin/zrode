@@ -73,6 +73,7 @@ describe("terminalStateStore actions", () => {
       THREAD_REF,
     );
     expect(terminalState).toEqual({
+      entryPoint: "chat",
       terminalOpen: false,
       terminalHeight: 280,
       terminalIds: ["default"],
@@ -80,10 +81,13 @@ describe("terminalStateStore actions", () => {
       activeTerminalId: "default",
       terminalGroups: [{ id: "group-default", terminalIds: ["default"] }],
       activeTerminalGroupId: "group-default",
+      terminalLayout: { type: "leaf", groupId: "group-default" },
+      terminalPanesVisible: false,
+      terminalGroupSplitLayout: "columns",
     });
   });
 
-  it("opens and splits terminals into the active group", () => {
+  it("splits a single terminal into a new pane with a fresh terminal", () => {
     const store = useTerminalStateStore.getState();
     store.setTerminalOpen(THREAD_REF, true);
     store.splitTerminal(THREAD_REF, "terminal-2");
@@ -95,17 +99,27 @@ describe("terminalStateStore actions", () => {
     expect(terminalState.terminalOpen).toBe(true);
     expect(terminalState.terminalIds).toEqual(["default", "terminal-2"]);
     expect(terminalState.activeTerminalId).toBe("terminal-2");
+    expect(terminalState.terminalPanesVisible).toBe(true);
+    expect(terminalState.activeTerminalGroupId).toBe("group-terminal-2");
     expect(terminalState.terminalGroups).toEqual([
-      { id: "group-default", terminalIds: ["default", "terminal-2"] },
+      { id: "group-default", terminalIds: ["default"] },
+      { id: "group-terminal-2", terminalIds: ["terminal-2"] },
     ]);
+    expect(terminalState.terminalLayout).toEqual({
+      type: "split",
+      direction: "columns",
+      first: { type: "leaf", groupId: "group-default" },
+      second: { type: "leaf", groupId: "group-terminal-2" },
+      ratio: 0.5,
+    });
   });
 
-  it("caps splits at four terminals per group", () => {
+  it("caps new terminal tabs at four terminals per group", () => {
     const store = useTerminalStateStore.getState();
-    store.splitTerminal(THREAD_REF, "terminal-2");
-    store.splitTerminal(THREAD_REF, "terminal-3");
-    store.splitTerminal(THREAD_REF, "terminal-4");
-    store.splitTerminal(THREAD_REF, "terminal-5");
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.newTerminal(THREAD_REF, "terminal-3");
+    store.newTerminal(THREAD_REF, "terminal-4");
+    store.newTerminal(THREAD_REF, "terminal-5");
 
     const terminalState = selectThreadTerminalState(
       useTerminalStateStore.getState().terminalStateByThreadKey,
@@ -118,11 +132,16 @@ describe("terminalStateStore actions", () => {
       "terminal-4",
     ]);
     expect(terminalState.terminalGroups).toEqual([
-      { id: "group-default", terminalIds: ["default", "terminal-2", "terminal-3", "terminal-4"] },
+      {
+        id: "group-default",
+        terminalIds: ["default", "terminal-2", "terminal-3", "terminal-4"],
+        activeTerminalId: "terminal-4",
+        recentTerminalIds: ["terminal-2", "terminal-3", "terminal-4"],
+      },
     ]);
   });
 
-  it("creates new terminals in a separate group", () => {
+  it("creates new terminals as tabs in the active pane", () => {
     useTerminalStateStore.getState().newTerminal(THREAD_REF, "terminal-2");
 
     const terminalState = selectThreadTerminalState(
@@ -131,10 +150,166 @@ describe("terminalStateStore actions", () => {
     );
     expect(terminalState.terminalIds).toEqual(["default", "terminal-2"]);
     expect(terminalState.activeTerminalId).toBe("terminal-2");
-    expect(terminalState.activeTerminalGroupId).toBe("group-terminal-2");
+    expect(terminalState.activeTerminalGroupId).toBe("group-default");
+    expect(terminalState.terminalPanesVisible).toBe(false);
+    expect(terminalState.terminalGroups).toEqual([
+      {
+        id: "group-default",
+        terminalIds: ["default", "terminal-2"],
+        activeTerminalId: "terminal-2",
+      },
+    ]);
+  });
+
+  it("records row layout for down splits", () => {
+    const store = useTerminalStateStore.getState();
+    store.splitTerminal(THREAD_REF, "terminal-2", "rows");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
     expect(terminalState.terminalGroups).toEqual([
       { id: "group-default", terminalIds: ["default"] },
       { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+    ]);
+    expect(terminalState.terminalLayout).toEqual({
+      type: "split",
+      direction: "rows",
+      first: { type: "leaf", groupId: "group-default" },
+      second: { type: "leaf", groupId: "group-terminal-2" },
+      ratio: 0.5,
+    });
+  });
+
+  it("moves terminal tabs into side groups and records root drop orientation", () => {
+    const store = useTerminalStateStore.getState();
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.moveTerminal(THREAD_REF, "terminal-2", "default", "down");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalState.terminalIds).toEqual(["default", "terminal-2"]);
+    expect(terminalState.activeTerminalId).toBe("terminal-2");
+    expect(terminalState.activeTerminalGroupId).toBe("group-terminal-2");
+    expect(terminalState.terminalPanesVisible).toBe(true);
+    expect(terminalState.terminalGroupSplitLayout).toBe("rows");
+    expect(terminalState.terminalGroups).toEqual([
+      { id: "group-default", terminalIds: ["default"] },
+      { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+    ]);
+  });
+
+  it("places side-dropped terminal groups before or after the target side", () => {
+    const store = useTerminalStateStore.getState();
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.newTerminal(THREAD_REF, "terminal-3");
+    store.moveTerminal(THREAD_REF, "terminal-3", "default", "left");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalState.terminalGroupSplitLayout).toBe("columns");
+    expect(terminalState.terminalPanesVisible).toBe(true);
+    expect(terminalState.terminalIds).toEqual(["terminal-3", "default", "terminal-2"]);
+    expect(terminalState.terminalGroups).toEqual([
+      { id: "group-terminal-3", terminalIds: ["terminal-3"] },
+      {
+        id: "group-default",
+        terminalIds: ["default", "terminal-2"],
+        activeTerminalId: "terminal-2",
+      },
+    ]);
+  });
+
+  it("preserves nested split layout when side-dropping into an existing split", () => {
+    const store = useTerminalStateStore.getState();
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.newTerminal(THREAD_REF, "terminal-3");
+    store.moveTerminal(THREAD_REF, "terminal-2", "default", "right");
+    store.moveTerminal(THREAD_REF, "terminal-3", "default", "down");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+
+    expect(terminalState.terminalIds).toEqual(["default", "terminal-3", "terminal-2"]);
+    expect(terminalState.terminalLayout).toEqual({
+      type: "split",
+      direction: "columns",
+      ratio: 0.5,
+      first: {
+        type: "split",
+        direction: "rows",
+        ratio: 0.5,
+        first: { type: "leaf", groupId: "group-default" },
+        second: { type: "leaf", groupId: "group-terminal-3" },
+      },
+      second: { type: "leaf", groupId: "group-terminal-2" },
+    });
+  });
+
+  it("updates nested terminal split ratios by layout path", () => {
+    const store = useTerminalStateStore.getState();
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.newTerminal(THREAD_REF, "terminal-3");
+    store.moveTerminal(THREAD_REF, "terminal-2", "default", "right");
+    store.moveTerminal(THREAD_REF, "terminal-3", "default", "down");
+    store.setTerminalLayoutRatio(THREAD_REF, "first", 0.3);
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+
+    expect(
+      terminalState.terminalLayout.type === "split" &&
+        terminalState.terminalLayout.first.type === "split"
+        ? terminalState.terminalLayout.first.ratio
+        : null,
+    ).toBe(0.3);
+  });
+
+  it("splits a terminal out of its current group on side drops", () => {
+    const store = useTerminalStateStore.getState();
+    store.splitTerminal(THREAD_REF, "terminal-2");
+    store.moveTerminal(THREAD_REF, "terminal-2", "default", "right");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalState.terminalIds).toEqual(["default", "terminal-2"]);
+    expect(terminalState.activeTerminalGroupId).toBe("group-terminal-2");
+    expect(terminalState.terminalPanesVisible).toBe(true);
+    expect(terminalState.terminalGroups).toEqual([
+      { id: "group-default", terminalIds: ["default"] },
+      { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+    ]);
+  });
+
+  it("reorders terminal tabs in their group on center drops", () => {
+    const store = useTerminalStateStore.getState();
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.newTerminal(THREAD_REF, "terminal-3");
+    store.moveTerminal(THREAD_REF, "terminal-3", "default", "center");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalState.terminalIds).toEqual(["default", "terminal-3", "terminal-2"]);
+    expect(terminalState.terminalGroups).toEqual([
+      {
+        id: "group-default",
+        terminalIds: ["default", "terminal-3", "terminal-2"],
+        activeTerminalId: "terminal-3",
+        recentTerminalIds: ["terminal-2", "terminal-3"],
+      },
     ]);
   });
 
@@ -150,8 +325,11 @@ describe("terminalStateStore actions", () => {
     expect(terminalState.terminalIds).toEqual(["default", "setup-setup"]);
     expect(terminalState.activeTerminalId).toBe("setup-setup");
     expect(terminalState.terminalGroups).toEqual([
-      { id: "group-default", terminalIds: ["default"] },
-      { id: "group-setup-setup", terminalIds: ["setup-setup"] },
+      {
+        id: "group-default",
+        terminalIds: ["default", "setup-setup"],
+        activeTerminalId: "setup-setup",
+      },
     ]);
   });
 
@@ -204,6 +382,7 @@ describe("terminalStateStore actions", () => {
     expect(migrated).toEqual({
       terminalStateByThreadKey: {
         [scopedThreadKey(THREAD_REF)]: {
+          entryPoint: "chat",
           terminalOpen: true,
           terminalHeight: 320,
           terminalIds: ["default"],
@@ -211,8 +390,117 @@ describe("terminalStateStore actions", () => {
           activeTerminalId: "default",
           terminalGroups: [{ id: "group-default", terminalIds: ["default"] }],
           activeTerminalGroupId: "group-default",
+          terminalLayout: { type: "leaf", groupId: "group-default" },
+          terminalPanesVisible: false,
+          terminalGroupSplitLayout: "columns",
         },
       },
+    });
+  });
+
+  it("migrates legacy in-group split panes into layout groups", () => {
+    const migrated = migratePersistedTerminalStateStoreState(
+      {
+        terminalStateByThreadKey: {
+          [scopedThreadKey(THREAD_REF)]: {
+            terminalOpen: true,
+            terminalHeight: 320,
+            terminalIds: ["default", "terminal-2"],
+            runningTerminalIds: [],
+            activeTerminalId: "terminal-2",
+            terminalGroups: [{ id: "group-default", terminalIds: ["default", "terminal-2"] }],
+            activeTerminalGroupId: "group-default",
+            terminalPanesVisible: true,
+            terminalGroupSplitLayout: "rows",
+          },
+        },
+      },
+      4,
+    );
+
+    expect(migrated.terminalStateByThreadKey?.[scopedThreadKey(THREAD_REF)]).toMatchObject({
+      terminalGroups: [
+        { id: "group-default", terminalIds: ["default"] },
+        { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+      ],
+      terminalLayout: {
+        type: "split",
+        direction: "rows",
+        first: { type: "leaf", groupId: "group-default" },
+        second: { type: "leaf", groupId: "group-terminal-2" },
+      },
+      terminalPanesVisible: true,
+    });
+  });
+
+  it("migrates legacy unsplit groups into tabs in one pane", () => {
+    const migrated = migratePersistedTerminalStateStoreState(
+      {
+        terminalStateByThreadKey: {
+          [scopedThreadKey(THREAD_REF)]: {
+            terminalOpen: true,
+            terminalHeight: 320,
+            terminalIds: ["default", "terminal-2"],
+            runningTerminalIds: [],
+            activeTerminalId: "terminal-2",
+            terminalGroups: [
+              { id: "group-default", terminalIds: ["default"] },
+              { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+            ],
+            activeTerminalGroupId: "group-terminal-2",
+            terminalPanesVisible: false,
+          },
+        },
+      },
+      4,
+    );
+
+    expect(migrated.terminalStateByThreadKey?.[scopedThreadKey(THREAD_REF)]).toMatchObject({
+      terminalGroups: [
+        {
+          id: "group-default",
+          terminalIds: ["default", "terminal-2"],
+          activeTerminalId: "terminal-2",
+        },
+      ],
+      activeTerminalGroupId: "group-default",
+      terminalLayout: { type: "leaf", groupId: "group-default" },
+      terminalPanesVisible: false,
+    });
+  });
+
+  it("returns a stable normalized object for legacy in-memory terminal state", () => {
+    const legacyState = {
+      terminalOpen: true,
+      terminalHeight: 320,
+      terminalIds: ["default", "terminal-2"],
+      runningTerminalIds: [],
+      activeTerminalId: "terminal-2",
+      terminalGroups: [
+        { id: "group-default", terminalIds: ["default"] },
+        { id: "group-terminal-2", terminalIds: ["terminal-2"] },
+      ],
+      activeTerminalGroupId: "group-terminal-2",
+    };
+    const terminalStateByThreadKey = {
+      [scopedThreadKey(THREAD_REF)]: legacyState as never,
+    };
+
+    const first = selectThreadTerminalState(terminalStateByThreadKey, THREAD_REF);
+    const second = selectThreadTerminalState(terminalStateByThreadKey, THREAD_REF);
+
+    expect(first).toBe(second);
+    expect(first).toMatchObject({
+      entryPoint: "chat",
+      terminalLayout: {
+        direction: "columns",
+        first: { groupId: "group-default", type: "leaf" },
+        ratio: 0.5,
+        second: { groupId: "group-terminal-2", type: "leaf" },
+        type: "split",
+      },
+      terminalPanesVisible: false,
+      terminalGroupSplitLayout: "columns",
     });
   });
 
@@ -251,6 +539,20 @@ describe("terminalStateStore actions", () => {
     ).toEqual(["default"]);
   });
 
+  it("keeps terminal thread surfaces open when closing their last terminal", () => {
+    const store = useTerminalStateStore.getState();
+    store.openTerminalThreadPage(THREAD_REF);
+    store.closeTerminal(THREAD_REF, "default");
+
+    const terminalState = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalState.entryPoint).toBe("terminal");
+    expect(terminalState.terminalOpen).toBe(true);
+    expect(terminalState.terminalIds).toEqual(["default"]);
+  });
+
   it("keeps a valid active terminal after closing an active split terminal", () => {
     const store = useTerminalStateStore.getState();
     store.splitTerminal(THREAD_REF, "terminal-2");
@@ -264,7 +566,8 @@ describe("terminalStateStore actions", () => {
     expect(terminalState.activeTerminalId).toBe("terminal-2");
     expect(terminalState.terminalIds).toEqual(["default", "terminal-2"]);
     expect(terminalState.terminalGroups).toEqual([
-      { id: "group-default", terminalIds: ["default", "terminal-2"] },
+      { id: "group-default", terminalIds: ["default"] },
+      { id: "group-terminal-2", terminalIds: ["terminal-2"] },
     ]);
   });
 

@@ -1909,6 +1909,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     useTerminalStateStore.setState({
       terminalStateByThreadKey: {
         [THREAD_KEY]: {
+          entryPoint: "chat",
           terminalOpen: true,
           terminalHeight: 280,
           terminalIds: ["default"],
@@ -1916,6 +1917,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
           activeTerminalId: "default",
           terminalGroups: [{ id: "group-default", terminalIds: ["default"] }],
           activeTerminalGroupId: "group-default",
+          terminalLayout: { type: "leaf", groupId: "group-default" },
+          terminalPanesVisible: false,
+          terminalGroupSplitLayout: "columns",
         },
       },
       terminalLaunchContextByThreadKey: {

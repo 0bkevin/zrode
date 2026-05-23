@@ -26,10 +26,25 @@ export const DEFAULT_THREAD_TERMINAL_HEIGHT = 280;
 export const DEFAULT_THREAD_TERMINAL_ID = "default";
 export const MAX_TERMINALS_PER_GROUP = 4;
 export type ProjectScript = ContractProjectScript;
+export type ThreadTerminalSplitLayout = "columns" | "rows";
+export type ThreadTerminalDropZone = "center" | "left" | "right" | "up" | "down";
+
+export type ThreadTerminalLayoutNode =
+  | { type: "leaf"; groupId: string }
+  | {
+      type: "split";
+      direction: ThreadTerminalSplitLayout;
+      first: ThreadTerminalLayoutNode;
+      second: ThreadTerminalLayoutNode;
+      ratio?: number;
+    };
 
 export interface ThreadTerminalGroup {
   id: string;
   terminalIds: string[];
+  activeTerminalId?: string | null;
+  recentTerminalIds?: string[];
+  splitLayout?: ThreadTerminalSplitLayout;
 }
 
 export interface ChatImageAttachment {
