@@ -180,7 +180,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
                 isSymlink: entry.isSymbolicLink(),
               };
             })
-            .sort((left, right) => {
+            .toSorted((left, right) => {
               if (left.kind !== right.kind) {
                 return left.kind === "directory" ? -1 : 1;
               }
