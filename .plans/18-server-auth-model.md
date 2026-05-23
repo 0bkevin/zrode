@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the long-term server auth architecture for T3 Code before first-class remote environments ship.
+Define the long-term server auth architecture for Zrode before first-class remote environments ship.
 
 This plan is deliberately broader than the current WebSocket token check and narrower than a complete remote collaboration system. The goal is to make the server secure by default, keep local desktop UX frictionless, and leave clean integration points for future remote access methods.
 
@@ -29,7 +29,7 @@ This document is written in terms of Effect-native services and layers because a
 
 ### 1. Auth is a server concern
 
-Every privileged surface of the T3 server must go through the same auth policy engine:
+Every privileged surface of the Zrode server must go through the same auth policy engine:
 
 - HTTP routes
 - WebSocket upgrades
@@ -291,7 +291,7 @@ export interface ServerAuthShape {
 }
 
 export class ServerAuth extends ServiceMap.Service<ServerAuth, ServerAuthShape>()(
-  "t3/ServerAuth",
+  "zrode/ServerAuth",
 ) {}
 ```
 
@@ -571,7 +571,7 @@ T3Server -> T3Server : validate cookie session
 T3Server --> Frontend : websocket accepted
 ```
 
-### `npx t3` user
+### `npx zrode` user
 
 This is the standalone local server flow.
 
@@ -579,7 +579,7 @@ There is no trusted desktop shell here, so pairing should be explicit.
 
 ```text
 Participants:
-  UserShell     = npx t3 launcher
+  UserShell     = npx zrode launcher
   T3Server      = standalone local server
   Browser       = browser tab
 
@@ -619,12 +619,12 @@ Participants:
   DesktopUser   = user at the host machine
   DesktopMain   = desktop app
   Tunnel        = tunnel provider
-  T3Server      = T3 server
+  T3Server      = Zrode server
   PhoneBrowser  = mobile browser
 
 DesktopUser -> DesktopMain : enable remote access via tunnel
 DesktopMain -> T3Server : switch policy to RemoteReachablePolicy
-DesktopMain -> Tunnel : publish local T3 endpoint
+DesktopMain -> Tunnel : publish local Zrode endpoint
 Tunnel --> DesktopMain : public https/wss URL
 
 DesktopMain -> T3Server : issue one-time pairing token
@@ -653,7 +653,7 @@ The auth flow should stay the same.
 ```text
 Participants:
   DesktopUser   = user at the host machine
-  T3Server      = T3 server
+  T3Server      = Zrode server
   PrivateNet    = tailscale / private LAN
   PhoneBrowser  = mobile browser
 
@@ -687,35 +687,35 @@ Participants:
   DesktopMain   = desktop app
   SSH           = ssh transport/session
   RemoteHost    = remote machine
-  RemoteT3      = remote T3 server
+  RemoteZrode      = remote Zrode server
   Frontend      = desktop renderer
 
 DesktopUser -> DesktopMain : add SSH host
 DesktopMain -> SSH : connect to remote host
-SSH -> RemoteHost : probe environment / verify t3 availability
+SSH -> RemoteHost : probe environment / verify zrode availability
 DesktopMain -> SSH : run remote launch command
-SSH -> RemoteHost : t3 remote launch --json
-RemoteHost -> RemoteT3 : start or reuse server
-RemoteT3 --> RemoteHost : port + environment metadata
+SSH -> RemoteHost : zrode remote launch --json
+RemoteHost -> RemoteZrode : start or reuse server
+RemoteZrode --> RemoteHost : port + environment metadata
 RemoteHost --> SSH : launch result JSON
 SSH --> DesktopMain : remote server details
 
 DesktopMain -> SSH : establish local port forward
 SSH --> DesktopMain : localhost:FORWARDED_PORT ready
 
-note over RemoteT3 : policy = RemoteReachablePolicy
-note over DesktopMain,RemoteT3 : desktop may use a trusted bootstrap flow here
+note over RemoteZrode : policy = RemoteReachablePolicy
+note over DesktopMain,RemoteZrode : desktop may use a trusted bootstrap flow here
 
 Frontend -> DesktopMain : request bootstrap for selected environment
 DesktopMain --> Frontend : short-lived bootstrap grant
 
-Frontend -> RemoteT3 : POST /api/auth/bootstrap via forwarded port
-RemoteT3 -> RemoteT3 : validate bootstrap grant
-RemoteT3 -> RemoteT3 : create browser session
-RemoteT3 --> Frontend : Set-Cookie: session=...
+Frontend -> RemoteZrode : POST /api/auth/bootstrap via forwarded port
+RemoteZrode -> RemoteZrode : validate bootstrap grant
+RemoteZrode -> RemoteZrode : create browser session
+RemoteZrode --> Frontend : Set-Cookie: session=...
 
-Frontend -> RemoteT3 : GET /ws + authenticated cookie
-RemoteT3 --> Frontend : websocket accepted
+Frontend -> RemoteZrode : GET /ws + authenticated cookie
+RemoteZrode --> Frontend : websocket accepted
 ```
 
 ## Storage decisions
@@ -779,7 +779,7 @@ Remote access is one reason this auth model matters, but the auth model should n
 
 Keep the design focused on:
 
-- one T3 server
+- one Zrode server
 - one auth policy
 - multiple credential types
 - multiple future access methods
