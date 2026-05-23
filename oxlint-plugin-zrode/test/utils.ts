@@ -82,17 +82,17 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
   const run: RuleHarness["run"] = Effect.fnUntraced(function* (source: string) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const fixtureDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-oxlint-" });
+    const fixtureDir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-oxlint-" });
     const configPath = path.join(fixtureDir, ".oxlintrc.json");
     const sourcePath = path.join(fixtureDir, "fixture.ts");
     const repoRoot = path.join(import.meta.dirname, "..", "..");
     const oxlintBin = path.join(repoRoot, "node_modules", ".bin", "oxlint");
-    const pluginPath = path.join(repoRoot, "oxlint-plugin-t3code", "index.ts");
+    const pluginPath = path.join(repoRoot, "oxlint-plugin-zrode", "index.ts");
 
     yield* fs.writeFileString(
       configPath,
       yield* encodeOxlintConfig({
-        jsPlugins: [{ name: "t3code", specifier: pluginPath }],
+        jsPlugins: [{ name: "zrode", specifier: pluginPath }],
         rules: { [ruleName]: "error" },
       }),
     );
