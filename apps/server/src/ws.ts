@@ -24,6 +24,7 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
+  ProjectFileSystemError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   OrchestrationReplayEventsError,
@@ -32,7 +33,7 @@ import {
   type TerminalEvent,
   WS_METHODS,
   WsRpcGroup,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import { clamp } from "effect/Number";
 import { HttpRouter, HttpServerRequest } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
@@ -56,7 +57,10 @@ import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
 import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries.ts";
-import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem.ts";
+import {
+  WorkspaceFileSystem,
+  WorkspaceFileSystemError,
+} from "./workspace/Services/WorkspaceFileSystem.ts";
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths.ts";
 import { VcsStatusBroadcaster } from "./vcs/VcsStatusBroadcaster.ts";
 import { VcsProvisioningService } from "./vcs/VcsProvisioningService.ts";
@@ -90,6 +94,7 @@ import {
 import { respondToAuthError } from "./auth/http.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
+const isWorkspaceFileSystemError = Schema.is(WorkspaceFileSystemError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -197,6 +202,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const serverCommandId = (tag: string) =>
         CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
+
+      const mapWorkspaceFileSystemError = (cause: unknown) => {
+        const message = isWorkspacePathOutsideRootError(cause)
+          ? "Workspace file path must stay within the project root."
+          : isWorkspaceFileSystemError(cause)
+            ? cause.detail
+            : "Failed to access workspace filesystem";
+        return new ProjectFileSystemError({
+          message,
+          cause,
+        });
+      };
 
       const loadAuthAccessSnapshot = () =>
         Effect.all({
@@ -963,6 +980,24 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             ),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.projectsReadDir]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsReadDir,
+            workspaceFileSystem.readDir(input).pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsReadFile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsReadFile,
+            workspaceFileSystem.readFile(input).pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsStatPath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsStatPath,
+            workspaceFileSystem.statPath(input).pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
         [WS_METHODS.projectsWriteFile]: (input) =>
           observeRpcEffect(
             WS_METHODS.projectsWriteFile,
@@ -977,6 +1012,44 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                 });
               }),
             ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCreateFile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateFile,
+            workspaceFileSystem
+              .createFile(input)
+              .pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCreateDirectory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateDirectory,
+            workspaceFileSystem
+              .createDirectory(input)
+              .pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsRenamePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsRenamePath,
+            workspaceFileSystem
+              .renamePath(input)
+              .pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCopyPath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCopyPath,
+            workspaceFileSystem.copyPath(input).pipe(Effect.mapError(mapWorkspaceFileSystemError)),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsDeletePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsDeletePath,
+            workspaceFileSystem
+              .deletePath(input)
+              .pipe(Effect.mapError(mapWorkspaceFileSystemError)),
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.shellOpenInEditor]: (input) =>
