@@ -1,14 +1,14 @@
 {
-  "name": "t3",
+  "name": "zrode",
   "version": "0.0.24",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pingdotgg/t3code",
+    "url": "https://github.com/pingdotgg/zrode",
     "directory": "apps/server"
   },
   "bin": {
-    "t3": "./dist/bin.mjs"
+    "zrode": "./dist/bin.mjs"
   },
   "files": [
     "dist"
@@ -36,12 +36,12 @@
   "devDependencies": {
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/tailscale": "workspace:*",
-    "@t3tools/web": "workspace:*",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
+    "@zrode/contracts": "workspace:*",
+    "@zrode/shared": "workspace:*",
+    "@zrode/tailscale": "workspace:*",
+    "@zrode/web": "workspace:*",
     "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
     "tsdown": "catalog:",

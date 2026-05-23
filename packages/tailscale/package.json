@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/tailscale",
+  "name": "@zrode/tailscale",
   "private": true,
   "type": "module",
   "exports": {

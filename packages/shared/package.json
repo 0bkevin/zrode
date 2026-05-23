@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/shared",
+  "name": "@zrode/shared",
   "private": true,
   "type": "module",
   "exports": {
@@ -97,7 +97,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
+    "@zrode/contracts": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/ssh",
+  "name": "@zrode/ssh",
   "private": true,
   "type": "module",
   "exports": {
@@ -29,8 +29,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@zrode/contracts": "workspace:*",
+    "@zrode/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {
