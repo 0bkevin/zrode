@@ -1,6 +1,6 @@
-import type { DesktopSshPasswordPromptRequest } from "@t3tools/contracts";
-import { DesktopSshPasswordPromptResolutionInputSchema } from "@t3tools/contracts";
-import type { SshPasswordRequest } from "@t3tools/ssh/auth";
+import type { DesktopSshPasswordPromptRequest } from "@zrode/contracts";
+import { DesktopSshPasswordPromptResolutionInputSchema } from "@zrode/contracts";
+import type { SshPasswordRequest } from "@zrode/ssh/auth";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
@@ -16,7 +16,7 @@ import * as IpcChannels from "../ipc/channels.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 
 const DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS = 3 * 60 * 1000;
-const WINDOW_UNAVAILABLE_MESSAGE = "T3 Code window is not available for SSH authentication.";
+const WINDOW_UNAVAILABLE_MESSAGE = "Zrode window is not available for SSH authentication.";
 
 type DesktopSshPasswordPromptResolutionInput =
   typeof DesktopSshPasswordPromptResolutionInputSchema.Type;
@@ -129,7 +129,7 @@ export interface DesktopSshPasswordPromptsShape {
 export class DesktopSshPasswordPrompts extends Context.Service<
   DesktopSshPasswordPrompts,
   DesktopSshPasswordPromptsShape
->()("t3/desktop/SshPasswordPrompts") {}
+>()("zrode/desktop/SshPasswordPrompts") {}
 
 interface PendingSshPasswordPrompt {
   readonly requestId: string;

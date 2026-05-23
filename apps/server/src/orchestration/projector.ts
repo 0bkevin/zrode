@@ -1,10 +1,10 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@zrode/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 

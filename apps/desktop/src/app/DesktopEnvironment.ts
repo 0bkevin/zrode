@@ -3,7 +3,7 @@ import type {
   DesktopAppStageLabel,
   DesktopRuntimeArch,
   DesktopRuntimeInfo,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -56,7 +56,7 @@ export interface DesktopEnvironmentShape {
   readonly preloadPath: string;
   readonly appUpdateYmlPath: string;
   readonly devServerUrl: Option.Option<URL>;
-  readonly devRemoteT3ServerEntryPath: Option.Option<string>;
+  readonly devRemoteZrodeServerEntryPath: Option.Option<string>;
   readonly configuredBackendPort: Option.Option<number>;
   readonly commitHashOverride: Option.Option<string>;
   readonly otlpTracesUrl: Option.Option<string>;
@@ -78,9 +78,9 @@ export interface DesktopEnvironmentShape {
 export class DesktopEnvironment extends Context.Service<
   DesktopEnvironment,
   DesktopEnvironmentShape
->()("t3/desktop/Environment") {}
+>()("zrode/desktop/Environment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = "Zrode";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -151,7 +151,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3"));
+  const baseDir = Option.getOrElse(config.zrodeHome, () => path.join(homeDirectory, ".zrode"));
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
@@ -160,8 +160,8 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   });
   const displayName = branding.displayName;
   const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  const userDataDirName = isDevelopment ? "zrode-dev" : "zrode";
+  const legacyUserDataDirName = isDevelopment ? "Zrode (Dev)" : "Zrode (Alpha)";
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -192,16 +192,16 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       ? path.join(resourcesPath, "app-update.yml")
       : path.join(input.appPath, "dev-app-update.yml"),
     devServerUrl,
-    devRemoteT3ServerEntryPath: config.devRemoteT3ServerEntryPath,
+    devRemoteZrodeServerEntryPath: config.devRemoteZrodeServerEntryPath,
     configuredBackendPort: config.configuredBackendPort,
     commitHashOverride: config.commitHashOverride,
     otlpTracesUrl: config.otlpTracesUrl,
     otlpExportIntervalMs: config.otlpExportIntervalMs,
     branding,
     displayName,
-    appUserModelId: isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    appUserModelId: isDevelopment ? "com.zrode.zrode.dev" : "com.zrode.zrode",
+    linuxDesktopEntryName: isDevelopment ? "zrode-dev.desktop" : "zrode.desktop",
+    linuxWmClass: isDevelopment ? "zrode-dev" : "zrode",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: resolveDefaultDesktopSettings(input.appVersion),

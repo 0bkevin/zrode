@@ -16,7 +16,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -24,7 +24,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker } from "@zrode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -55,7 +55,7 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
-const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.ZRODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,

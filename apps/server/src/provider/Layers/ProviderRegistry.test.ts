@@ -22,13 +22,13 @@ import {
   type ServerProvider,
   type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as PlatformError from "effect/PlatformError";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { deepMerge } from "@t3tools/shared/Struct";
-import { createModelCapabilities } from "@t3tools/shared/model";
-import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
+import { deepMerge } from "@zrode/shared/Struct";
+import { createModelCapabilities } from "@zrode/shared/model";
+import { applyServerSettingsPatch } from "@zrode/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
@@ -59,7 +59,7 @@ const disabledCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({
   enabled: false,
 });
 
-process.env.T3CODE_CURSOR_ENABLED = "1";
+process.env.ZRODE_CURSOR_ENABLED = "1";
 
 // ── Test helpers ────────────────────────────────────────────────────
 
@@ -732,7 +732,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               Layer.provideMerge(instanceRegistryLayer),
               Layer.provideMerge(
                 ServerConfig.layerTest(process.cwd(), {
-                  prefix: "t3-provider-registry-merged-persist-",
+                  prefix: "zrode-provider-registry-merged-persist-",
                 }),
               ),
               Layer.provideMerge(NodeServices.layer),
@@ -826,7 +826,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               Layer.provideMerge(instanceRegistryLayer),
               Layer.provideMerge(
                 ServerConfig.layerTest(process.cwd(), {
-                  prefix: "t3-provider-registry-refresh-failure-",
+                  prefix: "zrode-provider-registry-refresh-failure-",
                 }),
               ),
               Layer.provideMerge(NodeServices.layer),
@@ -930,7 +930,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               Layer.provideMerge(instanceRegistryLayer),
               Layer.provideMerge(
                 ServerConfig.layerTest(process.cwd(), {
-                  prefix: "t3-provider-registry-sync-failure-",
+                  prefix: "zrode-provider-registry-sync-failure-",
                 }),
               ),
               Layer.provideMerge(NodeServices.layer),
@@ -979,7 +979,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       // assertions below fail.
       it.effect("propagates real Codex probe failures to the aggregator at boot", () =>
         Effect.gen(function* () {
-          const missingBinary = `t3code_codex_missing_`;
+          const missingBinary = `zrode_codex_missing_`;
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
@@ -1000,7 +1000,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 // accepts + decodes them. Cast the patch to `unknown` so
                 // the `Schema.decodeSync` below does the real validation.
                 providerInstances: {
-                  // Matches the shape the user had in `.t3/dev/settings.json`
+                  // Matches the shape the user had in `.zrode/dev/settings.json`
                   // when the bug was reported: a custom enabled Codex instance
                   // pointing at a binary the server has to actually spawn.
                   codex_personal: {
@@ -1023,7 +1023,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
             Layer.provideMerge(
               ServerConfig.layerTest(process.cwd(), {
-                prefix: "t3-provider-registry-",
+                prefix: "zrode-provider-registry-",
               }),
             ),
             Layer.provideMerge(TestHttpClientLive),
@@ -1077,8 +1077,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       //
       it.effect("re-probes when settings change the codex binaryPath", () =>
         Effect.gen(function* () {
-          const firstMissing = `t3code_codex_first_`;
-          const secondMissing = `t3code_codex_second_`;
+          const firstMissing = `zrode_codex_first_`;
+          const secondMissing = `zrode_codex_second_`;
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
@@ -1098,7 +1098,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
             Layer.provideMerge(
               ServerConfig.layerTest(process.cwd(), {
-                prefix: "t3-provider-registry-",
+                prefix: "zrode-provider-registry-",
               }),
             ),
             Layer.provideMerge(TestHttpClientLive),
@@ -1201,7 +1201,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
             Layer.provideMerge(
               ServerConfig.layerTest(process.cwd(), {
-                prefix: "t3-provider-registry-",
+                prefix: "zrode-provider-registry-",
               }),
             ),
             Layer.provideMerge(TestHttpClientLive),
@@ -1252,7 +1252,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
               Layer.provideMerge(
                 ServerConfig.layerTest(process.cwd(), {
-                  prefix: "t3-provider-registry-",
+                  prefix: "zrode-provider-registry-",
                 }),
               ),
               Layer.provideMerge(TestHttpClientLive),
@@ -1304,10 +1304,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);
               assert.strictEqual(cursorProvider?.status, "disabled");
-              assert.strictEqual(
-                cursorProvider?.message,
-                "Cursor is disabled in T3 Code settings.",
-              );
+              assert.strictEqual(cursorProvider?.message, "Cursor is disabled in Zrode settings.");
               assert.strictEqual(cursorSpawned, false);
             }).pipe(Effect.provide(runtimeServices));
           }),
@@ -1321,7 +1318,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.enabled, false);
           assert.strictEqual(status.status, "disabled");
           assert.strictEqual(status.installed, false);
-          assert.strictEqual(status.message, "Codex is disabled in T3 Code settings.");
+          assert.strictEqual(status.message, "Codex is disabled in Zrode settings.");
         }),
       );
     });
@@ -1527,7 +1524,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       );
 
       it.effect("runs Claude status probes with the configured Claude HOME", () => {
-        const claudeHome = "/tmp/t3code-claude-home";
+        const claudeHome = "/tmp/zrode-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {
           const joined = args.join(" ");
           if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };

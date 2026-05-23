@@ -4,8 +4,8 @@ import type {
   ProviderInstanceId,
   ServerSettings,
   UnifiedSettings,
-} from "@t3tools/contracts";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+} from "@zrode/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@zrode/contracts/settings";
 
 function collapseOtelSignalsUrl(input: {
   readonly tracesUrl: string;

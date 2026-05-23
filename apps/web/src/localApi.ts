@@ -1,4 +1,4 @@
-import type { ContextMenuItem, LocalApi } from "@t3tools/contracts";
+import type { ContextMenuItem, LocalApi } from "@zrode/contracts";
 
 import { resetGitStatusStateForTests } from "./lib/gitStatusState";
 import { resetSourceControlDiscoveryStateForTests } from "./lib/sourceControlDiscoveryState";

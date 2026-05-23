@@ -6,10 +6,10 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import { createModelSelection } from "@t3tools/shared/model";
+import { createModelSelection } from "@zrode/shared/model";
 import { expect } from "vitest";
 
-import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
+import { CodexSettings, ProviderInstanceId, TextGenerationError } from "@zrode/contracts";
 
 import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
@@ -22,7 +22,7 @@ const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
 );
 
 const CodexTextGenerationTestLayer = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3code-codex-text-generation-test-",
+  prefix: "zrode-codex-text-generation-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 function makeFakeCodexBinary(
@@ -142,9 +142,9 @@ function makeFakeCodexBinary(
             ]
           : []),
         'if [ -n "$output_path" ]; then',
-        "  cat > \"$output_path\" <<'__T3CODE_FAKE_CODEX_OUTPUT__'",
+        "  cat > \"$output_path\" <<'__ZRODE_FAKE_CODEX_OUTPUT__'",
         input.output,
-        "__T3CODE_FAKE_CODEX_OUTPUT__",
+        "__ZRODE_FAKE_CODEX_OUTPUT__",
         "fi",
         `exit ${input.exitCode ?? 0}`,
         "",
@@ -171,7 +171,7 @@ function withFakeCodexEnv<A, E, R>(
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-codex-text-" });
+    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-codex-text-" });
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
     const config = decodeCodexSettings({ binaryPath: codexPath });
     const textGeneration = yield* makeCodexTextGeneration(config);

@@ -79,6 +79,12 @@ export const makeWorkspacePaths = Effect.gen(function* () {
 
       const absolutePath = path.resolve(input.workspaceRoot, normalizedInputPath);
       const relativeToRoot = toPosixRelativePath(path.relative(input.workspaceRoot, absolutePath));
+      if (input.allowRoot === true && (relativeToRoot.length === 0 || relativeToRoot === ".")) {
+        return {
+          absolutePath,
+          relativePath: "",
+        };
+      }
       if (
         relativeToRoot.length === 0 ||
         relativeToRoot === "." ||

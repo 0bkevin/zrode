@@ -451,7 +451,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "zeditor"), "#!/bin/sh\nexit 0\n");
       yield* fs.chmod(path.join(dir, "zeditor"), 0o755);
 
@@ -651,7 +651,7 @@ it.layer(NodeServices.layer)("launchEditorProcess", (it) => {
     Effect.gen(function* () {
       const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {});
       const result = yield* launchEditorProcess({
-        command: `t3code-no-such-command-${yield* Random.nextUUIDv4}`,
+        command: `zrode-no-such-command-${yield* Random.nextUUIDv4}`,
         args: [],
       }).pipe(Effect.provide(spawnerLayer), Effect.result);
       assert.equal(result._tag, "Failure");
@@ -664,7 +664,7 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "code.CMD"), "@echo off\r\n");
       const env = {
         PATH: dir,
@@ -686,7 +686,7 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "npm"), "echo nope\r\n");
       const env = {
         PATH: dir,
@@ -700,7 +700,7 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "my.tool.CMD"), "@echo off\r\n");
       const env = {
         PATH: dir,
@@ -714,8 +714,12 @@ it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const firstDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
-      const secondDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
+      const firstDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "zrode-external-launcher-test-",
+      });
+      const secondDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "zrode-external-launcher-test-",
+      });
       yield* fs.writeFileString(path.join(firstDir, "code.CMD"), "@echo off\r\n");
       yield* fs.writeFileString(path.join(secondDir, "code.CMD"), "MZ");
       const env = {
@@ -732,7 +736,7 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-editors-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-editors-" });
 
       yield* fs.writeFileString(path.join(dir, "trae.CMD"), "@echo off\r\n");
       yield* fs.writeFileString(path.join(dir, "kiro.CMD"), "@echo off\r\n");
@@ -779,7 +783,7 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-editors-" });
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-editors-" });
 
       yield* fs.writeFileString(path.join(dir, "zeditor"), "#!/bin/sh\nexit 0\n");
       yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");

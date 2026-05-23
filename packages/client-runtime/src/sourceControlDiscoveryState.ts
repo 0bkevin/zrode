@@ -1,4 +1,4 @@
-import type { SourceControlDiscoveryResult } from "@t3tools/contracts";
+import type { SourceControlDiscoveryResult } from "@zrode/contracts";
 import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
 /* --- Types ---------------------------------------------------------- */

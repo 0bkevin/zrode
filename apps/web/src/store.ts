@@ -17,11 +17,11 @@ import type {
   ProjectId,
   ScopedProjectRef,
   ScopedThreadRef,
-} from "@t3tools/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@t3tools/contracts";
-import type { ThreadId, TurnId } from "@t3tools/contracts";
+} from "@zrode/contracts";
+import { isProviderDriverKind, ProviderDriverKind } from "@zrode/contracts";
+import type { ThreadId, TurnId } from "@zrode/contracts";
 import * as Schema from "effect/Schema";
-import { resolveModelSlugForProvider } from "@t3tools/shared/model";
+import { resolveModelSlugForProvider } from "@zrode/shared/model";
 import { create } from "zustand";
 import {
   type ChatMessage,

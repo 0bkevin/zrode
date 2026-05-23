@@ -16,7 +16,7 @@ import {
   type ServerProcessResourceHistoryResult,
   type ServerProvider,
   type SourceControlDiscoveryResult,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
@@ -221,13 +221,13 @@ function createBaseServerConfig(): ServerConfig {
       sessionCookieName: "t3_session",
     },
     cwd: "/repo/project",
-    keybindingsConfigPath: "/repo/project/.t3code-keybindings.json",
+    keybindingsConfigPath: "/repo/project/.zrode-keybindings.json",
     keybindings: [],
     issues: [],
     providers: [],
     availableEditors: ["cursor"],
     observability: {
-      logsDirectoryPath: "/repo/project/.t3/logs",
+      logsDirectoryPath: "/repo/project/.zrode/logs",
       localTracingEnabled: true,
       otlpTracesUrl: "http://localhost:4318/v1/traces",
       otlpTracesEnabled: true,
@@ -981,7 +981,7 @@ describe("GeneralSettingsPanel observability", () => {
     await networkAccessToggle.click();
     await expect.element(page.getByText("Enable network access?")).toBeInTheDocument();
     await expect
-      .element(page.getByText("T3 Code will restart to expose this environment over the network."))
+      .element(page.getByText("Zrode will restart to expose this environment over the network."))
       .toBeInTheDocument();
     await page.getByRole("button", { name: "Restart and enable", exact: true }).click();
     await vi.waitFor(() => {
@@ -1084,8 +1084,8 @@ describe("GeneralSettingsPanel observability", () => {
           .fn()
           .mockResolvedValue(createEmptyProcessResourceHistoryResult()),
         getTraceDiagnostics: vi.fn().mockResolvedValue({
-          traceFilePath: "/repo/project/.t3/traces.jsonl",
-          scannedFilePaths: ["/repo/project/.t3/traces.jsonl"],
+          traceFilePath: "/repo/project/.zrode/traces.jsonl",
+          scannedFilePaths: ["/repo/project/.zrode/traces.jsonl"],
           readAt: makeUtc("2036-04-07T00:00:00.000Z"),
           recordCount: 0,
           parseErrorCount: 0,
@@ -1118,7 +1118,7 @@ describe("GeneralSettingsPanel observability", () => {
     const openLogsButton = page.getByLabelText("Open logs folder");
     await openLogsButton.click();
 
-    expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3/logs", "cursor");
+    expect(openInEditor).toHaveBeenCalledWith("/repo/project/.zrode/logs", "cursor");
   });
 
   it("shows an OpenCode server URL field in provider settings", async () => {
@@ -1179,7 +1179,7 @@ describe("GeneralSettingsPanel observability", () => {
 
   it("keeps long provider update commands inside the fixed-width popover", async () => {
     const longUpdateCommand =
-      "npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmjs.org --cache=/tmp/t3code-provider-update-cache";
+      "npm install -g @anthropic-ai/claude-code@latest --registry=https://registry.npmjs.org --cache=/tmp/zrode-provider-update-cache";
 
     setServerConfigSnapshot({
       ...createBaseServerConfig(),

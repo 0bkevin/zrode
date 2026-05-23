@@ -4,8 +4,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
-} from "@t3tools/contracts";
-import { createModelCapabilities } from "@t3tools/shared/model";
+} from "@zrode/contracts";
+import { createModelCapabilities } from "@zrode/shared/model";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -45,7 +45,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
   it.effect("writes and reads provider status snapshots", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-provider-cache-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-provider-cache-" });
       const codexProvider = makeProvider(CODEX_DRIVER);
       const claudeProvider = makeProvider(CLAUDE_AGENT_DRIVER, {
         status: "warning",
@@ -159,7 +159,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       version: null,
       status: "disabled",
       auth: { status: "unknown" },
-      message: "Codex is disabled in T3 Code settings.",
+      message: "Codex is disabled in Zrode settings.",
     });
 
     assert.deepStrictEqual(

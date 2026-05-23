@@ -89,6 +89,7 @@ export interface WorkspacePathsShape {
   readonly resolveRelativePathWithinRoot: (input: {
     workspaceRoot: string;
     relativePath: string;
+    allowRoot?: boolean;
   }) => Effect.Effect<
     { absolutePath: string; relativePath: string },
     WorkspacePathOutsideRootError
@@ -99,5 +100,5 @@ export interface WorkspacePathsShape {
  * WorkspacePaths - Service tag for workspace path normalization and resolution.
  */
 export class WorkspacePaths extends Context.Service<WorkspacePaths, WorkspacePathsShape>()(
-  "t3/workspace/Services/WorkspacePaths",
+  "zrode/workspace/Services/WorkspacePaths",
 ) {}

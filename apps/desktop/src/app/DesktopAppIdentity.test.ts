@@ -19,9 +19,9 @@ const defaultEnvironmentInput = {
   platform: "darwin",
   processArch: "arm64",
   appVersion: "1.2.3",
-  appPath: "/Applications/T3 Code.app/Contents/Resources/app.asar",
+  appPath: "/Applications/Zrode.app/Contents/Resources/app.asar",
   isPackaged: true,
-  resourcesPath: "/Applications/T3 Code.app/Contents/Resources",
+  resourcesPath: "/Applications/Zrode.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -38,7 +38,7 @@ interface ElectronAppCalls {
 const makeElectronAppLayer = (calls: ElectronAppCalls) =>
   Layer.succeed(ElectronApp.ElectronApp, {
     metadata: Effect.die("unexpected metadata read"),
-    name: Effect.succeed("T3 Code"),
+    name: Effect.succeed("Zrode"),
     whenReady: Effect.void,
     quit: Effect.void,
     exit: () => Effect.void,
@@ -118,9 +118,9 @@ const withIdentity = <A, E, R>(
         Layer.provideMerge(
           FileSystem.layerNoop({
             exists: (path) =>
-              Effect.succeed(input.legacyPathExists === true && path.includes("T3 Code (Alpha)")),
+              Effect.succeed(input.legacyPathExists === true && path.includes("Zrode (Alpha)")),
             readFileString: () =>
-              Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
+              Effect.succeed(input.packageJson ?? '{"zrodeCommitHash":"abcdef1234567890"}'),
           }),
         ),
         Layer.provideMerge(makeAssetsLayer(input.pngIconPath ?? Option.none())),
@@ -138,7 +138,7 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/T3 Code (Alpha)");
+        assert.equal(userDataPath, "/Users/alice/Library/Application Support/Zrode (Alpha)");
       }),
       { legacyPathExists: true },
     ),
@@ -156,8 +156,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["T3 Code (Alpha)"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Alpha)");
+        assert.deepEqual(calls.setName, ["Zrode (Alpha)"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Zrode (Alpha)");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         assert.deepEqual(calls.setDockIcon, ["/icon.png"]);
@@ -166,7 +166,7 @@ describe("DesktopAppIdentity", () => {
         calls,
         environment: {
           env: {
-            T3CODE_COMMIT_HASH: "0123456789abcdef",
+            ZRODE_COMMIT_HASH: "0123456789abcdef",
           },
         },
         pngIconPath: Option.some("/icon.png"),

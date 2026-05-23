@@ -12,10 +12,10 @@ import {
   type ServerProvider,
   type TerminalEvent,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem } from "@zrode/contracts";
 
 const showContextMenuFallbackMock =
   vi.fn<

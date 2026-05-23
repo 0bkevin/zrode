@@ -1,8 +1,4 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  ProviderDriverKind,
-  ProviderInstanceId,
-} from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ProviderDriverKind, ProviderInstanceId } from "@zrode/contracts";
 import { describe, expect, it } from "vitest";
 import { createModelSelection } from "./model.ts";
 import {

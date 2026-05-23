@@ -13,7 +13,7 @@ import { SecretStoreError, ServerSecretStore } from "../Services/ServerSecretSto
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 
 const makeServerConfigLayer = () =>
-  ServerConfig.layerTest(process.cwd(), { prefix: "t3-secret-store-test-" });
+  ServerConfig.layerTest(process.cwd(), { prefix: "zrode-secret-store-test-" });
 
 const makeServerSecretStoreLayer = () =>
   Layer.provide(ServerSecretStoreLive, makeServerConfigLayer());

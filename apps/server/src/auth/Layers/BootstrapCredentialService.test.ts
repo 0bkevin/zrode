@@ -24,7 +24,7 @@ const makeServerConfigLayer = (
       } satisfies ServerConfigShape;
     }),
   ).pipe(
-    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-bootstrap-test-" })),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "zrode-auth-bootstrap-test-" })),
   );
 
 const makeBootstrapCredentialLayer = (

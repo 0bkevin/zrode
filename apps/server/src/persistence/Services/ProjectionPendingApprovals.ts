@@ -13,7 +13,7 @@ import {
   ProjectionPendingApprovalStatus,
   ThreadId,
   TurnId,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
@@ -90,4 +90,4 @@ export interface ProjectionPendingApprovalRepositoryShape {
 export class ProjectionPendingApprovalRepository extends Context.Service<
   ProjectionPendingApprovalRepository,
   ProjectionPendingApprovalRepositoryShape
->()("t3/persistence/Services/ProjectionPendingApprovals/ProjectionPendingApprovalRepository") {}
+>()("zrode/persistence/Services/ProjectionPendingApprovals/ProjectionPendingApprovalRepository") {}

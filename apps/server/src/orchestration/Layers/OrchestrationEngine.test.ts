@@ -8,7 +8,7 @@ import {
   TurnId,
   type OrchestrationEvent,
   ProviderInstanceId,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -46,7 +46,7 @@ const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(val
 
 async function createOrchestrationSystem() {
   const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
-    prefix: "t3-orchestration-engine-test-",
+    prefix: "zrode-orchestration-engine-test-",
   });
   const orchestrationLayer = Layer.mergeAll(
     OrchestrationEngineLive.pipe(
@@ -608,7 +608,7 @@ describe("OrchestrationEngine", () => {
         threadId: ThreadId.make("thread-turn-diff"),
         turnId: asTurnId("turn-1"),
         completedAt: createdAt,
-        checkpointRef: asCheckpointRef("refs/t3/checkpoints/thread-turn-diff/turn/1"),
+        checkpointRef: asCheckpointRef("refs/zrode/checkpoints/thread-turn-diff/turn/1"),
         status: "ready",
         files: [],
         checkpointTurnCount: 1,
@@ -623,7 +623,7 @@ describe("OrchestrationEngine", () => {
       {
         turnId: asTurnId("turn-1"),
         checkpointTurnCount: 1,
-        checkpointRef: asCheckpointRef("refs/t3/checkpoints/thread-turn-diff/turn/1"),
+        checkpointRef: asCheckpointRef("refs/zrode/checkpoints/thread-turn-diff/turn/1"),
         status: "ready",
         files: [],
         assistantMessageId: null,
@@ -670,7 +670,7 @@ describe("OrchestrationEngine", () => {
     };
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
-      prefix: "t3-orchestration-engine-test-",
+      prefix: "zrode-orchestration-engine-test-",
     });
 
     const runtime = ManagedRuntime.make(

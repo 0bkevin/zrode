@@ -3,13 +3,13 @@ import * as NodeOS from "node:os";
 import {
   createAdvertisedEndpoint,
   type CreateAdvertisedEndpointInput,
-} from "@t3tools/shared/advertisedEndpoint";
+} from "@zrode/shared/advertisedEndpoint";
 import type {
   AdvertisedEndpoint,
   AdvertisedEndpointProvider,
   DesktopServerExposureMode,
   DesktopServerExposureState,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -275,7 +275,7 @@ export interface DesktopServerExposureShape {
 export class DesktopServerExposure extends Context.Service<
   DesktopServerExposure,
   DesktopServerExposureShape
->()("t3/desktop/ServerExposure") {}
+>()("zrode/desktop/ServerExposure") {}
 
 export interface DesktopNetworkInterfacesServiceShape {
   readonly read: Effect.Effect<DesktopNetworkInterfaces>;
@@ -284,7 +284,7 @@ export interface DesktopNetworkInterfacesServiceShape {
 export class DesktopNetworkInterfacesService extends Context.Service<
   DesktopNetworkInterfacesService,
   DesktopNetworkInterfacesServiceShape
->()("t3/desktop/ServerExposure/NetworkInterfaces") {}
+>()("zrode/desktop/ServerExposure/NetworkInterfaces") {}
 
 interface RuntimeState {
   readonly requestedMode: DesktopServerExposureMode;

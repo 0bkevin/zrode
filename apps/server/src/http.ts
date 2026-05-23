@@ -1,5 +1,5 @@
 import Mime from "@effect/platform-node/Mime";
-import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import { decodeOtlpTraceRecords } from "@zrode/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -69,7 +69,7 @@ const requireAuthenticatedRequest = Effect.gen(function* () {
 
 export const serverEnvironmentRouteLayer = HttpRouter.add(
   "GET",
-  "/.well-known/t3/environment",
+  "/.well-known/zrode/environment",
   Effect.gen(function* () {
     const descriptor = yield* Effect.service(ServerEnvironment).pipe(
       Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),

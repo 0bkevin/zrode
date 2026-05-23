@@ -9,7 +9,7 @@ export interface DesktopStateShape {
 }
 
 export class DesktopState extends Context.Service<DesktopState, DesktopStateShape>()(
-  "t3/desktop/State",
+  "zrode/desktop/State",
 ) {}
 
 export const layer = Layer.effect(

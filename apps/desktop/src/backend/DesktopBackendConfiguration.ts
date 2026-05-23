@@ -1,4 +1,4 @@
-import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
+import { parsePersistedServerObservabilitySettings } from "@zrode/shared/serverSettings";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -19,7 +19,7 @@ export interface DesktopBackendConfigurationShape {
 export class DesktopBackendConfiguration extends Context.Service<
   DesktopBackendConfiguration,
   DesktopBackendConfigurationShape
->()("t3/desktop/BackendConfiguration") {}
+>()("zrode/desktop/BackendConfiguration") {}
 
 interface BackendObservabilitySettings {
   readonly otlpTracesUrl: Option.Option<string>;
@@ -32,16 +32,16 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
-  "T3CODE_PORT",
-  "T3CODE_MODE",
-  "T3CODE_NO_BROWSER",
-  "T3CODE_HOST",
-  "T3CODE_DESKTOP_WS_URL",
-  "T3CODE_DESKTOP_LAN_ACCESS",
-  "T3CODE_DESKTOP_LAN_HOST",
-  "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
-  "T3CODE_TAILSCALE_SERVE",
-  "T3CODE_TAILSCALE_SERVE_PORT",
+  "ZRODE_PORT",
+  "ZRODE_MODE",
+  "ZRODE_NO_BROWSER",
+  "ZRODE_HOST",
+  "ZRODE_DESKTOP_WS_URL",
+  "ZRODE_DESKTOP_LAN_ACCESS",
+  "ZRODE_DESKTOP_LAN_HOST",
+  "ZRODE_DESKTOP_HTTPS_ENDPOINTS",
+  "ZRODE_TAILSCALE_SERVE",
+  "ZRODE_TAILSCALE_SERVE_PORT",
 ] as const;
 
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
@@ -122,7 +122,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         mode: "desktop",
         noBrowser: true,
         port: backendExposure.port,
-        t3Home: environment.baseDir,
+        zrodeHome: environment.baseDir,
         host: backendExposure.bindHost,
         desktopBootstrapToken: input.bootstrapToken,
         tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,

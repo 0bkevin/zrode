@@ -2,7 +2,7 @@ import type {
   VcsStatusLocalResult,
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
-} from "@t3tools/contracts";
+} from "@zrode/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./wsTransport", () => ({

@@ -77,7 +77,7 @@ function makeEnvironmentLayer(baseDir: string, env: Record<string, string | unde
     runningUnderArm64Translation: false,
   }).pipe(
     Layer.provide(
-      Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ T3CODE_HOME: baseDir, ...env })),
+      Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ ZRODE_HOME: baseDir, ...env })),
     ),
   );
 }
@@ -87,7 +87,7 @@ function makeLayer(input: {
   readonly networkInterfaces?: DesktopNetworkInterfaces;
   readonly env?: Record<string, string | undefined>;
 }) {
-  const env = { T3CODE_HOME: input.baseDir, ...input.env };
+  const env = { ZRODE_HOME: input.baseDir, ...input.env };
   const environmentLayer = makeEnvironmentLayer(input.baseDir, env);
   const networkLayer = Layer.succeed(DesktopServerExposure.DesktopNetworkInterfacesService, {
     read: Effect.succeed(input.networkInterfaces ?? emptyNetworkInterfaces),
@@ -120,7 +120,7 @@ const withHarness = <A, E, R>(
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-      prefix: "t3-desktop-server-exposure-test-",
+      prefix: "zrode-desktop-server-exposure-test-",
     });
     return yield* effect.pipe(Effect.provide(makeLayer({ baseDir, networkInterfaces, env })));
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
@@ -257,8 +257,8 @@ describe("DesktopServerExposure", () => {
         );
       }),
       {
-        T3CODE_DESKTOP_LAN_HOST: "10.0.0.7",
-        T3CODE_DESKTOP_HTTPS_ENDPOINTS: "https://public.example.test",
+        ZRODE_DESKTOP_LAN_HOST: "10.0.0.7",
+        ZRODE_DESKTOP_HTTPS_ENDPOINTS: "https://public.example.test",
       },
     ),
   );
@@ -357,7 +357,7 @@ describe("DesktopServerExposure", () => {
         ]);
       }),
       {
-        T3CODE_DESKTOP_HTTPS_ENDPOINTS:
+        ZRODE_DESKTOP_HTTPS_ENDPOINTS:
           "https://desktop.example.ts.net,http://desktop.example.test:3773,not-a-url",
       },
     ),

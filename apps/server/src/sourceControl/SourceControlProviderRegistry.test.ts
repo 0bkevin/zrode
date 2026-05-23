@@ -67,9 +67,9 @@ function makeRegistry(input: {
         Layer.mock(GitHubCli.GitHubCli)({}),
         Layer.mock(GitLabCli.GitLabCli)({}),
         Layer.mock(VcsProcess.VcsProcess)({}),
-        ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-control-registry-test-" }).pipe(
-          Layer.provide(NodeServices.layer),
-        ),
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "zrode-source-control-registry-test-",
+        }).pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
   );
@@ -78,7 +78,7 @@ function makeRegistry(input: {
 it.effect("routes GitHub remotes to the GitHub provider", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "git@github.com:pingdotgg/t3code.git" }],
+      remotes: [{ name: "origin", url: "git@github.com:pingdotgg/zrode.git" }],
     });
 
     const provider = yield* registry.resolve({ cwd: "/repo" });
@@ -114,7 +114,7 @@ it.effect("routes GitLab remotes to the GitLab provider", () =>
 it.effect("routes Bitbucket remotes to the Bitbucket provider", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "git@bitbucket.org:pingdotgg/t3code.git" }],
+      remotes: [{ name: "origin", url: "git@bitbucket.org:pingdotgg/zrode.git" }],
     });
 
     const provider = yield* registry.resolve({ cwd: "/repo" });

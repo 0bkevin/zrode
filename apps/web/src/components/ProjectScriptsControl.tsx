@@ -1,8 +1,4 @@
-import type {
-  ProjectScript,
-  ProjectScriptIcon,
-  ResolvedKeybindingsConfig,
-} from "@t3tools/contracts";
+import type { ProjectScript, ProjectScriptIcon, ResolvedKeybindingsConfig } from "@zrode/contracts";
 import {
   BugIcon,
   ChevronDownIcon,

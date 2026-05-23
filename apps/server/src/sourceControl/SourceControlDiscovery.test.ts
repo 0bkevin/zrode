@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { VcsProcessSpawnError } from "@t3tools/contracts";
+import { VcsProcessSpawnError } from "@zrode/contracts";
 
 import { ServerConfig } from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -23,9 +23,9 @@ const sourceControlProviderRegistryTestLayer = (input: {
   SourceControlProviderRegistry.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-control-registry-test-" }).pipe(
-          Layer.provide(NodeServices.layer),
-        ),
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "zrode-source-control-registry-test-",
+        }).pipe(Layer.provide(NodeServices.layer)),
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
         Layer.mock(BitbucketApi.BitbucketApi)(input.bitbucket),
         Layer.mock(GitHubCli.GitHubCli)({}),
@@ -82,7 +82,7 @@ Logged in to github.com account juliusmarminge (keyring)
   } satisfies Partial<VcsProcess.VcsProcessShape>;
   const testLayer = SourceControlDiscovery.layer.pipe(
     Layer.provide(
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-control-discovery-" }),
+      ServerConfig.layerTest(process.cwd(), { prefix: "zrode-source-control-discovery-" }),
     ),
     Layer.provide(Layer.mock(VcsProcess.VcsProcess)(processMock)),
     Layer.provide(
@@ -94,7 +94,7 @@ Logged in to github.com account juliusmarminge (keyring)
             account: Option.none(),
             host: Option.some("bitbucket.org"),
             detail: Option.some(
-              "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
+              "Set ZRODE_BITBUCKET_EMAIL and ZRODE_BITBUCKET_API_TOKEN, or ZRODE_BITBUCKET_ACCESS_TOKEN.",
             ),
           }),
         },
@@ -198,7 +198,7 @@ Logged in to gitlab.com as gitlab-user
   } satisfies Partial<VcsProcess.VcsProcessShape>;
   const testLayer = SourceControlDiscovery.layer.pipe(
     Layer.provide(
-      ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-control-auth-discovery-" }),
+      ServerConfig.layerTest(process.cwd(), { prefix: "zrode-source-control-auth-discovery-" }),
     ),
     Layer.provide(Layer.mock(VcsProcess.VcsProcess)(processMock)),
     Layer.provide(

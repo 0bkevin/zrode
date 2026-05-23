@@ -6,8 +6,8 @@ import {
   ProjectId,
   ThreadId,
   ProviderInstanceId,
-} from "@t3tools/contracts";
-import { createModelSelection } from "@t3tools/shared/model";
+} from "@zrode/contracts";
+import { createModelSelection } from "@zrode/shared/model";
 import { describe, expect, it } from "vitest";
 import * as Effect from "effect/Effect";
 

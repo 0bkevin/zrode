@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem } from "@zrode/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -33,7 +33,7 @@ export interface ElectronMenuShape {
 }
 
 export class ElectronMenu extends Context.Service<ElectronMenu, ElectronMenuShape>()(
-  "t3/desktop/electron/Menu",
+  "zrode/desktop/electron/Menu",
 ) {}
 
 function normalizeContextMenuItems(source: readonly ContextMenuItem[]): ContextMenuItem[] {

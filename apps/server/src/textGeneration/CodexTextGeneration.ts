@@ -8,13 +8,13 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { type CodexSettings, type ModelSelection } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { type CodexSettings, type ModelSelection } from "@zrode/contracts";
+import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@zrode/shared/git";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
-import { TextGenerationError } from "@t3tools/contracts";
+import { TextGenerationError } from "@zrode/contracts";
 import {
   type BranchNameGenerationInput,
   type ThreadTitleGenerationResult,
@@ -36,7 +36,7 @@ import {
 import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
-} from "@t3tools/shared/model";
+} from "@zrode/shared/model";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
@@ -82,7 +82,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       const tempFileId = yield* Random.nextUUIDv4;
       return yield* fileSystem
         .makeTempFileScoped({
-          prefix: `t3code-${prefix}-${process.pid}-${tempFileId}.tmp`,
+          prefix: `zrode-${prefix}-${process.pid}-${tempFileId}.tmp`,
         })
         .pipe(Effect.tap((filePath) => fileSystem.writeFileString(filePath, content)));
     }).pipe(

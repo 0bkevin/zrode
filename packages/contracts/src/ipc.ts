@@ -22,6 +22,17 @@ import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem
 import type {
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
+  ProjectCopyPathInput,
+  ProjectCreatePathInput,
+  ProjectDeletePathInput,
+  ProjectPathResult,
+  ProjectReadDirInput,
+  ProjectReadDirResult,
+  ProjectReadFileInput,
+  ProjectReadFileResult,
+  ProjectRenamePathInput,
+  ProjectStatInput,
+  ProjectStatResult,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "./project.ts";
@@ -505,7 +516,15 @@ export interface EnvironmentApi {
   };
   projects: {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
+    readDir: (input: ProjectReadDirInput) => Promise<ProjectReadDirResult>;
+    readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
+    statPath: (input: ProjectStatInput) => Promise<ProjectStatResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
+    createFile: (input: ProjectCreatePathInput) => Promise<ProjectPathResult>;
+    createDirectory: (input: ProjectCreatePathInput) => Promise<ProjectPathResult>;
+    renamePath: (input: ProjectRenamePathInput) => Promise<ProjectPathResult>;
+    copyPath: (input: ProjectCopyPathInput) => Promise<ProjectPathResult>;
+    deletePath: (input: ProjectDeletePathInput) => Promise<ProjectPathResult>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;

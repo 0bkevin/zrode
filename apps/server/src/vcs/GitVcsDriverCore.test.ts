@@ -7,12 +7,12 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 
-import { GitCommandError } from "@t3tools/contracts";
+import { GitCommandError } from "@zrode/contracts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-git-vcs-driver-test-",
+  prefix: "zrode-git-vcs-driver-test-",
 });
 const TestLayer = GitVcsDriver.layer.pipe(
   Layer.provide(ServerConfigLayer),
@@ -141,13 +141,13 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const sshWrapperPath = pathService.join(tempDir, "ssh-wrapper.sh");
         const previousGitSsh = process.env.GIT_SSH;
         const previousAskpassRequire = process.env.SSH_ASKPASS_REQUIRE;
-        const previousAskpassLog = process.env.T3_TEST_SSH_ASKPASS_LOG;
+        const previousAskpassLog = process.env.ZRODE_TEST_SSH_ASKPASS_LOG;
 
         yield* fileSystem.writeFileString(
           sshWrapperPath,
           [
             "#!/bin/sh",
-            'printf "%s\\n" "${SSH_ASKPASS_REQUIRE:-}" > "$T3_TEST_SSH_ASKPASS_LOG"',
+            'printf "%s\\n" "${SSH_ASKPASS_REQUIRE:-}" > "$ZRODE_TEST_SSH_ASKPASS_LOG"',
             "exit 1",
             "",
           ].join("\n"),
@@ -160,7 +160,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* Effect.gen(function* () {
           process.env.GIT_SSH = sshWrapperPath;
           process.env.SSH_ASKPASS_REQUIRE = "force";
-          process.env.T3_TEST_SSH_ASKPASS_LOG = sshLogPath;
+          process.env.ZRODE_TEST_SSH_ASKPASS_LOG = sshLogPath;
 
           yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
 
@@ -179,9 +179,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
                 process.env.SSH_ASKPASS_REQUIRE = previousAskpassRequire;
               }
               if (previousAskpassLog === undefined) {
-                delete process.env.T3_TEST_SSH_ASKPASS_LOG;
+                delete process.env.ZRODE_TEST_SSH_ASKPASS_LOG;
               } else {
-                process.env.T3_TEST_SSH_ASKPASS_LOG = previousAskpassLog;
+                process.env.ZRODE_TEST_SSH_ASKPASS_LOG = previousAskpassLog;
               }
             }),
           ),
