@@ -1,4 +1,4 @@
-import type { EnvironmentId, EnvironmentApi } from "@t3tools/contracts";
+import type { EnvironmentId, EnvironmentApi } from "@zrode/contracts";
 
 import type { WsRpcClient } from "./rpc/wsRpcClient";
 import { readEnvironmentConnection } from "./environments/runtime";
@@ -18,7 +18,15 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
     },
     projects: {
       searchEntries: rpcClient.projects.searchEntries,
+      readDir: rpcClient.projects.readDir,
+      readFile: rpcClient.projects.readFile,
+      statPath: rpcClient.projects.statPath,
       writeFile: rpcClient.projects.writeFile,
+      createFile: rpcClient.projects.createFile,
+      createDirectory: rpcClient.projects.createDirectory,
+      renamePath: rpcClient.projects.renamePath,
+      copyPath: rpcClient.projects.copyPath,
+      deletePath: rpcClient.projects.deletePath,
     },
     filesystem: {
       browse: rpcClient.filesystem.browse,

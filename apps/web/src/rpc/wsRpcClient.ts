@@ -8,8 +8,8 @@ import {
   ORCHESTRATION_WS_METHODS,
   type ServerSettingsPatch,
   WS_METHODS,
-} from "@t3tools/contracts";
-import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
+} from "@zrode/contracts";
+import { applyGitStatusStreamEvent } from "@zrode/shared/git";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
@@ -68,7 +68,15 @@ export interface WsRpcClient {
   };
   readonly projects: {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
+    readonly readDir: RpcUnaryMethod<typeof WS_METHODS.projectsReadDir>;
+    readonly readFile: RpcUnaryMethod<typeof WS_METHODS.projectsReadFile>;
+    readonly statPath: RpcUnaryMethod<typeof WS_METHODS.projectsStatPath>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
+    readonly createFile: RpcUnaryMethod<typeof WS_METHODS.projectsCreateFile>;
+    readonly createDirectory: RpcUnaryMethod<typeof WS_METHODS.projectsCreateDirectory>;
+    readonly renamePath: RpcUnaryMethod<typeof WS_METHODS.projectsRenamePath>;
+    readonly copyPath: RpcUnaryMethod<typeof WS_METHODS.projectsCopyPath>;
+    readonly deletePath: RpcUnaryMethod<typeof WS_METHODS.projectsDeletePath>;
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
@@ -179,8 +187,23 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     projects: {
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
+      readDir: (input) => transport.request((client) => client[WS_METHODS.projectsReadDir](input)),
+      readFile: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsReadFile](input)),
+      statPath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsStatPath](input)),
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
+      createFile: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsCreateFile](input)),
+      createDirectory: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsCreateDirectory](input)),
+      renamePath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsRenamePath](input)),
+      copyPath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsCopyPath](input)),
+      deletePath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsDeletePath](input)),
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),
