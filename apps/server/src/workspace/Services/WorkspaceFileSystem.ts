@@ -10,7 +10,21 @@ import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
-import type { ProjectWriteFileInput, ProjectWriteFileResult } from "@t3tools/contracts";
+import type {
+  ProjectCopyPathInput,
+  ProjectCreatePathInput,
+  ProjectDeletePathInput,
+  ProjectPathResult,
+  ProjectReadDirInput,
+  ProjectReadDirResult,
+  ProjectReadFileInput,
+  ProjectReadFileResult,
+  ProjectRenamePathInput,
+  ProjectStatInput,
+  ProjectStatResult,
+  ProjectWriteFileInput,
+  ProjectWriteFileResult,
+} from "@zrode/contracts";
 import { WorkspacePathOutsideRootError } from "./WorkspacePaths.ts";
 
 export class WorkspaceFileSystemError extends Schema.TaggedErrorClass<WorkspaceFileSystemError>()(
@@ -28,6 +42,24 @@ export class WorkspaceFileSystemError extends Schema.TaggedErrorClass<WorkspaceF
  * WorkspaceFileSystemShape - Service API for workspace-relative file operations.
  */
 export interface WorkspaceFileSystemShape {
+  readonly readDir: (
+    input: ProjectReadDirInput,
+  ) => Effect.Effect<
+    ProjectReadDirResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  readonly readFile: (
+    input: ProjectReadFileInput,
+  ) => Effect.Effect<
+    ProjectReadFileResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  readonly statPath: (
+    input: ProjectStatInput,
+  ) => Effect.Effect<ProjectStatResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
+
   /**
    * Write a file relative to the workspace root.
    *
@@ -40,6 +72,26 @@ export interface WorkspaceFileSystemShape {
     ProjectWriteFileResult,
     WorkspaceFileSystemError | WorkspacePathOutsideRootError
   >;
+
+  readonly createFile: (
+    input: ProjectCreatePathInput,
+  ) => Effect.Effect<ProjectPathResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
+
+  readonly createDirectory: (
+    input: ProjectCreatePathInput,
+  ) => Effect.Effect<ProjectPathResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
+
+  readonly renamePath: (
+    input: ProjectRenamePathInput,
+  ) => Effect.Effect<ProjectPathResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
+
+  readonly copyPath: (
+    input: ProjectCopyPathInput,
+  ) => Effect.Effect<ProjectPathResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
+
+  readonly deletePath: (
+    input: ProjectDeletePathInput,
+  ) => Effect.Effect<ProjectPathResult, WorkspaceFileSystemError | WorkspacePathOutsideRootError>;
 }
 
 /**
@@ -48,4 +100,4 @@ export interface WorkspaceFileSystemShape {
 export class WorkspaceFileSystem extends Context.Service<
   WorkspaceFileSystem,
   WorkspaceFileSystemShape
->()("t3/workspace/Services/WorkspaceFileSystem") {}
+>()("zrode/workspace/Services/WorkspaceFileSystem") {}
