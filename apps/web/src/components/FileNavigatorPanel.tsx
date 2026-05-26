@@ -610,18 +610,19 @@ function ExplorerRows(props: {
                 >
                   {entry.kind === "directory" ? (
                     expanded ? (
-                      <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
                     ) : (
-                      <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
                     )
                   ) : (
-                    <span className="size-3.5 shrink-0" />
+                    <span className="size-3 shrink-0" />
                   )}
                   <VscodeEntryIcon
                     pathValue={entry.relativePath}
                     kind={entry.kind}
                     theme={props.resolvedTheme}
-                    className="size-4 shrink-0"
+                    expanded={expanded}
+                    className="size-3 shrink-0"
                   />
                   <span className="min-w-0 flex-1 truncate">{entry.name}</span>
                   {directoryState?.loading ? (
@@ -781,12 +782,12 @@ function SearchPanel(props: {
                   }
                 }}
               >
-                <span className="size-3.5 shrink-0" />
+                <span className="size-3 shrink-0" />
                 <VscodeEntryIcon
                   pathValue={entry.path}
                   kind={entry.kind}
                   theme={props.resolvedTheme}
-                  className="size-4 shrink-0"
+                  className="size-3 shrink-0"
                 />
                 <span className="min-w-0 flex-1 truncate font-mono">{entry.path}</span>
               </button>
@@ -856,12 +857,12 @@ function SourceControlPanel(props: {
               className="flex h-7 w-full items-center gap-1.5 px-2 text-left text-xs hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
               onClick={() => props.onOpenFile(file.path)}
             >
-              <span className="size-3.5 shrink-0" />
+              <span className="size-3 shrink-0" />
               <VscodeEntryIcon
                 pathValue={file.path}
                 kind="file"
                 theme={props.resolvedTheme}
-                className="size-4 shrink-0"
+                className="size-3 shrink-0"
               />
               <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
               <span className="shrink-0 font-mono text-[10px] tabular-nums">

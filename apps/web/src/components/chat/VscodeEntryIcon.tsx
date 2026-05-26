@@ -1,37 +1,26 @@
-import { memo, useMemo, useState } from "react";
-import { getVscodeIconUrlForEntry } from "../../vscode-icons";
-import { FileIcon, FolderIcon } from "lucide-react";
+import { memo } from "react";
+import { FolderIcon, FolderOpenIcon } from "lucide-react";
+import { getFileTypeIcon } from "~/lib/fileTypeIcons";
 import { cn } from "~/lib/utils";
 
 export const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
   pathValue: string;
   kind: "file" | "directory";
-  theme: "light" | "dark";
+  theme?: "light" | "dark";
+  expanded?: boolean;
   className?: string;
 }) {
-  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
-  const iconUrl = useMemo(
-    () => getVscodeIconUrlForEntry(props.pathValue, props.kind, props.theme),
-    [props.kind, props.pathValue, props.theme],
-  );
-  const failed = failedIconUrl === iconUrl;
-
-  if (failed) {
-    return props.kind === "directory" ? (
-      <FolderIcon className={cn("size-4 text-muted-foreground/80", props.className)} />
-    ) : (
-      <FileIcon className={cn("size-4 text-muted-foreground/80", props.className)} />
-    );
-  }
+  const Icon =
+    props.kind === "directory"
+      ? props.expanded
+        ? FolderOpenIcon
+        : FolderIcon
+      : getFileTypeIcon(props.pathValue);
 
   return (
-    <img
-      src={iconUrl}
-      alt=""
+    <Icon
       aria-hidden="true"
-      className={cn("size-4 shrink-0", props.className)}
-      loading="lazy"
-      onError={() => setFailedIconUrl(iconUrl)}
+      className={cn("size-3.5 shrink-0 text-muted-foreground", props.className)}
     />
   );
 });

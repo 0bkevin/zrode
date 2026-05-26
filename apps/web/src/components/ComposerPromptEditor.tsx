@@ -63,7 +63,7 @@ import {
   type TerminalContextDraft,
 } from "~/lib/terminalContext";
 import { cn } from "~/lib/utils";
-import { basenameOfPath, getVscodeIconUrlForEntry, inferEntryKindFromPath } from "~/vscode-icons";
+import { basenameOfPath, inferEntryKindFromPath } from "~/vscode-icons";
 import {
   COMPOSER_INLINE_CHIP_CLASS_NAME,
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
@@ -72,6 +72,7 @@ import {
   SKILL_CHIP_ICON_SVG,
 } from "./composerInlineChip";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
+import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { formatProviderSkillDisplayName } from "~/providerSkillPresentation";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -128,7 +129,6 @@ const ComposerTerminalContextActionsContext = createContext<{
 });
 
 function ComposerMentionDecorator(props: { path: string }) {
-  const theme = resolvedThemeFromDocument();
   const chip = (
     <span
       className={COMPOSER_INLINE_CHIP_CLASS_NAME}
@@ -136,12 +136,10 @@ function ComposerMentionDecorator(props: { path: string }) {
       spellCheck={false}
       data-composer-mention-chip="true"
     >
-      <img
-        alt=""
-        aria-hidden="true"
+      <VscodeEntryIcon
+        pathValue={props.path}
+        kind={inferEntryKindFromPath(props.path)}
         className={COMPOSER_INLINE_CHIP_ICON_CLASS_NAME}
-        loading="lazy"
-        src={getVscodeIconUrlForEntry(props.path, inferEntryKindFromPath(props.path), theme)}
       />
       <span className={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}>{basenameOfPath(props.path)}</span>
     </span>
@@ -436,10 +434,6 @@ function isComposerInlineTokenNode(candidate: unknown): candidate is ComposerInl
     candidate instanceof ComposerSkillNode ||
     candidate instanceof ComposerTerminalContextNode
   );
-}
-
-function resolvedThemeFromDocument(): "light" | "dark" {
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
 }
 
 function terminalContextSignature(contexts: ReadonlyArray<TerminalContextDraft>): string {
