@@ -356,10 +356,10 @@ export const FileNavigatorPanel = memo(function FileNavigatorPanel({
   const canCollapseAll = expandedDirs.size > 1;
 
   return (
-    <aside className="flex h-full min-h-0 w-[min(380px,44vw)] min-w-[260px] max-w-[460px] shrink-0 border-l border-border bg-background text-foreground">
+    <aside className="flex h-full min-h-0 w-[min(380px,44vw)] min-w-[260px] max-w-[460px] shrink-0 border-l border-border/40 bg-background text-foreground">
       <ActivityBar activeTab={activeTab} onChange={setActiveTab} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-2">
+        <header className="flex h-12 shrink-0 items-center gap-1.5 border-b border-border/40 px-3">
           <PanelTitle activeTab={activeTab} workspaceName={workspaceName} />
           {activeTab === "explorer" ? (
             <>
@@ -369,6 +369,7 @@ export const FileNavigatorPanel = memo(function FileNavigatorPanel({
                     <Button
                       size="icon-xs"
                       variant="ghost"
+                      className="text-muted-foreground/60 hover:text-foreground"
                       aria-label="Collapse all folders"
                       disabled={!canCollapseAll}
                       onClick={collapseAll}
@@ -385,6 +386,7 @@ export const FileNavigatorPanel = memo(function FileNavigatorPanel({
                     <Button
                       size="icon-xs"
                       variant="ghost"
+                      className="text-muted-foreground/60 hover:text-foreground"
                       aria-label="Refresh explorer"
                       disabled={rootState?.loading === true}
                       onClick={refresh}
@@ -400,7 +402,12 @@ export const FileNavigatorPanel = memo(function FileNavigatorPanel({
               <DropdownMenu>
                 <DropdownMenuTrigger
                   render={
-                    <Button size="icon-xs" variant="ghost" aria-label="More explorer actions">
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      className="text-muted-foreground/60 hover:text-foreground"
+                      aria-label="More explorer actions"
+                    >
                       <MoreHorizontalIcon className="size-3.5" />
                     </Button>
                   }
@@ -422,13 +429,20 @@ export const FileNavigatorPanel = memo(function FileNavigatorPanel({
             <Button
               size="icon-xs"
               variant="ghost"
+              className="text-muted-foreground/60 hover:text-foreground"
               aria-label="Refresh source control"
               onClick={() => void refreshGitStatus({ environmentId, cwd: workspaceRoot })}
             >
               <RefreshCcwIcon className={cn("size-3.5", gitStatus.isPending && "animate-spin")} />
             </Button>
           ) : null}
-          <Button size="icon-xs" variant="ghost" aria-label="Close sidebar" onClick={onClose}>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="text-muted-foreground/60 hover:text-foreground"
+            aria-label="Close sidebar"
+            onClick={onClose}
+          >
             <PanelRightCloseIcon className="size-3.5" />
           </Button>
         </header>
@@ -498,7 +512,7 @@ function ActivityBar(props: {
   ];
 
   return (
-    <div className="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-border bg-muted/30 py-1.5">
+    <div className="flex w-12 shrink-0 flex-col items-center gap-2 border-r border-border/30 bg-background py-3">
       {items.map((item) => {
         const Icon = item.icon;
         return (
@@ -509,12 +523,12 @@ function ActivityBar(props: {
                   type="button"
                   aria-label={item.label}
                   className={cn(
-                    "flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "flex size-9 items-center justify-center rounded-lg text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                     props.activeTab === item.id && "bg-accent text-foreground",
                   )}
                   onClick={() => props.onChange(item.id)}
                 >
-                  <Icon className="size-4" />
+                  <Icon className="size-4.5" />
                 </button>
               }
             />
@@ -542,8 +556,8 @@ function PanelTitle(props: { activeTab: FileSidebarTab; workspaceName: string | 
 
   return (
     <>
-      <Icon className="size-4 text-muted-foreground" />
-      <div className="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <Icon className="size-4 text-muted-foreground/65" />
+      <div className="min-w-0 flex-1 truncate text-xs font-semibold uppercase tracking-wider text-muted-foreground/65">
         {title}
       </div>
     </>
@@ -568,9 +582,9 @@ function ExplorerRows(props: {
   onCopyRelativePath: (relativePath: string) => void;
 }) {
   return (
-    <div className="min-h-0 flex-1 overflow-auto py-1">
+    <div className="min-h-0 flex-1 overflow-auto px-1 py-1.5">
       {props.operationError ? (
-        <div className="mx-2 mb-1 rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
+        <div className="mx-1 mb-1 rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
           {props.operationError}
         </div>
       ) : null}
@@ -581,7 +595,7 @@ function ExplorerRows(props: {
       ) : props.rootError ? (
         <div className="px-3 py-2 text-xs text-destructive">{props.rootError}</div>
       ) : props.rows.length === 0 ? (
-        <div className="px-3 py-2 text-xs text-muted-foreground">No files</div>
+        <div className="px-3 py-2 text-xs text-muted-foreground/60">No files</div>
       ) : (
         props.rows.map(({ entry, depth }) => {
           const expanded = entry.kind === "directory" && props.expandedDirs.has(entry.relativePath);
@@ -592,14 +606,14 @@ function ExplorerRows(props: {
             <div key={entry.relativePath}>
               <div
                 className={cn(
-                  "group flex h-6 items-center hover:bg-accent focus-within:bg-accent",
-                  props.selectedPath === entry.relativePath && "bg-accent text-accent-foreground",
+                  "group mx-1 flex h-7 items-center rounded-md text-muted-foreground/85 transition-colors hover:bg-accent hover:text-foreground focus-within:bg-accent focus-within:text-foreground",
+                  props.selectedPath === entry.relativePath && "bg-accent text-foreground",
                 )}
               >
                 <button
                   type="button"
                   className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-xs focus-visible:outline-none"
-                  style={{ paddingLeft: `${8 + depth * 14}px` }}
+                  style={{ paddingLeft: `${6 + depth * 14}px` }}
                   onClick={() => {
                     if (entry.kind === "directory") {
                       props.onToggleDirectory(entry.relativePath);
@@ -610,19 +624,19 @@ function ExplorerRows(props: {
                 >
                   {entry.kind === "directory" ? (
                     expanded ? (
-                      <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
+                      <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
                     ) : (
-                      <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
+                      <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
                     )
                   ) : (
-                    <span className="size-3 shrink-0" />
+                    <span className="size-3.5 shrink-0" />
                   )}
                   <VscodeEntryIcon
                     pathValue={entry.relativePath}
                     kind={entry.kind}
                     theme={props.resolvedTheme}
                     expanded={expanded}
-                    className="size-3 shrink-0"
+                    className="size-3.5 shrink-0"
                   />
                   <span className="min-w-0 flex-1 truncate">{entry.name}</span>
                   {directoryState?.loading ? (
@@ -635,7 +649,7 @@ function ExplorerRows(props: {
                       <button
                         type="button"
                         aria-label={`More actions for ${entry.name}`}
-                        className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground opacity-0 hover:bg-background/70 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100 data-[popup-open]:opacity-100"
+                        className="mr-1 flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 opacity-0 transition-colors hover:bg-secondary hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100 data-[popup-open]:opacity-100"
                       >
                         <MoreHorizontalIcon className="size-3.5" />
                       </button>
@@ -679,7 +693,7 @@ function ExplorerRows(props: {
               {expanded && directoryState?.error ? (
                 <div
                   className="truncate px-2 py-1 text-xs text-destructive"
-                  style={{ paddingLeft: `${28 + depth * 14}px` }}
+                  style={{ paddingLeft: `${30 + depth * 14}px` }}
                 >
                   {directoryState.error}
                 </div>
@@ -748,15 +762,15 @@ function SearchPanel(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-border p-2">
+      <div className="border-b border-border/40 p-2">
         <input
-          className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-8 w-full rounded-lg border border-transparent bg-muted/40 px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/55 focus-visible:border-ring/40 focus-visible:ring-2 focus-visible:ring-ring/30"
           placeholder="Search files"
           value={query}
           onChange={(event) => setQuery(event.currentTarget.value)}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <div className="min-h-0 flex-1 overflow-auto px-1 py-1.5">
         {result.loading ? (
           <div className="flex h-20 items-center justify-center text-muted-foreground">
             <Spinner className="size-4" />
@@ -764,36 +778,36 @@ function SearchPanel(props: {
         ) : result.error ? (
           <div className="px-3 py-2 text-xs text-destructive">{result.error}</div>
         ) : query.trim().length === 0 ? (
-          <div className="px-3 py-2 text-xs text-muted-foreground">
+          <div className="px-3 py-2 text-xs text-muted-foreground/60">
             Type to search workspace files
           </div>
         ) : result.entries.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-muted-foreground">No results</div>
+          <div className="px-3 py-2 text-xs text-muted-foreground/60">No results</div>
         ) : (
           <>
             {result.entries.map((entry) => (
               <button
                 key={`${entry.kind}:${entry.path}`}
                 type="button"
-                className="flex h-7 w-full items-center gap-1.5 px-2 text-left text-xs hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
+                className="mx-1 flex h-7 w-[calc(100%-0.5rem)] items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground/85 transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:outline-none"
                 onClick={() => {
                   if (entry.kind === "file") {
                     props.onOpenFile(entry.path);
                   }
                 }}
               >
-                <span className="size-3 shrink-0" />
+                <span className="size-3.5 shrink-0" />
                 <VscodeEntryIcon
                   pathValue={entry.path}
                   kind={entry.kind}
                   theme={props.resolvedTheme}
-                  className="size-3 shrink-0"
+                  className="size-3.5 shrink-0"
                 />
                 <span className="min-w-0 flex-1 truncate font-mono">{entry.path}</span>
               </button>
             ))}
             {result.truncated ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">Results truncated</div>
+              <div className="px-3 py-2 text-xs text-muted-foreground/60">Results truncated</div>
             ) : null}
           </>
         )}
@@ -822,14 +836,14 @@ function SourceControlPanel(props: {
   }
   if (!status?.isRepo) {
     return (
-      <div className="px-3 py-2 text-xs text-muted-foreground">No source control repository</div>
+      <div className="px-3 py-2 text-xs text-muted-foreground/60">No source control repository</div>
     );
   }
 
   const files = status.workingTree.files;
   return (
-    <div className="min-h-0 flex-1 overflow-auto py-2">
-      <div className="space-y-1 border-b border-border px-3 pb-2 text-xs text-muted-foreground">
+    <div className="min-h-0 flex-1 overflow-auto px-1 py-2">
+      <div className="mx-1 space-y-1 rounded-md bg-muted/25 px-2.5 py-2 text-xs text-muted-foreground/70">
         <div className="flex items-center justify-between gap-3">
           <span className="truncate">Branch</span>
           <span className="min-w-0 truncate font-medium text-foreground">
@@ -844,25 +858,25 @@ function SourceControlPanel(props: {
         </div>
       </div>
       {files.length === 0 ? (
-        <div className="px-3 py-2 text-xs text-muted-foreground">No working tree changes</div>
+        <div className="px-3 py-2 text-xs text-muted-foreground/60">No working tree changes</div>
       ) : (
         <div className="py-1">
-          <div className="px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
             Changes
           </div>
           {files.map((file) => (
             <button
               key={file.path}
               type="button"
-              className="flex h-7 w-full items-center gap-1.5 px-2 text-left text-xs hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
+              className="mx-1 flex h-7 w-[calc(100%-0.5rem)] items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground/85 transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:outline-none"
               onClick={() => props.onOpenFile(file.path)}
             >
-              <span className="size-3 shrink-0" />
+              <span className="size-3.5 shrink-0" />
               <VscodeEntryIcon
                 pathValue={file.path}
                 kind="file"
                 theme={props.resolvedTheme}
-                className="size-3 shrink-0"
+                className="size-3.5 shrink-0"
               />
               <span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>
               <span className="shrink-0 font-mono text-[10px] tabular-nums">

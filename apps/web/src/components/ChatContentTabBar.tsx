@@ -25,8 +25,8 @@ export const ChatContentTabBar = memo(function ChatContentTabBar({
   onCloseTab,
 }: ChatContentTabBarProps) {
   return (
-    <div className="flex h-9 shrink-0 items-stretch overflow-hidden border-b border-border bg-muted/30">
-      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden">
+    <div className="flex h-10 shrink-0 items-center overflow-hidden border-b border-border/40 bg-background px-1.5">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
         {tabs.map((tab, index) => {
           const active = tab.id === activeTabId;
           const Icon = tab.kind === "chat" ? MessageSquareIcon : FileIcon;
@@ -34,11 +34,11 @@ export const ChatContentTabBar = memo(function ChatContentTabBar({
             <div
               key={tab.id}
               className={cn(
-                "group flex h-full max-w-56 shrink-0 items-center border-r border-border text-xs",
-                index === 0 && "border-l border-border",
+                "group flex h-7 max-w-56 shrink-0 items-center rounded-md text-xs transition-colors",
                 active
-                  ? "bg-background text-foreground"
-                  : "bg-muted/20 text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+                  ? "bg-accent text-foreground"
+                  : "text-muted-foreground/70 hover:bg-accent hover:text-foreground",
+                index === 0 && "ml-0",
               )}
             >
               <button
@@ -60,7 +60,7 @@ export const ChatContentTabBar = memo(function ChatContentTabBar({
                 <button
                   type="button"
                   aria-label={`Close ${tab.title}`}
-                  className="mr-1 rounded p-0.5 opacity-60 hover:bg-accent hover:opacity-100"
+                  className="mr-1 rounded-md p-0.5 opacity-55 transition hover:bg-secondary hover:opacity-100"
                   onClick={(event) => {
                     event.stopPropagation();
                     onCloseTab(tab.id);

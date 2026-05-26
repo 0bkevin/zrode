@@ -331,11 +331,13 @@ export const FileContentPanel = memo(function FileContentPanel({
       className={cn("h-full min-h-0 flex-col bg-background text-foreground", className)}
       data-file-editor-path={relativePath}
     >
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-4">
-        <div className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{relativePath}</div>
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border/40 px-4">
+        <div className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground/70">
+          {relativePath}
+        </div>
         <span
           className={cn(
-            "shrink-0 text-xs",
+            "shrink-0 text-xs font-medium",
             dirty ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
           )}
         >
@@ -345,6 +347,7 @@ export const FileContentPanel = memo(function FileContentPanel({
           <Button
             size="icon-xs"
             variant="ghost"
+            className="text-muted-foreground/60 hover:text-foreground"
             aria-label={textViewMode === "preview" ? "Show source" : "Show preview"}
             onClick={() =>
               setTextViewMode((current) => (current === "preview" ? "source" : "preview"))
@@ -360,6 +363,7 @@ export const FileContentPanel = memo(function FileContentPanel({
         <Button
           size="icon-xs"
           variant="ghost"
+          className="text-muted-foreground/60 hover:text-foreground"
           aria-label="Save file"
           disabled={!canSaveText || !dirty || busy}
           onClick={() => void saveFile()}
@@ -371,6 +375,7 @@ export const FileContentPanel = memo(function FileContentPanel({
         <Button
           size="icon-xs"
           variant="ghost"
+          className="text-muted-foreground/60 hover:text-foreground"
           aria-label="Refresh file"
           disabled={busy}
           onClick={() => void loadFile()}

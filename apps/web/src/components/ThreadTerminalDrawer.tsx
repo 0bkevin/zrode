@@ -1124,10 +1124,10 @@ function TerminalGroupTabButton({
   return (
     <div
       ref={setDropNodeRef}
-      className={`group/tab relative flex h-full min-w-24 max-w-48 shrink-0 items-center border-r border-border text-xs transition-[background-color,color,opacity] duration-150 ${
+      className={`group/tab relative flex h-7 min-w-24 max-w-48 shrink-0 items-center rounded-md text-xs transition-[background-color,color,opacity] duration-150 ${
         active
-          ? "bg-background text-foreground"
-          : "bg-muted/20 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+          ? "bg-accent text-foreground"
+          : "text-muted-foreground/70 hover:bg-accent hover:text-foreground"
       } ${isDragging ? "opacity-35" : ""}`}
     >
       {dropSide ? (
@@ -1141,7 +1141,7 @@ function TerminalGroupTabButton({
       <button
         ref={setDragNodeRef}
         type="button"
-        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left"
+        className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2.5 text-left"
         style={{
           transform: CSS.Translate.toString(transform),
           touchAction: "none",
@@ -1161,7 +1161,7 @@ function TerminalGroupTabButton({
               <button
                 type="button"
                 aria-label={closeLabel}
-                className="mr-1 rounded p-0.5 opacity-55 transition hover:bg-accent hover:opacity-100 group-hover/tab:opacity-100"
+                className="mr-1 rounded-md p-0.5 opacity-55 transition hover:bg-secondary hover:opacity-100 group-hover/tab:opacity-100"
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -1724,14 +1724,14 @@ export default function ThreadTerminalDrawer({
         className={`relative flex h-full w-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background transition-[opacity,border-color] duration-150 ${
           splitPanesVisible
             ? groupIsActive
-              ? "border border-border"
-              : "border border-border/70"
+              ? "border border-border/50"
+              : "border border-border/30"
             : ""
         }`}
       >
         {showPaneTabBar ? (
-          <div className="flex h-8 shrink-0 items-stretch overflow-hidden border-b border-border bg-muted/25">
-            <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden">
+          <div className="flex h-10 shrink-0 items-center overflow-hidden border-b border-border/40 bg-background px-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
               {groupTerminalIds.map((terminalId) => {
                 const label = terminalLabelById.get(terminalId) ?? "Terminal";
                 const active = terminalId === groupActiveTerminalId;
@@ -1760,10 +1760,10 @@ export default function ThreadTerminalDrawer({
                 );
               })}
               <TerminalActionButton
-                className={`flex h-full shrink-0 items-center justify-center border-r border-border px-2 text-muted-foreground transition-colors ${
+                className={`flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors ${
                   groupHasReachedNewTerminalLimit
                     ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                    : "hover:bg-muted/50 hover:text-foreground"
+                    : "hover:bg-accent hover:text-foreground"
                 }`}
                 onClick={() => {
                   if (!groupHasReachedNewTerminalLimit) {
@@ -1779,16 +1779,16 @@ export default function ThreadTerminalDrawer({
                 <Plus className="size-3.5" />
               </TerminalActionButton>
             </div>
-            <div className="flex shrink-0 items-stretch border-l border-border">
+            <div className="flex shrink-0 items-center gap-1">
               <TerminalActionButton
-                className="flex h-full items-center justify-center px-2 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
                 onClick={() => onSplitTerminal("columns", terminalGroup.id)}
                 label={splitTerminalActionLabel}
               >
                 <SquareSplitHorizontal className="size-3.5 rotate-90" />
               </TerminalActionButton>
               <TerminalActionButton
-                className="flex h-full items-center justify-center border-l border-border px-2 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
                 onClick={() => onSplitTerminal("rows", terminalGroup.id)}
                 label={splitDownActionLabel}
               >
@@ -1912,20 +1912,19 @@ export default function ThreadTerminalDrawer({
 
         {!isWorkspacePresentation && !hasTerminalSidebar && (
           <div className="pointer-events-none absolute right-2 top-2 z-20">
-            <div className="pointer-events-auto inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background/70">
+            <div className="pointer-events-auto inline-flex items-center gap-1 rounded-lg border border-border/40 bg-background/80 p-1 backdrop-blur">
               <TerminalActionButton
-                className="p-1 text-foreground/90 transition-colors hover:bg-accent"
+                className="rounded-md p-1 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
                 onClick={onSplitTerminalAction}
                 label={splitTerminalActionLabel}
               >
                 <SquareSplitHorizontal className="size-3.25" />
               </TerminalActionButton>
-              <div className="h-4 w-px bg-border/80" />
               <TerminalActionButton
-                className={`p-1 text-foreground/90 transition-colors ${
+                className={`rounded-md p-1 text-muted-foreground/70 transition-colors ${
                   hasReachedNewTerminalLimit
                     ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                    : "hover:bg-accent"
+                    : "hover:bg-accent hover:text-foreground"
                 }`}
                 onClick={onNewTerminalAction}
                 label={
@@ -1936,9 +1935,8 @@ export default function ThreadTerminalDrawer({
               >
                 <Plus className="size-3.25" />
               </TerminalActionButton>
-              <div className="h-4 w-px bg-border/80" />
               <TerminalActionButton
-                className="p-1 text-foreground/90 transition-colors hover:bg-accent"
+                className="rounded-md p-1 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
                 onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
                 label={closeTerminalActionLabel}
               >
