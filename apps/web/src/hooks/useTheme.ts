@@ -75,11 +75,16 @@ function resolveBrowserChromeSurface(): HTMLElement {
 
 export function syncBrowserChromeTheme() {
   if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return;
-  const surfaceColor = normalizeThemeColor(
-    getComputedStyle(resolveBrowserChromeSurface()).backgroundColor,
+  const surface = resolveBrowserChromeSurface();
+  const surfaceColor =
+    surface === document.body
+      ? null
+      : normalizeThemeColor(getComputedStyle(surface).backgroundColor);
+  const themeColor = normalizeThemeColor(
+    getComputedStyle(document.documentElement).getPropertyValue("--app-chrome-background"),
   );
   const fallbackColor = normalizeThemeColor(getComputedStyle(document.body).backgroundColor);
-  const backgroundColor = surfaceColor ?? fallbackColor;
+  const backgroundColor = surfaceColor ?? themeColor ?? fallbackColor;
   if (!backgroundColor) return;
 
   document.documentElement.style.backgroundColor = backgroundColor;

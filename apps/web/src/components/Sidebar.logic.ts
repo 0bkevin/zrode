@@ -343,8 +343,8 @@ export function resolveThreadStatusPill(input: {
   if (thread.hasPendingUserInput) {
     return {
       label: "Awaiting Input",
-      colorClass: "text-indigo-600 dark:text-indigo-300/90",
-      dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
+      colorClass: "text-yellow-700 dark:text-yellow-300/90",
+      dotClass: "bg-yellow-500 dark:bg-yellow-300/90",
       pulse: false,
     };
   }
@@ -352,8 +352,8 @@ export function resolveThreadStatusPill(input: {
   if (thread.session?.status === "running") {
     return {
       label: "Working",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      colorClass: "text-amber-600 dark:text-amber-300/80",
+      dotClass: "bg-amber-500 dark:bg-amber-300/80",
       pulse: true,
     };
   }
@@ -361,8 +361,8 @@ export function resolveThreadStatusPill(input: {
   if (thread.session?.status === "connecting") {
     return {
       label: "Connecting",
-      colorClass: "text-sky-600 dark:text-sky-300/80",
-      dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      colorClass: "text-amber-600 dark:text-amber-300/80",
+      dotClass: "bg-amber-500 dark:bg-amber-300/80",
       pulse: true,
     };
   }

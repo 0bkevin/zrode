@@ -93,8 +93,8 @@
   --card-foreground: var(--color-neutral-800);
   --popover: var(--color-white);
   --popover-foreground: var(--color-neutral-800);
-  --primary: oklch(0.488 0.217 264);
-  --primary-foreground: var(--color-white);
+  --primary: oklch(0.68 0.18 82);
+  --primary-foreground: var(--color-black);
   --secondary: --alpha(var(--color-black) / 4%);
   --secondary-foreground: var(--color-neutral-800);
   --muted: --alpha(var(--color-black) / 4%);
@@ -104,10 +104,10 @@
   --destructive: var(--color-red-500);
   --border: --alpha(var(--color-black) / 8%);
   --input: --alpha(var(--color-black) / 10%);
-  --ring: oklch(0.488 0.217 264);
+  --ring: oklch(0.58 0.12 82);
   --destructive-foreground: var(--color-red-700);
-  --info: var(--color-blue-500);
-  --info-foreground: var(--color-blue-700);
+  --info: var(--color-amber-500);
+  --info-foreground: var(--color-amber-700);
   --success: var(--color-emerald-500);
   --success-foreground: var(--color-emerald-700);
   --warning: var(--color-amber-500);
@@ -115,15 +115,15 @@
 
   @variant dark {
     color-scheme: dark;
-    --background: color-mix(in srgb, var(--color-neutral-950) 95%, var(--color-white));
+    --background: #050505;
     --app-chrome-background: var(--background);
     --foreground: var(--color-neutral-100);
-    --card: color-mix(in srgb, var(--background) 98%, var(--color-white));
+    --card: #0b0b0b;
     --card-foreground: var(--color-neutral-100);
-    --popover: color-mix(in srgb, var(--background) 98%, var(--color-white));
+    --popover: #0b0b0b;
     --popover-foreground: var(--color-neutral-100);
-    --primary: oklch(0.588 0.217 264);
-    --primary-foreground: var(--color-white);
+    --primary: oklch(0.78 0.18 82);
+    --primary-foreground: var(--color-black);
     --secondary: --alpha(var(--color-white) / 4%);
     --secondary-foreground: var(--color-neutral-100);
     --muted: --alpha(var(--color-white) / 4%);
@@ -133,10 +133,10 @@
     --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
     --border: --alpha(var(--color-white) / 6%);
     --input: --alpha(var(--color-white) / 8%);
-    --ring: oklch(0.588 0.217 264);
+    --ring: oklch(0.6 0.13 82);
     --destructive-foreground: var(--color-red-400);
-    --info: var(--color-blue-500);
-    --info-foreground: var(--color-blue-400);
+    --info: var(--color-amber-500);
+    --info-foreground: var(--color-amber-400);
     --success: var(--color-emerald-500);
     --success-foreground: var(--color-emerald-400);
     --warning: var(--color-amber-500);
@@ -159,11 +159,14 @@ body {
 html,
 body {
   min-height: calc(100svh + env(safe-area-inset-top));
+  background-color: var(--app-chrome-background);
   overscroll-behavior: none;
 }
 
 body {
+  position: relative;
   height: 100%;
+  color: var(--foreground);
   overflow: hidden;
 }
 

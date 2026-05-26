@@ -263,7 +263,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             className={cn(
               "shrink-0 whitespace-nowrap px-2 sm:px-3",
               props.planSidebarOpen
-                ? "text-blue-400 hover:text-blue-300"
+                ? "text-amber-400 hover:text-amber-300"
                 : "text-muted-foreground/70 hover:text-foreground/80",
             )}
             size="sm"
@@ -1968,8 +1968,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
           className={cn(
-            "rounded-[20px] border bg-card transition-colors duration-200 has-focus-visible:border-ring/45",
-            isDragOverComposer ? "border-primary/70 bg-accent/30" : "border-border",
+            "rounded-[20px] border bg-card transition-colors duration-200 has-focus-visible:border-ring/22",
+            isDragOverComposer ? "border-primary/35 bg-accent/30" : "border-border",
             environmentUnavailable ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
           )}
