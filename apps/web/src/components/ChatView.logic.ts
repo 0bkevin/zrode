@@ -103,6 +103,18 @@ export function reconcileMountedTerminalThreadIds(input: {
   return nextThreadIds;
 }
 
+export function shouldRenderMountedTerminalDrawer(input: {
+  mountedThreadId: string;
+  activeThreadId: string | null;
+  isTerminalThreadSurface: boolean;
+}): boolean {
+  return !(
+    input.isTerminalThreadSurface &&
+    input.activeThreadId !== null &&
+    input.mountedThreadId === input.activeThreadId
+  );
+}
+
 export function revokeBlobPreviewUrl(previewUrl: string | undefined): void {
   if (!previewUrl || typeof URL === "undefined" || !previewUrl.startsWith("blob:")) {
     return;

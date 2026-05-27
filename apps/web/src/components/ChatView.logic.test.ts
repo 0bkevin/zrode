@@ -19,6 +19,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   reconcileMountedTerminalThreadIds,
   resolveSendEnvMode,
+  shouldRenderMountedTerminalDrawer,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -179,6 +180,38 @@ describe("reconcileMountedTerminalThreadIds", () => {
         activeThreadTerminalOpen: false,
       }),
     ).toEqual(currentThreadIds.slice(-MAX_HIDDEN_MOUNTED_TERMINAL_THREADS));
+  });
+});
+
+describe("shouldRenderMountedTerminalDrawer", () => {
+  it("skips the hidden mounted copy for the active terminal workspace thread", () => {
+    expect(
+      shouldRenderMountedTerminalDrawer({
+        mountedThreadId: ThreadId.make("thread-active"),
+        activeThreadId: ThreadId.make("thread-active"),
+        isTerminalThreadSurface: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps hidden mounted drawers for background threads", () => {
+    expect(
+      shouldRenderMountedTerminalDrawer({
+        mountedThreadId: ThreadId.make("thread-hidden"),
+        activeThreadId: ThreadId.make("thread-active"),
+        isTerminalThreadSurface: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the mounted drawer for the active thread on chat surfaces", () => {
+    expect(
+      shouldRenderMountedTerminalDrawer({
+        mountedThreadId: ThreadId.make("thread-active"),
+        activeThreadId: ThreadId.make("thread-active"),
+        isTerminalThreadSurface: false,
+      }),
+    ).toBe(true);
   });
 });
 
