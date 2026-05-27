@@ -6,6 +6,7 @@ import {
   toSortableTimestamp,
   type ThreadSortInput,
 } from "../lib/threadSort";
+import { normalizeProjectPathForComparison } from "../lib/projectPaths";
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
@@ -211,6 +212,33 @@ export function resolveSidebarNewThreadSeedContext(input: {
   return {
     envMode: input.defaultEnvMode,
   };
+}
+
+export function resolveSidebarNewThreadMember<
+  TMember extends {
+    cwd: string;
+    repositoryIdentity?: {
+      rootPath?: string | null;
+    } | null;
+  },
+>(input: { members: readonly TMember[] }): TMember | null {
+  const repositoryRootMember =
+    input.members.find((member) => {
+      const rootPath = member.repositoryIdentity?.rootPath?.trim();
+      if (!rootPath) {
+        return false;
+      }
+
+      return (
+        normalizeProjectPathForComparison(member.cwd) ===
+        normalizeProjectPathForComparison(rootPath)
+      );
+    }) ?? null;
+  if (repositoryRootMember) {
+    return repositoryRootMember;
+  }
+
+  return input.members.toSorted((left, right) => left.cwd.length - right.cwd.length)[0] ?? null;
 }
 
 export function orderItemsByPreferredIds<TItem, TId>(input: {

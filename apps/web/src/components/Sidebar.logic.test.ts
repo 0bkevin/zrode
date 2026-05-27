@@ -13,6 +13,7 @@ import {
   isContextMenuPointerDown,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
+  resolveSidebarNewThreadMember,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   resolveThreadRowClassName,
@@ -270,6 +271,51 @@ describe("resolveSidebarNewThreadSeedContext", () => {
       }),
     ).toEqual({
       envMode: "worktree",
+    });
+  });
+});
+
+describe("resolveSidebarNewThreadMember", () => {
+  const members = [
+    {
+      cwd: "/repo",
+      repositoryIdentity: {
+        rootPath: "/repo",
+      },
+    },
+    {
+      cwd: "/repo/apps/server",
+      repositoryIdentity: {
+        rootPath: "/repo",
+      },
+    },
+  ] as const;
+
+  it("prefers the repository root member for grouped projects", () => {
+    expect(
+      resolveSidebarNewThreadMember({
+        members,
+      }),
+    ).toEqual(members[0]);
+  });
+
+  it("falls back to the shortest cwd when no repository root is available", () => {
+    expect(
+      resolveSidebarNewThreadMember({
+        members: [
+          {
+            cwd: "/repo/apps/server",
+            repositoryIdentity: null,
+          },
+          {
+            cwd: "/repo",
+            repositoryIdentity: null,
+          },
+        ],
+      }),
+    ).toEqual({
+      cwd: "/repo",
+      repositoryIdentity: null,
     });
   });
 });
