@@ -1058,7 +1058,7 @@ export function makeOpenCodeAdapter(
               if (mcpSession && !server.external) {
                 yield* runOpenCodeSdk("mcp.add", () =>
                   client.mcp.add({
-                    name: "t3-code",
+                    name: "zrode",
                     config: {
                       type: "remote",
                       url: mcpSession.endpoint,
@@ -1072,7 +1072,7 @@ export function makeOpenCodeAdapter(
               }
               const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
                 client.session.create({
-                  title: `T3 Code ${input.threadId}`,
+                  title: `Zrode ${input.threadId}`,
                   permission: buildOpenCodePermissionRules(input.runtimeMode),
                 }),
               );

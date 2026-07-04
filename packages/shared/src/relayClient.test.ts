@@ -81,7 +81,7 @@ describe("RelayClient", () => {
           Effect.provideService(
             ConfigProvider.ConfigProvider,
             ConfigProvider.fromEnv({
-              env: { PATH: "", T3CODE_CLOUDFLARED_PATH: overridePath },
+              env: { PATH: "", ZRODE_CLOUDFLARED_PATH: overridePath },
             }),
           ),
         ),

@@ -353,7 +353,7 @@ flowchart LR
 
   Clerk["Clerk<br/>user identity and OAuth"]
 
-  subgraph Relay["T3 Code Relay on Cloudflare"]
+  subgraph Relay["Zrode Relay on Cloudflare"]
     Worker["Relay Worker<br/>HTTP API"]
     Queue["APNs delivery queue<br/>with dead-letter queue"]
     Hyperdrive["Hyperdrive"]
@@ -1010,7 +1010,7 @@ sequenceDiagram
           <h2>Relay Infrastructure</h2>
           <ul>
             <li>Cloudflare Worker for the hosted relay HTTP API.</li>
-            <li>PlanetScale Postgres database named <code>t3coderelay</code>.</li>
+            <li>PlanetScale Postgres database named <code>zroderelay</code>.</li>
             <li>
               Production uses the shared database; non-production stages use database branches.
             </li>
@@ -1047,9 +1047,9 @@ sequenceDiagram
             <tr>
               <td>Source-built desktop/server cloud features</td>
               <td>
-                Optional <code>T3CODE_RELAY_URL</code>, <code>T3CODE_CLERK_PUBLISHABLE_KEY</code>,
-                and <code>T3CODE_CLERK_CLI_OAUTH_CLIENT_ID</code>. Release builds inject public
-                values at build time.
+                Optional <code>ZRODE_RELAY_URL</code>, <code>ZRODE_CLERK_PUBLISHABLE_KEY</code>, and
+                <code>ZRODE_CLERK_CLI_OAUTH_CLIENT_ID</code>. Release builds inject public values at
+                build time.
               </td>
             </tr>
             <tr>

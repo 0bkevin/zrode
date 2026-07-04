@@ -1,6 +1,6 @@
 # Observability
 
-T3 Code has one server-side observability model:
+Zrode has one server-side observability model:
 
 - pretty logs go to stdout for humans
 - completed spans go to a local NDJSON trace file
@@ -99,16 +99,16 @@ Default Grafana login:
 #### 2. Export OTLP env vars
 
 ```bash
-export T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces
-export T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
-export T3CODE_OTLP_SERVICE_NAME=t3-local
+export ZRODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces
+export ZRODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
+export ZRODE_OTLP_SERVICE_NAME=t3-local
 ```
 
 Optional:
 
 ```bash
-export T3CODE_TRACE_MIN_LEVEL=Info
-export T3CODE_TRACE_TIMING_ENABLED=true
+export ZRODE_TRACE_MIN_LEVEL=Info
+export ZRODE_TRACE_TIMING_ENABLED=true
 ```
 
 #### 3. Launch the app from that same shell
@@ -133,23 +133,23 @@ node --run dev:desktop
 
 Packaged desktop app:
 
-Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `T3CODE_OTLP_*`.
+Launch the actual app executable from the same shell so the desktop app and embedded backend inherit `ZRODE_OTLP_*`.
 
 macOS app bundle example:
 
 ```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_SERVICE_NAME=t3-desktop \
-"/Applications/T3 Code.app/Contents/MacOS/T3 Code"
+ZRODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
+ZRODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+ZRODE_OTLP_SERVICE_NAME=t3-desktop \
+"/Applications/Zrode.app/Contents/MacOS/Zrode"
 ```
 
 Direct binary example:
 
 ```bash
-T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
-T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
-T3CODE_OTLP_SERVICE_NAME=t3-desktop \
+ZRODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
+ZRODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+ZRODE_OTLP_SERVICE_NAME=t3-desktop \
 ./path/to/your/desktop-app-binary
 ```
 
@@ -168,7 +168,7 @@ The trace file is the fastest way to inspect raw span data.
 Tail it:
 
 ```bash
-tail -f "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+tail -f "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 In monorepo dev, use:
@@ -185,7 +185,7 @@ jq -c 'select(.exit._tag != "Success") | {
   durationMs,
   exit,
   attributes
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 Show slow spans:
@@ -196,7 +196,7 @@ jq -c 'select(.durationMs > 1000) | {
   durationMs,
   traceId,
   spanId
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 Inspect embedded log events:
@@ -213,7 +213,7 @@ jq -c 'select(any(.events[]?; .attributes["effect.logLevel"] != null)) | {
         level: .attributes["effect.logLevel"]
       }
   ]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 Follow one trace:
@@ -224,7 +224,7 @@ jq -r 'select(.traceId == "TRACE_ID_HERE") | [
   .spanId,
   (.parentSpanId // "-"),
   .durationMs
-] | @tsv' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+] | @tsv' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 Filter orchestration commands:
@@ -235,7 +235,7 @@ jq -c 'select(.attributes["orchestration.command_type"] != null) | {
   durationMs,
   commandType: .attributes["orchestration.command_type"],
   aggregateKind: .attributes["orchestration.aggregate_kind"]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 Filter git activity:
@@ -250,7 +250,7 @@ jq -c 'select(.attributes["git.operation"] != null) | {
     .events[]
     | select(.name == "git.hook.started" or .name == "git.hook.finished")
   ]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$ZRODE_HOME/userdata/logs/server.trace.ndjson"
 ```
 
 ### Use Tempo When You Need A Real Trace Viewer
@@ -358,7 +358,7 @@ If you need those later, add client-side instrumentation or a dedicated server f
 
 Usually one of these is true:
 
-- `T3CODE_OTLP_TRACES_URL` was not set
+- `ZRODE_OTLP_TRACES_URL` was not set
 - the app was launched from a different environment than the one where you exported the vars
 - the app was not fully restarted after changing env
 - Grafana is looking at the wrong time range or service name
@@ -482,19 +482,19 @@ It provides:
 
 Local trace file:
 
-- `T3CODE_TRACE_FILE`: override trace file path
-- `T3CODE_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
-- `T3CODE_TRACE_MAX_FILES`: rotated file count, default `10`
-- `T3CODE_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
-- `T3CODE_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
-- `T3CODE_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
+- `ZRODE_TRACE_FILE`: override trace file path
+- `ZRODE_TRACE_MAX_BYTES`: per-file rotation size, default `10485760`
+- `ZRODE_TRACE_MAX_FILES`: rotated file count, default `10`
+- `ZRODE_TRACE_BATCH_WINDOW_MS`: flush window, default `200`
+- `ZRODE_TRACE_MIN_LEVEL`: minimum trace level, default `Info`
+- `ZRODE_TRACE_TIMING_ENABLED`: enable timing metadata, default `true`
 
 OTLP export:
 
-- `T3CODE_OTLP_TRACES_URL`: OTLP trace endpoint
-- `T3CODE_OTLP_METRICS_URL`: OTLP metric endpoint
-- `T3CODE_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
-- `T3CODE_OTLP_SERVICE_NAME`: service name, default `t3-server`
+- `ZRODE_OTLP_TRACES_URL`: OTLP trace endpoint
+- `ZRODE_OTLP_METRICS_URL`: OTLP metric endpoint
+- `ZRODE_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
+- `ZRODE_OTLP_SERVICE_NAME`: service name, default `t3-server`
 
 If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
 

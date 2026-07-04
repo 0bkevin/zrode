@@ -44,29 +44,29 @@ function makeThread(
 describe("groupProjectsByRepository", () => {
   it("groups projects across environments by repository identity", () => {
     const repoIdentity = {
-      canonicalKey: "github.com/t3tools/t3code",
+      canonicalKey: "github.com/t3tools/zrode",
       locator: {
         source: "git-remote" as const,
         remoteName: "origin",
-        remoteUrl: "git@github.com:t3tools/t3code.git",
+        remoteUrl: "git@github.com:t3tools/zrode.git",
       },
       provider: "github",
       owner: "t3tools",
-      name: "t3code",
-      displayName: "T3 Code",
+      name: "zrode",
+      displayName: "Zrode",
     };
 
     const projects = [
       makeProject({
         environmentId: EnvironmentId.make("env-local"),
         id: ProjectId.make("project-local"),
-        title: "T3 Code",
+        title: "Zrode",
         repositoryIdentity: repoIdentity,
       }),
       makeProject({
         environmentId: EnvironmentId.make("env-staging"),
         id: ProjectId.make("project-staging"),
-        title: "T3 Code",
+        title: "Zrode",
         repositoryIdentity: repoIdentity,
       }),
     ];
@@ -94,9 +94,9 @@ describe("groupProjectsByRepository", () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({
-      key: "github.com/t3tools/t3code",
-      title: "T3 Code",
-      subtitle: "t3tools/t3code",
+      key: "github.com/t3tools/zrode",
+      title: "Zrode",
+      subtitle: "t3tools/zrode",
       projectCount: 2,
       threadCount: 2,
     });

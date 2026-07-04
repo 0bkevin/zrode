@@ -9,6 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_HOSTED_APP_CHANNEL: string;
   readonly VITE_CLERK_PUBLISHABLE_KEY: string;
   readonly VITE_CLERK_JWT_TEMPLATE: string;
+  readonly VITE_ZRODE_RELAY_URL: string;
   readonly VITE_RELAY_OTLP_TRACES_URL: string;
   readonly VITE_RELAY_OTLP_TRACES_DATASET: string;
   readonly VITE_RELAY_OTLP_TRACES_TOKEN: string;

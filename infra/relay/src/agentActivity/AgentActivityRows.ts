@@ -69,7 +69,7 @@ export class AgentActivityRows extends Context.Service<
       AgentActivityRowListPersistenceError
     >;
   }
->()("t3code-relay/agentActivity/AgentActivityRows") {}
+>()("zrode-relay/agentActivity/AgentActivityRows") {}
 
 const decodeJsonString = Schema.decodeEffect(Schema.UnknownFromJsonString);
 const encodeJsonValue = Schema.encodeEffect(Schema.UnknownFromJsonString);

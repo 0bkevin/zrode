@@ -36,12 +36,12 @@ const config = RelayConfiguration.RelayConfiguration.of({
     teamId: "team-id",
     keyId: "key-id",
     privateKey: Redacted.make("not-a-private-key"),
-    bundleId: "com.t3tools.t3code.dev",
+    bundleId: "com.t3tools.zrode.dev",
   },
   apnsDeliveryJobSigningSecret: Redacted.make("job-signing-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
-  clerkJwtAudience: "t3-code-relay",
+  clerkJwtAudience: "zrode-relay",
   cloudMintPrivateKey: Redacted.make("cloud-private-key"),
   cloudMintPublicKey: "cloud-public-key",
   managedEndpointBaseDomain: undefined,
@@ -75,7 +75,7 @@ const state: RelayAgentActivityState = {
 };
 
 const aggregate: RelayAgentActivityAggregateState = {
-  title: "T3 Code",
+  title: "Zrode",
   subtitle: "Agent work in progress",
   activeCount: 1,
   updatedAt: state.updatedAt,

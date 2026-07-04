@@ -37,7 +37,7 @@ export class AgentActivityPublisher extends Context.Service<
       readonly deviceId: string;
     }) => Effect.Effect<RelayDeliveryResult | null, AgentActivityPublishError>;
   }
->()("t3code-relay/agentActivity/AgentActivityPublisher") {}
+>()("zrode-relay/agentActivity/AgentActivityPublisher") {}
 
 export const make = Effect.gen(function* () {
   const rows = yield* AgentActivityRows.AgentActivityRows;
@@ -202,7 +202,7 @@ function aggregateRowForState(state: RelayAgentActivityState) {
 
 function terminalAggregateState(state: RelayAgentActivityState): RelayAgentActivityAggregateState {
   return sanitizeAgentActivityAggregateState({
-    title: "T3 Code",
+    title: "Zrode",
     subtitle: state.phase === "failed" ? "Agent work failed" : "Agent work completed",
     activeCount: 0,
     updatedAt: state.updatedAt,
@@ -222,7 +222,7 @@ function makeAggregateState(input: {
     state.updatedAt.localeCompare(latest.updatedAt) > 0 ? state : latest,
   ).updatedAt;
   return sanitizeAgentActivityAggregateState({
-    title: "T3 Code",
+    title: "Zrode",
     subtitle: "Agent work in progress",
     activeCount: activeStates.length,
     updatedAt,

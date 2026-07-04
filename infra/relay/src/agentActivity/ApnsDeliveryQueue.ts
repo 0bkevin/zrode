@@ -48,7 +48,7 @@ export class ApnsDeliveryQueueSender extends Context.Service<
   {
     readonly send: (body: SignedApnsDeliveryJob) => Effect.Effect<void, Cloudflare.QueueSendError>;
   }
->()("t3code-relay/agentActivity/ApnsDeliveryQueue/ApnsDeliveryQueueSender") {}
+>()("zrode-relay/agentActivity/ApnsDeliveryQueue/ApnsDeliveryQueueSender") {}
 
 export class ApnsDeliveryQueue extends Context.Service<
   ApnsDeliveryQueue,
@@ -67,7 +67,7 @@ export class ApnsDeliveryQueue extends Context.Service<
       readonly notification: NonNullable<ApnsDeliveryJobPayload["notification"]>;
     }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryQueueError>;
   }
->()("t3code-relay/agentActivity/ApnsDeliveryQueue") {}
+>()("zrode-relay/agentActivity/ApnsDeliveryQueue") {}
 
 export const make = Effect.gen(function* () {
   const sender = yield* ApnsDeliveryQueueSender;

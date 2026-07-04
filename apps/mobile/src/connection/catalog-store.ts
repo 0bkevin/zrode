@@ -12,8 +12,8 @@ import * as Semaphore from "effect/Semaphore";
 
 import { migrateLegacyConnectionCatalog } from "./migration";
 
-export const CONNECTION_CATALOG_KEY = "t3code.connection-catalog.v1";
-export const LEGACY_CONNECTIONS_KEY = "t3code.connections";
+export const CONNECTION_CATALOG_KEY = "zrode.connection-catalog.v1";
+export const LEGACY_CONNECTIONS_KEY = "zrode.connections";
 
 function catalogError(operation: string, cause: unknown) {
   return new ConnectionTransientError({

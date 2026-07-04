@@ -77,14 +77,14 @@ describe("mobile connection storage", () => {
     await expect(loadSavedConnections()).rejects.toMatchObject({
       _tag: "MobileSecureStorageError",
       operation: "read",
-      key: "t3code.connections",
+      key: "zrode.connections",
       cause,
-      message: "Mobile secure storage operation read failed for key t3code.connections.",
+      message: "Mobile secure storage operation read failed for key zrode.connections.",
     });
   });
 
   it("logs structured decode failures before using the empty fallback", async () => {
-    await mocks.setItemAsync("t3code.connections", "{");
+    await mocks.setItemAsync("zrode.connections", "{");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     await expect(loadSavedConnections()).resolves.toEqual([]);
@@ -92,9 +92,9 @@ describe("mobile connection storage", () => {
       "[mobile-storage] ignored invalid JSON",
       expect.objectContaining({
         _tag: "MobileStorageDecodeError",
-        key: "t3code.connections",
+        key: "zrode.connections",
         cause: expect.any(SyntaxError),
-        message: "Failed to decode mobile storage value for key t3code.connections.",
+        message: "Failed to decode mobile storage value for key zrode.connections.",
       }),
     );
 

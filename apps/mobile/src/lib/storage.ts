@@ -10,9 +10,9 @@ import {
   toStableSavedRemoteConnection,
 } from "./connection";
 
-const CONNECTIONS_KEY = "t3code.connections";
-const PREFERENCES_KEY = "t3code.preferences";
-const AGENT_AWARENESS_DEVICE_ID_KEY = "t3code.agent-awareness.device-id";
+const CONNECTIONS_KEY = "zrode.connections";
+const PREFERENCES_KEY = "zrode.preferences";
+const AGENT_AWARENESS_DEVICE_ID_KEY = "zrode.agent-awareness.device-id";
 const MobileStorageKey = Schema.Literals([
   CONNECTIONS_KEY,
   PREFERENCES_KEY,

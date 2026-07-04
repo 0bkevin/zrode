@@ -67,7 +67,7 @@ describe("buildHomeThreadGroups", () => {
     const project = makeProject({
       environmentId,
       id: ProjectId.make("project-1"),
-      title: "T3 Code",
+      title: "Zrode",
     });
     const threads = [
       makeThread({
@@ -177,31 +177,31 @@ describe("buildHomeThreadGroups", () => {
   it("matches web repository, repository-path, and separate grouping modes", () => {
     const environmentId = EnvironmentId.make("environment-1");
     const repositoryIdentity = {
-      canonicalKey: "github.com/t3tools/t3code",
+      canonicalKey: "github.com/t3tools/zrode",
       locator: {
         source: "git-remote" as const,
         remoteName: "origin",
-        remoteUrl: "git@github.com:t3tools/t3code.git",
+        remoteUrl: "git@github.com:t3tools/zrode.git",
       },
       provider: "github",
       owner: "t3tools",
-      name: "t3code",
-      displayName: "T3 Code",
-      rootPath: "/workspaces/t3code",
+      name: "zrode",
+      displayName: "Zrode",
+      rootPath: "/workspaces/zrode",
     };
     const projects = [
       makeProject({
         environmentId,
         id: ProjectId.make("project-web"),
         title: "Web",
-        workspaceRoot: "/workspaces/t3code/apps/web",
+        workspaceRoot: "/workspaces/zrode/apps/web",
         repositoryIdentity,
       }),
       makeProject({
         environmentId,
         id: ProjectId.make("project-mobile"),
         title: "Mobile",
-        workspaceRoot: "/workspaces/t3code/apps/mobile",
+        workspaceRoot: "/workspaces/zrode/apps/mobile",
         repositoryIdentity,
       }),
     ];

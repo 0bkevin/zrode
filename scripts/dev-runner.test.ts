@@ -51,7 +51,7 @@ function mockProcess(exit: number | PlatformError.PlatformError) {
 
 const devServerInput = {
   mode: "dev:server",
-  t3Home: "/tmp/t3code-dev-runner",
+  t3Home: "/tmp/zrode-dev-runner",
   noBrowser: undefined,
   autoBootstrapProjectFromCwd: undefined,
   logWebSocketEvents: undefined,
@@ -90,12 +90,12 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("resolveOffset", () => {
-    it.effect("uses explicit T3CODE_PORT_OFFSET when provided", () =>
+    it.effect("uses explicit ZRODE_PORT_OFFSET when provided", () =>
       Effect.gen(function* () {
         const result = yield* resolveOffset({ portOffset: 12, devInstance: undefined });
         assert.deepStrictEqual(result, {
           offset: 12,
-          source: "T3CODE_PORT_OFFSET=12",
+          source: "ZRODE_PORT_OFFSET=12",
         });
       }),
     );
@@ -118,7 +118,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         );
 
         assert.equal(error._tag, "DevRunnerInvalidPortOffsetError");
-        assert.equal(error.configKey, "T3CODE_PORT_OFFSET");
+        assert.equal(error.configKey, "ZRODE_PORT_OFFSET");
         assert.equal(error.portOffset, -1);
         assert.equal(error.minimum, 0);
         assert.ok(!("cause" in error));
@@ -127,7 +127,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
-    it.effect("defaults T3CODE_HOME to ~/.t3 when not provided", () =>
+    it.effect("defaults ZRODE_HOME to ~/.t3 when not provided", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const env = yield* createDevRunnerEnv({
@@ -144,7 +144,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_HOME, path.resolve(NodeOS.homedir(), ".t3"));
+        assert.equal(env.ZRODE_HOME, path.resolve(NodeOS.homedir(), ".t3"));
       }),
     );
 
@@ -165,14 +165,14 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: new URL("http://localhost:7331"),
         });
 
-        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/custom-t3"));
-        assert.equal(env.T3CODE_PORT, "4222");
+        assert.equal(env.ZRODE_HOME, path.resolve("/tmp/custom-t3"));
+        assert.equal(env.ZRODE_PORT, "4222");
         assert.equal(env.VITE_HTTP_URL, "http://localhost:4222");
         assert.equal(env.VITE_WS_URL, "ws://localhost:4222");
-        assert.equal(env.T3CODE_NO_BROWSER, "1");
-        assert.equal(env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "0");
-        assert.equal(env.T3CODE_LOG_WS_EVENTS, "1");
-        assert.equal(env.T3CODE_HOST, "0.0.0.0");
+        assert.equal(env.ZRODE_NO_BROWSER, "1");
+        assert.equal(env.ZRODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "0");
+        assert.equal(env.ZRODE_LOG_WS_EVENTS, "1");
+        assert.equal(env.ZRODE_HOST, "0.0.0.0");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://localhost:7331/");
       }),
     );
@@ -182,7 +182,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
           baseEnv: {
-            T3CODE_LOG_WS_EVENTS: "keep-me-out",
+            ZRODE_LOG_WS_EVENTS: "keep-me-out",
           },
           serverOffset: 0,
           webOffset: 0,
@@ -195,8 +195,8 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_MODE, "web");
-        assert.equal(env.T3CODE_LOG_WS_EVENTS, undefined);
+        assert.equal(env.ZRODE_MODE, "web");
+        assert.equal(env.ZRODE_LOG_WS_EVENTS, undefined);
       }),
     );
 
@@ -205,7 +205,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
           baseEnv: {
-            T3CODE_LOG_WS_EVENTS: "1",
+            ZRODE_LOG_WS_EVENTS: "1",
           },
           serverOffset: 0,
           webOffset: 0,
@@ -218,7 +218,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_LOG_WS_EVENTS, "0");
+        assert.equal(env.ZRODE_LOG_WS_EVENTS, "0");
       }),
     );
 
@@ -239,7 +239,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
+        assert.equal(env.ZRODE_HOME, path.resolve("/tmp/my-t3"));
       }),
     );
 
@@ -249,10 +249,10 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         const env = yield* createDevRunnerEnv({
           mode: "dev:desktop",
           baseEnv: {
-            T3CODE_PORT: "13773",
-            T3CODE_MODE: "web",
-            T3CODE_NO_BROWSER: "0",
-            T3CODE_HOST: "0.0.0.0",
+            ZRODE_PORT: "13773",
+            ZRODE_MODE: "web",
+            ZRODE_NO_BROWSER: "0",
+            ZRODE_HOST: "0.0.0.0",
             VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",
             VITE_WS_URL: "ws://localhost:13773",
           },
@@ -267,15 +267,15 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
+        assert.equal(env.ZRODE_HOME, path.resolve("/tmp/my-t3"));
         assert.equal(env.PORT, "5733");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://127.0.0.1:5733");
         assert.equal(env.HOST, "127.0.0.1");
-        assert.equal(env.T3CODE_PORT, "4222");
+        assert.equal(env.ZRODE_PORT, "4222");
         assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:4222");
-        assert.equal(env.T3CODE_MODE, undefined);
-        assert.equal(env.T3CODE_NO_BROWSER, undefined);
-        assert.equal(env.T3CODE_HOST, undefined);
+        assert.equal(env.ZRODE_MODE, undefined);
+        assert.equal(env.ZRODE_NO_BROWSER, undefined);
+        assert.equal(env.ZRODE_HOST, undefined);
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:4222");
       }),
     );
@@ -296,7 +296,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_PORT, "13773");
+        assert.equal(env.ZRODE_PORT, "13773");
         assert.equal(env.VITE_HTTP_URL, "http://localhost:13773");
         assert.equal(env.VITE_WS_URL, "ws://localhost:13773");
       }),
@@ -480,7 +480,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             Layer.merge(
               netServiceLayer,
               ConfigProvider.layer(
-                ConfigProvider.fromEnv({ env: { T3CODE_PORT_OFFSET: "not-an-integer" } }),
+                ConfigProvider.fromEnv({ env: { ZRODE_PORT_OFFSET: "not-an-integer" } }),
               ),
             ),
           ),
@@ -490,7 +490,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         if (error._tag !== "DevRunnerConfigurationError") {
           assert.fail(`Unexpected error: ${error._tag}`);
         }
-        assert.deepStrictEqual(error.configKeys, ["T3CODE_PORT_OFFSET", "T3CODE_DEV_INSTANCE"]);
+        assert.deepStrictEqual(error.configKeys, ["ZRODE_PORT_OFFSET", "ZRODE_DEV_INSTANCE"]);
         assert.ok(error.cause !== undefined);
         assert.ok(!error.message.includes(String((error.cause as Error).message)));
       }),

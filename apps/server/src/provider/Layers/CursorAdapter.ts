@@ -538,13 +538,13 @@ export function makeCursorAdapter(
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
-            clientInfo: { name: "t3-code", version: "0.0.0" },
+            clientInfo: { name: "zrode", version: "0.0.0" },
             ...(mcpSession
               ? {
                   mcpServers: [
                     {
                       type: "http" as const,
-                      name: "t3-code",
+                      name: "zrode",
                       url: mcpSession.endpoint,
                       headers: [
                         {

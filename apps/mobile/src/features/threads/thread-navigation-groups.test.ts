@@ -47,7 +47,7 @@ function makeThread(
 }
 
 describe("buildThreadNavigationGroups", () => {
-  const project = makeProject({ id: ProjectId.make("project-1"), title: "T3 Code" });
+  const project = makeProject({ id: ProjectId.make("project-1"), title: "Zrode" });
   const threads = [
     makeThread({
       id: ThreadId.make("older"),
@@ -87,7 +87,7 @@ describe("buildThreadNavigationGroups", () => {
       buildThreadNavigationGroups({
         projects: [project],
         threads,
-        searchQuery: "t3 code",
+        searchQuery: "zrode",
       })[0]?.threads.map((thread) => thread.id),
     ).toEqual(["newer", "older"]);
   });

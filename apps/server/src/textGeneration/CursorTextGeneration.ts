@@ -65,7 +65,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
         environment: resolvedEnvironment,
         childProcessSpawner: commandSpawner,
         cwd,
-        clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
+        clientInfo: { name: "zrode-git-text", version: "0.0.0" },
       });
 
       yield* runtime.handleSessionUpdate((notification) => {

@@ -21,27 +21,27 @@ const VARIANT_CONFIG: Record<
   }
 > = {
   development: {
-    appName: "T3 Code Dev",
-    scheme: "t3code-dev",
+    appName: "Zrode Dev",
+    scheme: "zrode-dev",
     iosIcon: "./assets/icon-composer-dev.icon",
-    iosBundleIdentifier: "com.t3tools.t3code.dev",
-    androidPackage: "com.t3tools.t3code.dev",
+    iosBundleIdentifier: "com.t3tools.zrode.dev",
+    androidPackage: "com.t3tools.zrode.dev",
     relyingParty: "clerk.t3.codes",
   },
   preview: {
-    appName: "T3 Code Preview",
-    scheme: "t3code-preview",
+    appName: "Zrode Preview",
+    scheme: "zrode-preview",
     iosIcon: "./assets/icon-composer-prod.icon",
-    iosBundleIdentifier: "com.t3tools.t3code.preview",
-    androidPackage: "com.t3tools.t3code.preview",
+    iosBundleIdentifier: "com.t3tools.zrode.preview",
+    androidPackage: "com.t3tools.zrode.preview",
     relyingParty: "clerk.t3.codes",
   },
   production: {
-    appName: "T3 Code",
-    scheme: "t3code",
+    appName: "Zrode",
+    scheme: "zrode",
     iosIcon: "./assets/icon-composer-prod.icon",
-    iosBundleIdentifier: "com.t3tools.t3code",
-    androidPackage: "com.t3tools.t3code",
+    iosBundleIdentifier: "com.t3tools.zrode",
+    androidPackage: "com.t3tools.zrode",
     relyingParty: "clerk.t3.codes",
   },
 };
@@ -61,7 +61,7 @@ const variant = VARIANT_CONFIG[APP_VARIANT];
 
 const config: ExpoConfig = {
   name: variant.appName,
-  slug: "t3-code",
+  slug: "zrode",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
   version: "0.1.0",
@@ -94,7 +94,7 @@ const config: ExpoConfig = {
         NSAllowsArbitraryLoads: true,
       },
       NSLocalNetworkUsageDescription:
-        "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
+        "Allow Zrode to connect to Zrode servers on your local network or tailnet.",
       ITSAppUsesNonExemptEncryption: false,
     },
   },
@@ -120,7 +120,7 @@ const config: ExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission: "Allow T3 Code to access your camera so you can scan pairing QR codes.",
+        cameraPermission: "Allow Zrode to access your camera so you can scan pairing QR codes.",
         barcodeScannerEnabled: true,
       },
     ],
@@ -161,7 +161,7 @@ const config: ExpoConfig = {
           {
             name: "AgentActivity",
             displayName: "Agent Activity",
-            description: "Shows the current state of active T3 Code agents.",
+            description: "Shows the current state of active Zrode agents.",
             supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
           },
         ],
@@ -173,7 +173,7 @@ const config: ExpoConfig = {
   extra: {
     appVariant: APP_VARIANT,
     relay: {
-      url: repoEnv.T3CODE_RELAY_URL ?? null,
+      url: repoEnv.ZRODE_RELAY_URL ?? null,
     },
     clerk: {
       publishableKey: repoEnv.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? null,

@@ -23,7 +23,7 @@ import { useThemeColor } from "./lib/useThemeColor";
 import "../global.css";
 
 const appLinking = {
-  prefixes: [Linking.createURL("/"), "t3code://", "t3code-dev://", "t3code-preview://"],
+  prefixes: [Linking.createURL("/"), "zrode://", "zrode-dev://", "zrode-preview://"],
 };
 
 const Navigation = createStaticNavigation(RootStack);

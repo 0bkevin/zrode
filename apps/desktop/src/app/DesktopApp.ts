@@ -53,7 +53,7 @@ export class DesktopDevelopmentBackendPortRequiredError extends Schema.TaggedErr
   {},
 ) {
   override get message(): string {
-    return "T3CODE_PORT is required in desktop development.";
+    return "ZRODE_PORT is required in desktop development.";
   }
 }
 
@@ -125,7 +125,7 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
   if (!wasQuitting) {
     yield* electronDialog.showErrorBox(
-      "T3 Code failed to start",
+      "Zrode failed to start",
       `Stage: ${stage}\n${message}${detail}`,
     );
   }

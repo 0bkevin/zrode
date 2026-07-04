@@ -3,7 +3,7 @@
 - `bun run dev` — Starts contracts, server, and web in `turbo watch` mode.
 - `bun run dev:server` — Starts just the WebSocket server (uses Bun TypeScript execution).
 - `bun run dev:web` — Starts just the Vite dev server for the web app.
-- Dev commands default `T3CODE_STATE_DIR` to `~/.t3/dev` to keep dev state isolated from desktop/prod state.
+- Dev commands default `ZRODE_STATE_DIR` to `~/.t3/dev` to keep dev state isolated from desktop/prod state.
 - Override server CLI-equivalent flags from root dev commands with `--`, for example:
   `bun run dev -- --base-dir ~/.t3-2`
 - `bun run start` — Runs the production server (serves built web app as static files).
@@ -20,14 +20,14 @@
 
 - Default build is unsigned/not notarized for local sharing.
 - The DMG build uses `assets/macos-icon-1024.png` as the production app icon source.
-- Desktop production windows load the bundled UI from `t3code://app/index.html` (not a `127.0.0.1` document URL).
+- Desktop production windows load the bundled UI from `zrode://app/index.html` (not a `127.0.0.1` document URL).
 - Desktop packaging includes `apps/server/dist` (the `t3` backend) and starts it on loopback with an auth token for WebSocket/API traffic.
 - Your tester can still open it on macOS by right-clicking the app and choosing **Open** on first launch.
 - To keep staging files for debugging package contents, run: `bun run dist:desktop:dmg -- --keep-stage`
 - To allow code-signing/notarization when configured in CI/secrets, add: `--signed`.
-- Signed macOS builds also require `T3CODE_APPLE_TEAM_ID` and
-  `T3CODE_MACOS_PROVISIONING_PROFILE`. The passkey RP domain is derived from
-  `T3CODE_CLERK_PUBLISHABLE_KEY` unless `T3CODE_CLERK_PASSKEY_RP_DOMAINS` overrides it.
+- Signed macOS builds also require `ZRODE_APPLE_TEAM_ID` and
+  `ZRODE_MACOS_PROVISIONING_PROFILE`. The passkey RP domain is derived from
+  `ZRODE_CLERK_PUBLISHABLE_KEY` unless `ZRODE_CLERK_PASSKEY_RP_DOMAINS` overrides it.
 - Windows `--signed` uses Azure Trusted Signing and expects:
   `AZURE_TRUSTED_SIGNING_ENDPOINT`, `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME`,
   `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`, and `AZURE_TRUSTED_SIGNING_PUBLISHER_NAME`.
@@ -36,10 +36,10 @@
 
 ## Running multiple dev instances
 
-Set `T3CODE_DEV_INSTANCE` to any value to deterministically shift all dev ports together.
+Set `ZRODE_DEV_INSTANCE` to any value to deterministically shift all dev ports together.
 
 - Default ports: server `3773`, web `5733`
-- Shifted ports: `base + offset` (offset is hashed from `T3CODE_DEV_INSTANCE`)
-- Example: `T3CODE_DEV_INSTANCE=branch-a bun run dev:desktop`
+- Shifted ports: `base + offset` (offset is hashed from `ZRODE_DEV_INSTANCE`)
+- Example: `ZRODE_DEV_INSTANCE=branch-a bun run dev:desktop`
 
-If you want full control instead of hashing, set `T3CODE_PORT_OFFSET` to a numeric offset.
+If you want full control instead of hashing, set `ZRODE_PORT_OFFSET` to a numeric offset.

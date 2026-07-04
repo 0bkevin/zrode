@@ -142,7 +142,7 @@ function bodyText(body: BodyInit | null | undefined): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv("VITE_T3CODE_RELAY_URL", "https://relay.example.test");
+  vi.stubEnv("VITE_ZRODE_RELAY_URL", "https://relay.example.test");
   relayClientInstallDialog.requestConfirmation.mockResolvedValue(true);
 });
 
@@ -239,7 +239,7 @@ describe("web cloud link environment client", () => {
       );
       vi.stubGlobal("fetch", fetchMock);
       vi.stubGlobal("window", {
-        location: { origin: "t3code://app" },
+        location: { origin: "zrode://app" },
         desktopBridge: {
           getLocalEnvironmentBearerToken: vi.fn().mockResolvedValue("desktop-bearer-token"),
         } as unknown as DesktopBridge,

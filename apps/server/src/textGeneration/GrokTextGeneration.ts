@@ -64,7 +64,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         environment,
         childProcessSpawner: commandSpawner,
         cwd,
-        clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
+        clientInfo: { name: "zrode-git-text", version: "0.0.0" },
       });
 
       yield* runtime.handleSessionUpdate((notification) => {

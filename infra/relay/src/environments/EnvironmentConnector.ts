@@ -155,7 +155,7 @@ export class EnvironmentConnector extends Context.Service<
       readonly environmentId: string;
     }) => Effect.Effect<RelayEnvironmentStatusResponse, EnvironmentConnectorError>;
   }
->()("t3code-relay/environments/EnvironmentConnector") {}
+>()("zrode-relay/environments/EnvironmentConnector") {}
 
 const decodeMintResponseProof = Schema.decodeUnknownEffect(
   RelayEnvironmentMintResponseProofPayload,

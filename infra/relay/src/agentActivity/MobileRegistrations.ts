@@ -31,7 +31,7 @@ export class MobileRegistrations extends Context.Service<
       readonly deviceId: string;
     }) => Effect.Effect<{ readonly ok: true }, MobileRegistrationError>;
   }
->()("t3code-relay/agentActivity/MobileRegistrations") {}
+>()("zrode-relay/agentActivity/MobileRegistrations") {}
 
 export const make = Effect.gen(function* () {
   const devices = yield* Devices.Devices;

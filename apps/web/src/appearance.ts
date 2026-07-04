@@ -128,7 +128,7 @@ export const APPEARANCE_COLOR_PRESETS = [
   {
     id: "default",
     label: "Default",
-    description: "Native T3 Code colors.",
+    description: "Native Zrode colors.",
     tokens: {
       light: {
         accent: "#f5f5f5",
