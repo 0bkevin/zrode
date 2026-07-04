@@ -31,6 +31,50 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
+describe("ClientSettings appearance", () => {
+  it("defaults to the system palette and standard radius", () => {
+    expect(decodeClientSettings({}).appearance).toEqual({
+      colorPreset: "default",
+      radiusPx: 10,
+      customColors: {},
+    });
+  });
+
+  it("accepts constrained hex color token overrides", () => {
+    const decoded = decodeClientSettings({
+      appearance: {
+        colorPreset: "ocean",
+        radiusPx: 16,
+        customColors: {
+          background: "  #102030  ",
+          primary: "#33AAFF",
+        },
+      },
+    });
+
+    expect(decoded.appearance).toEqual({
+      colorPreset: "ocean",
+      radiusPx: 16,
+      customColors: {
+        background: "#102030",
+        primary: "#33AAFF",
+      },
+    });
+  });
+
+  it("rejects unsafe color token values", () => {
+    expect(() =>
+      decodeClientSettings({
+        appearance: {
+          customColors: {
+            background: "url(javascript:alert(1))",
+          },
+        },
+      }),
+    ).toThrow();
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {
     expect(DEFAULT_SERVER_SETTINGS.providerInstances).toEqual({});

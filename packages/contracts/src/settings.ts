@@ -39,7 +39,63 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 
+export const AppearanceColorPreset = Schema.Literals([
+  "default",
+  "graphite",
+  "ocean",
+  "forest",
+  "rose",
+]);
+export type AppearanceColorPreset = typeof AppearanceColorPreset.Type;
+export const DEFAULT_APPEARANCE_COLOR_PRESET: AppearanceColorPreset = "default";
+
+export const MIN_APPEARANCE_RADIUS_PX = 0;
+export const MAX_APPEARANCE_RADIUS_PX = 24;
+export const DEFAULT_APPEARANCE_RADIUS_PX = 10;
+export const AppearanceRadiusPx = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_APPEARANCE_RADIUS_PX,
+    maximum: MAX_APPEARANCE_RADIUS_PX,
+  }),
+);
+export type AppearanceRadiusPx = typeof AppearanceRadiusPx.Type;
+
+export const AppearanceHexColor = TrimmedString.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/));
+export type AppearanceHexColor = typeof AppearanceHexColor.Type;
+
+export const AppearanceColorTokenOverrides = Schema.Struct({
+  appChromeBackground: Schema.optionalKey(AppearanceHexColor),
+  background: Schema.optionalKey(AppearanceHexColor),
+  foreground: Schema.optionalKey(AppearanceHexColor),
+  card: Schema.optionalKey(AppearanceHexColor),
+  cardForeground: Schema.optionalKey(AppearanceHexColor),
+  popover: Schema.optionalKey(AppearanceHexColor),
+  popoverForeground: Schema.optionalKey(AppearanceHexColor),
+  primary: Schema.optionalKey(AppearanceHexColor),
+  primaryForeground: Schema.optionalKey(AppearanceHexColor),
+  muted: Schema.optionalKey(AppearanceHexColor),
+  mutedForeground: Schema.optionalKey(AppearanceHexColor),
+  accent: Schema.optionalKey(AppearanceHexColor),
+  accentForeground: Schema.optionalKey(AppearanceHexColor),
+  border: Schema.optionalKey(AppearanceHexColor),
+  input: Schema.optionalKey(AppearanceHexColor),
+  ring: Schema.optionalKey(AppearanceHexColor),
+});
+export type AppearanceColorTokenOverrides = typeof AppearanceColorTokenOverrides.Type;
+
+export const ClientAppearanceSettingsSchema = Schema.Struct({
+  colorPreset: AppearanceColorPreset.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_APPEARANCE_COLOR_PRESET)),
+  ),
+  radiusPx: AppearanceRadiusPx.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_APPEARANCE_RADIUS_PX)),
+  ),
+  customColors: AppearanceColorTokenOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+});
+export type ClientAppearanceSettings = typeof ClientAppearanceSettingsSchema.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
+  appearance: ClientAppearanceSettingsSchema.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -534,6 +590,7 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  appearance: Schema.optionalKey(ClientAppearanceSettingsSchema),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),

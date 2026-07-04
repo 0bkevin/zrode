@@ -89,21 +89,6 @@ import {
 import { ProjectFavicon } from "../ProjectFavicon";
 import { useAtomCommand } from "../../state/use-atom-command";
 
-const THEME_OPTIONS = [
-  {
-    value: "system",
-    label: "System",
-  },
-  {
-    value: "light",
-    label: "Light",
-  },
-  {
-    value: "dark",
-    label: "Dark",
-  },
-] as const;
-
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
   "12-hour": "12-hour",
@@ -372,7 +357,7 @@ function AboutVersionSection() {
   );
 }
 
-export function useSettingsRestore(onRestored?: () => void) {
+export function useSettingsRestore(scope: "general" | "appearance", onRestored?: () => void) {
   const { theme, setTheme } = useTheme();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
@@ -382,9 +367,21 @@ export function useSettingsRestore(onRestored?: () => void) {
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
 
-  const changedSettingLabels = useMemo(
-    () => [
-      ...(theme !== "system" ? ["Theme"] : []),
+  const changedSettingLabels = useMemo(() => {
+    if (scope === "appearance") {
+      return [
+        ...(theme !== "system" ? ["Color mode"] : []),
+        ...(settings.appearance.colorPreset !== DEFAULT_UNIFIED_SETTINGS.appearance.colorPreset
+          ? ["Palette"]
+          : []),
+        ...(settings.appearance.radiusPx !== DEFAULT_UNIFIED_SETTINGS.appearance.radiusPx
+          ? ["Corner radius"]
+          : []),
+        ...(Object.keys(settings.appearance.customColors).length > 0 ? ["Color tokens"] : []),
+      ];
+    }
+
+    return [
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
@@ -422,24 +419,25 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Delete confirmation"]
         : []),
       ...(isGitWritingModelDirty ? ["Git writing model"] : []),
-    ],
-    [
-      isGitWritingModelDirty,
-      settings.autoOpenPlanSidebar,
-      settings.confirmThreadArchive,
-      settings.confirmThreadDelete,
-      settings.addProjectBaseDirectory,
-      settings.defaultThreadEnvMode,
-      settings.newWorktreesStartFromOrigin,
-      settings.diffIgnoreWhitespace,
-      settings.automaticGitFetchInterval,
-      settings.enableAssistantStreaming,
-      settings.sidebarThreadPreviewCount,
-      settings.timestampFormat,
-      settings.wordWrap,
-      theme,
-    ],
-  );
+    ];
+  }, [
+    isGitWritingModelDirty,
+    scope,
+    settings.appearance,
+    settings.autoOpenPlanSidebar,
+    settings.confirmThreadArchive,
+    settings.confirmThreadDelete,
+    settings.addProjectBaseDirectory,
+    settings.defaultThreadEnvMode,
+    settings.newWorktreesStartFromOrigin,
+    settings.diffIgnoreWhitespace,
+    settings.automaticGitFetchInterval,
+    settings.enableAssistantStreaming,
+    settings.sidebarThreadPreviewCount,
+    settings.timestampFormat,
+    settings.wordWrap,
+    theme,
+  ]);
 
   const restoreDefaults = useCallback(async () => {
     if (changedSettingLabels.length === 0) return;
@@ -451,7 +449,15 @@ export function useSettingsRestore(onRestored?: () => void) {
     );
     if (!confirmed) return;
 
-    setTheme("system");
+    if (scope === "appearance") {
+      setTheme("system");
+      updateSettings({
+        appearance: DEFAULT_UNIFIED_SETTINGS.appearance,
+      });
+      onRestored?.();
+      return;
+    }
+
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
@@ -468,7 +474,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
     });
     onRestored?.();
-  }, [changedSettingLabels, onRestored, setTheme, updateSettings]);
+  }, [changedSettingLabels, onRestored, scope, setTheme, updateSettings]);
 
   return {
     changedSettingLabels,
@@ -477,7 +483,6 @@ export function useSettingsRestore(onRestored?: () => void) {
 }
 
 export function GeneralSettingsPanel() {
-  const { theme, setTheme } = useTheme();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const observability = useAtomValue(primaryServerObservabilityAtom);
@@ -516,39 +521,6 @@ export function GeneralSettingsPanel() {
   return (
     <SettingsPageContainer>
       <SettingsSection title="General">
-        <SettingsRow
-          title="Theme"
-          description="Choose how T3 Code looks across the app."
-          resetAction={
-            theme !== "system" ? (
-              <SettingResetButton label="theme" onClick={() => setTheme("system")} />
-            ) : null
-          }
-          control={
-            <Select
-              value={theme}
-              onValueChange={(value) => {
-                if (value === "system" || value === "light" || value === "dark") {
-                  setTheme(value);
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Theme preference">
-                <SelectValue>
-                  {THEME_OPTIONS.find((option) => option.value === theme)?.label ?? "System"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {THEME_OPTIONS.map((option) => (
-                  <SelectItem hideIndicator key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-
         <SettingsRow
           title="Time format"
           description="System default follows your browser or OS clock preference."

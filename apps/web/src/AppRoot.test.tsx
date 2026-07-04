@@ -16,7 +16,7 @@ describe("AppRoot", () => {
     const children = Children.toArray(
       (root as ReactElement<{ readonly children: ReactNode }>).props.children,
     );
-    expect(children).toHaveLength(3);
+    expect(children).toHaveLength(4);
     expect(isValidElement(children[0]) && children[0].type).toBe(RouterProvider);
     expect(isValidElement(children[1]) && children[1].type).toBe(PreviewAutomationHosts);
     expect(isValidElement(children[2]) && children[2].type).toBe(ElectronBrowserHost);

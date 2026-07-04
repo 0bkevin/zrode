@@ -25,7 +25,7 @@ const TREE_UNSAFE_CSS = `
     --trees-font-family-override: var(--font-sans);
     --trees-font-size-override: 12px;
   }
-  button[data-type='item'] { border-radius: 5px; }
+  button[data-type='item'] { border-radius: var(--radius-sm); }
 `;
 
 function treePath(entry: ProjectEntry): string {
