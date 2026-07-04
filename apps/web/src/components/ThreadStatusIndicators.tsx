@@ -4,6 +4,7 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import type { VcsStatusResult } from "@t3tools/contracts";
+import { formatWorktreeBranchNameForDisplay } from "@t3tools/shared/git";
 import { CloudIcon, FolderGit2Icon, GitPullRequestIcon, TerminalIcon } from "lucide-react";
 import { useMemo } from "react";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
@@ -106,8 +107,9 @@ export function ThreadWorktreeIndicator({
   }
 
   const displayPath = formatWorktreePathForDisplay(worktreePath);
-  const tooltip = thread.branch
-    ? `Worktree: ${displayPath} (${thread.branch})`
+  const displayBranch = formatWorktreeBranchNameForDisplay(thread.branch);
+  const tooltip = displayBranch
+    ? `Worktree: ${displayPath} (${displayBranch})`
     : `Worktree: ${displayPath}`;
 
   return (

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyGitStatusStreamEvent,
   buildTemporaryWorktreeBranchName,
+  formatWorktreeBranchNameForDisplay,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -71,10 +72,39 @@ describe("isTemporaryWorktreeBranch", () => {
     expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/DEADBEEF`)).toBe(true);
   });
 
+  it("matches persisted legacy generated temporary worktree refs", () => {
+    expect(isTemporaryWorktreeBranch("t3code/deadbeef")).toBe(true);
+    expect(isTemporaryWorktreeBranch(" T3CODE/DEADBEEF ")).toBe(true);
+  });
+
   it("rejects non-temporary refName names", () => {
     expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/feature/demo`)).toBe(false);
     expect(isTemporaryWorktreeBranch("main")).toBe(false);
     expect(isTemporaryWorktreeBranch(`${WORKTREE_BRANCH_PREFIX}/deadbeef-extra`)).toBe(false);
+  });
+});
+
+describe("formatWorktreeBranchNameForDisplay", () => {
+  it("keeps current branch names unchanged", () => {
+    expect(formatWorktreeBranchNameForDisplay(`${WORKTREE_BRANCH_PREFIX}/deadbeef`)).toBe(
+      `${WORKTREE_BRANCH_PREFIX}/deadbeef`,
+    );
+    expect(formatWorktreeBranchNameForDisplay("feature/demo")).toBe("feature/demo");
+  });
+
+  it("normalizes persisted legacy worktree branch names for display", () => {
+    expect(formatWorktreeBranchNameForDisplay("t3code/deadbeef")).toBe(
+      `${WORKTREE_BRANCH_PREFIX}/deadbeef`,
+    );
+    expect(formatWorktreeBranchNameForDisplay(" T3CODE/DEADBEEF ")).toBe(
+      `${WORKTREE_BRANCH_PREFIX}/DEADBEEF`,
+    );
+  });
+
+  it("returns null for missing or blank branch names", () => {
+    expect(formatWorktreeBranchNameForDisplay(null)).toBe(null);
+    expect(formatWorktreeBranchNameForDisplay(undefined)).toBe(null);
+    expect(formatWorktreeBranchNameForDisplay("  ")).toBe(null);
   });
 });
 

@@ -4,6 +4,7 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import { LegendList } from "@legendapp/list/react-native";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { formatWorktreeBranchNameForDisplay } from "@t3tools/shared/git";
 import type { MenuAction } from "@react-native-menu/menu";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { SymbolView } from "expo-symbols";
@@ -277,7 +278,8 @@ function ArchivedThreadRow(props: {
   const iconColor = useThemeColor("--color-icon-subtle");
   const separatorColor = useThemeColor("--color-separator");
   const timestamp = relativeTime(props.thread.archivedAt ?? props.thread.updatedAt);
-  const subtitle = [props.environmentLabel, props.thread.branch].filter((part): part is string =>
+  const displayBranch = formatWorktreeBranchNameForDisplay(props.thread.branch);
+  const subtitle = [props.environmentLabel, displayBranch].filter((part): part is string =>
     Boolean(part),
   );
   const handleMenuAction = useCallback(

@@ -6,6 +6,7 @@ import {
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { formatWorktreeBranchNameForDisplay } from "@t3tools/shared/git";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 
@@ -26,6 +27,12 @@ function archiveTimestamp(thread: EnvironmentThreadShell): number {
 
 function matchesQuery(value: string | null, query: string): boolean {
   return value?.toLocaleLowerCase().includes(query) ?? false;
+}
+
+function matchesBranchQuery(branch: string | null, query: string): boolean {
+  return (
+    matchesQuery(formatWorktreeBranchNameForDisplay(branch), query) || matchesQuery(branch, query)
+  );
 }
 
 export function buildArchivedThreadGroups(input: {
@@ -65,7 +72,8 @@ export function buildArchivedThreadGroups(input: {
       const matchingThreads = groupMatches
         ? projectThreads
         : projectThreads.filter(
-            (thread) => matchesQuery(thread.title, query) || matchesQuery(thread.branch, query),
+            (thread) =>
+              matchesQuery(thread.title, query) || matchesBranchQuery(thread.branch, query),
           );
 
       if (matchingThreads.length === 0) {

@@ -122,6 +122,26 @@ describe("buildArchivedThreadGroups", () => {
     expect(result[0]?.threads.map((thread) => thread.id)).toEqual(["thread-1"]);
   });
 
+  it("matches archived legacy worktree branch names by their current display prefix", () => {
+    const project = makeProject({ id: ProjectId.make("project-1"), title: "Zrode" });
+    const thread = makeThread({
+      branch: "t3code/deadbeef",
+      id: ThreadId.make("thread-1"),
+      projectId: project.id,
+      title: "Legacy branch",
+    });
+
+    const result = buildArchivedThreadGroups({
+      snapshots: [makeSnapshot([project], [thread])],
+      environmentLabels: {},
+      environmentId: null,
+      searchQuery: "zrode/deadbeef",
+      sortOrder: "newest",
+    });
+
+    expect(result[0]?.threads.map((matchingThread) => matchingThread.id)).toEqual(["thread-1"]);
+  });
+
   it("ignores non-archived entries returned in a snapshot", () => {
     const project = makeProject({ id: ProjectId.make("project-1"), title: "Zrode" });
     const active = makeThread({

@@ -1,5 +1,6 @@
 import { type KeybindingCommand, type FilesystemBrowseEntry } from "@t3tools/contracts";
 import type { SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import { formatWorktreeBranchNameForDisplay } from "@t3tools/shared/git";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { type ReactNode } from "react";
@@ -142,12 +143,13 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   return visibleThreads.map((thread) => {
     const projectTitle = input.projectTitleById.get(thread.projectId);
     const descriptionParts: string[] = [];
+    const displayBranch = formatWorktreeBranchNameForDisplay(thread.branch);
 
     if (projectTitle) {
       descriptionParts.push(projectTitle);
     }
-    if (thread.branch) {
-      descriptionParts.push(`#${thread.branch}`);
+    if (displayBranch) {
+      descriptionParts.push(`#${displayBranch}`);
     }
     if (thread.id === input.activeThreadId) {
       descriptionParts.push("Current thread");
@@ -160,7 +162,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       {
         kind: "action" as const,
         value: `thread:${thread.id}`,
-        searchTerms: [thread.title, projectTitle ?? ``, thread.branch ?? ``],
+        searchTerms: [thread.title, projectTitle ?? ``, displayBranch ?? ``, thread.branch ?? ``],
         title: thread.title,
         description: descriptionParts.join(` · `),
         timestamp: formatRelativeTimeLabel(

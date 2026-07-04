@@ -3,6 +3,7 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import { formatWorktreeBranchNameForDisplay } from "@t3tools/shared/git";
 import type { MenuAction } from "@react-native-menu/menu";
 import { SymbolView } from "expo-symbols";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
@@ -209,8 +210,9 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
   const { pendingTask, onSelectPendingTask, onDeletePendingTask } = props;
   const timestamp = relativeTime(pendingTask.message.createdAt);
-  const subtitleParts = [props.environmentLabel, pendingTask.creation.branch].filter(
-    (part): part is string => Boolean(part),
+  const pendingTaskBranch = formatWorktreeBranchNameForDisplay(pendingTask.creation.branch);
+  const subtitleParts = [props.environmentLabel, pendingTaskBranch].filter((part): part is string =>
+    Boolean(part),
   );
 
   const handleMenuAction = useCallback(
@@ -398,7 +400,8 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
-  const subtitleParts = [props.environmentLabel, thread.branch].filter((part): part is string =>
+  const displayBranch = formatWorktreeBranchNameForDisplay(thread.branch);
+  const subtitleParts = [props.environmentLabel, displayBranch].filter((part): part is string =>
     Boolean(part),
   );
 

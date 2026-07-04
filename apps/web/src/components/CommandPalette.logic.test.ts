@@ -162,4 +162,20 @@ describe("buildThreadActionItems", () => {
 
     expect(items.map((item) => item.value)).toEqual(["thread:thread-active"]);
   });
+
+  it("uses the current worktree branch prefix when displaying legacy branch names", () => {
+    const items = buildThreadActionItems({
+      threads: [
+        makeThread({
+          branch: "t3code/deadbeef",
+        }),
+      ],
+      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      sortOrder: "updated_at",
+      icon: null,
+      runThread: async (_thread) => undefined,
+    });
+
+    expect(items[0]?.description).toBe("Project · #zrode/deadbeef");
+  });
 });

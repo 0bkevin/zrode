@@ -11,7 +11,10 @@ import * as Result from "effect/Result";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
 export const WORKTREE_BRANCH_PREFIX = "zrode";
-const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(`^${WORKTREE_BRANCH_PREFIX}\\/[0-9a-f]{8}$`);
+const LEGACY_WORKTREE_BRANCH_PREFIX = "t3code";
+const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
+  `^(?:${WORKTREE_BRANCH_PREFIX}|${LEGACY_WORKTREE_BRANCH_PREFIX})\\/[0-9a-f]{8}$`,
+);
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -95,6 +98,22 @@ export function buildTemporaryWorktreeBranchName(
 
 export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
+}
+
+export function formatWorktreeBranchNameForDisplay(
+  branchName: string | null | undefined,
+): string | null {
+  const trimmed = branchName?.trim() ?? "";
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const legacyPrefix = `${LEGACY_WORKTREE_BRANCH_PREFIX}/`;
+  if (trimmed.toLowerCase().startsWith(legacyPrefix)) {
+    return `${WORKTREE_BRANCH_PREFIX}/${trimmed.slice(legacyPrefix.length)}`;
+  }
+
+  return trimmed;
 }
 
 /**
