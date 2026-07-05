@@ -201,16 +201,14 @@ export function AgentActivity(
       </VStack>
     ),
     compactLeading: (
-      <Text modifiers={[font({ weight: "bold", size: 11 }), foregroundStyle(tint)]}>T3</Text>
+      <Text modifiers={[font({ weight: "bold", size: 11 }), foregroundStyle(tint)]}>Z</Text>
     ),
     compactTrailing: (
       <Text modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint)]}>
         {activeLabel}
       </Text>
     ),
-    minimal: (
-      <Text modifiers={[font({ weight: "bold", size: 11 }), foregroundStyle(tint)]}>T3</Text>
-    ),
+    minimal: <Text modifiers={[font({ weight: "bold", size: 11 }), foregroundStyle(tint)]}>Z</Text>,
     expandedLeading: (
       <VStack modifiers={[padding({ all: 8 })]}>
         <Text modifiers={[font({ weight: "bold", size: 12 }), foregroundStyle(tint)]}>

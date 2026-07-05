@@ -53,6 +53,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -339,6 +340,12 @@ type ChatViewProps =
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
       reserveTitleBarControlInset?: boolean;
+      /**
+       * Where the top bar renders: undefined keeps it inline (default),
+       * null hides it, and an element portals it there (split panes portal
+       * the focused pane's top bar into the shared full-width slot).
+       */
+      topBarSlot?: HTMLElement | null;
       routeKind: "server";
       draftId?: never;
     }
@@ -347,6 +354,7 @@ type ChatViewProps =
       threadId: ThreadId;
       onDiffPanelOpen?: () => void;
       reserveTitleBarControlInset?: boolean;
+      topBarSlot?: HTMLElement | null;
       routeKind: "draft";
       draftId: DraftId;
     };
@@ -986,6 +994,7 @@ function ChatViewContent(props: ChatViewProps) {
     routeKind,
     onDiffPanelOpen,
     reserveTitleBarControlInset = true,
+    topBarSlot,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
@@ -4937,6 +4946,46 @@ function ChatViewContent(props: ChatViewProps) {
       {panelToggleControls}
     </div>
   );
+  const topBarElement = (
+    <header
+      data-chat-header
+      className={cn(
+        "border-b border-border transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none",
+        isElectron
+          ? cn(
+              "workspace-topbar drag-region relative px-3 sm:px-5",
+              reserveTitleBarControlInset &&
+                !inlineRightPanelOwnsTitleBar &&
+                "wco:pr-[var(--workspace-native-controls-inset)]",
+            )
+          : "workspace-topbar pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)]",
+        COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+      )}
+    >
+      {!rightPanelOpen ? panelLayoutControls : null}
+      <ChatHeader
+        activeThreadEnvironmentId={activeThread.environmentId}
+        activeThreadId={activeThread.id}
+        {...(routeKind === "draft" && draftId ? { draftId } : {})}
+        activeThreadTitle={activeThread.title}
+        activeProjectName={activeProject?.title}
+        showProjectName={topBarSlot !== undefined}
+        openInCwd={gitCwd}
+        activeProjectScripts={activeProject?.scripts}
+        preferredScriptId={
+          activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
+        }
+        keybindings={keybindings}
+        availableEditors={availableEditors}
+        rightPanelOpen={rightPanelOpen}
+        gitCwd={gitCwd}
+        onRunProjectScript={runProjectScript}
+        onAddProjectScript={saveProjectScript}
+        onUpdateProjectScript={updateProjectScript}
+        onDeleteProjectScript={deleteProjectScript}
+      />
+    </header>
+  );
   const rightPanelContent = activeThreadRef ? (
     activeRightPanelSurface?.kind === "preview" ? (
       <Suspense fallback={null}>
@@ -5017,44 +5066,13 @@ function ChatViewContent(props: ChatViewProps) {
         )}
         data-chat-column-maximized-away={rightPanelMaximized ? "true" : "false"}
       >
-        {/* Top bar */}
-        <header
-          data-chat-header
-          className={cn(
-            "border-b border-border transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none",
-            isElectron
-              ? cn(
-                  "workspace-topbar drag-region relative px-3 sm:px-5",
-                  reserveTitleBarControlInset &&
-                    !inlineRightPanelOwnsTitleBar &&
-                    "wco:pr-[var(--workspace-native-controls-inset)]",
-                )
-              : "workspace-topbar pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)]",
-            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
-          )}
-        >
-          {!rightPanelOpen ? panelLayoutControls : null}
-          <ChatHeader
-            activeThreadEnvironmentId={activeThread.environmentId}
-            activeThreadId={activeThread.id}
-            {...(routeKind === "draft" && draftId ? { draftId } : {})}
-            activeThreadTitle={activeThread.title}
-            activeProjectName={activeProject?.title}
-            openInCwd={gitCwd}
-            activeProjectScripts={activeProject?.scripts}
-            preferredScriptId={
-              activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
-            }
-            keybindings={keybindings}
-            availableEditors={availableEditors}
-            rightPanelOpen={rightPanelOpen}
-            gitCwd={gitCwd}
-            onRunProjectScript={runProjectScript}
-            onAddProjectScript={saveProjectScript}
-            onUpdateProjectScript={updateProjectScript}
-            onDeleteProjectScript={deleteProjectScript}
-          />
-        </header>
+        {/* Top bar: inline by default; split panes hide it or portal the
+            focused pane's bar into the shared slot above the splits. */}
+        {topBarSlot === undefined
+          ? topBarElement
+          : topBarSlot === null
+            ? null
+            : createPortal(topBarElement, topBarSlot)}
 
         {/* Error banner */}
         <ProviderStatusBanner status={activeProviderStatus} />

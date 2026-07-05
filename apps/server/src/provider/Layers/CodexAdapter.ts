@@ -1406,13 +1406,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
-                  T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+                  ZRODE_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
                   "-c",
                   `mcp_servers.zrode.url=${mcpSession.endpoint}`,
                   "-c",
-                  'mcp_servers.zrode.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  'mcp_servers.zrode.bearer_token_env_var="ZRODE_MCP_BEARER_TOKEN"',
                 ],
               }
             : {}),

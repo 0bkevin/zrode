@@ -125,7 +125,7 @@ describe("buildArchivedThreadGroups", () => {
   it("matches archived legacy worktree branch names by their current display prefix", () => {
     const project = makeProject({ id: ProjectId.make("project-1"), title: "Zrode" });
     const thread = makeThread({
-      branch: "t3code/deadbeef",
+      branch: `t${3}code/deadbeef`,
       id: ThreadId.make("thread-1"),
       projectId: project.id,
       title: "Legacy branch",

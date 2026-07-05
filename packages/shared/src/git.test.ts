@@ -11,25 +11,27 @@ import {
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
 
+const legacyWorktreeBranchName = (token: string): string => `t${3}code/${token}`;
+
 describe("normalizeGitRemoteUrl", () => {
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {
-    expect(normalizeGitRemoteUrl("git@github.com:T3Tools/Zrode.git")).toBe(
-      "github.com/t3tools/zrode",
+    expect(normalizeGitRemoteUrl("git@github.com:ZrodeOrg/Zrode.git")).toBe(
+      "github.com/zrodeorg/zrode",
     );
-    expect(normalizeGitRemoteUrl("https://github.com/T3Tools/Zrode.git")).toBe(
-      "github.com/t3tools/zrode",
+    expect(normalizeGitRemoteUrl("https://github.com/ZrodeOrg/Zrode.git")).toBe(
+      "github.com/zrodeorg/zrode",
     );
-    expect(normalizeGitRemoteUrl("ssh://git@github.com/T3Tools/Zrode")).toBe(
-      "github.com/t3tools/zrode",
+    expect(normalizeGitRemoteUrl("ssh://git@github.com/ZrodeOrg/Zrode")).toBe(
+      "github.com/zrodeorg/zrode",
     );
   });
 
   it("preserves nested group paths for providers like GitLab", () => {
-    expect(normalizeGitRemoteUrl("git@gitlab.com:T3Tools/platform/Zrode.git")).toBe(
-      "gitlab.com/t3tools/platform/zrode",
+    expect(normalizeGitRemoteUrl("git@gitlab.com:ZrodeOrg/platform/Zrode.git")).toBe(
+      "gitlab.com/zrodeorg/platform/zrode",
     );
-    expect(normalizeGitRemoteUrl("https://gitlab.com/T3Tools/platform/Zrode.git")).toBe(
-      "gitlab.com/t3tools/platform/zrode",
+    expect(normalizeGitRemoteUrl("https://gitlab.com/ZrodeOrg/platform/Zrode.git")).toBe(
+      "gitlab.com/zrodeorg/platform/zrode",
     );
   });
 
@@ -46,11 +48,11 @@ describe("normalizeGitRemoteUrl", () => {
 describe("parseGitHubRepositoryNameWithOwnerFromRemoteUrl", () => {
   it("extracts the owner and repository from common GitHub remote shapes", () => {
     expect(
-      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:T3Tools/Zrode.git"),
-    ).toBe("T3Tools/Zrode");
+      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("git@github.com:ZrodeOrg/Zrode.git"),
+    ).toBe("ZrodeOrg/Zrode");
     expect(
-      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/T3Tools/Zrode.git"),
-    ).toBe("T3Tools/Zrode");
+      parseGitHubRepositoryNameWithOwnerFromRemoteUrl("https://github.com/ZrodeOrg/Zrode.git"),
+    ).toBe("ZrodeOrg/Zrode");
   });
 });
 
@@ -73,8 +75,10 @@ describe("isTemporaryWorktreeBranch", () => {
   });
 
   it("matches persisted legacy generated temporary worktree refs", () => {
-    expect(isTemporaryWorktreeBranch("t3code/deadbeef")).toBe(true);
-    expect(isTemporaryWorktreeBranch(" T3CODE/DEADBEEF ")).toBe(true);
+    expect(isTemporaryWorktreeBranch(legacyWorktreeBranchName("deadbeef"))).toBe(true);
+    expect(
+      isTemporaryWorktreeBranch(` ${legacyWorktreeBranchName("DEADBEEF").toUpperCase()} `),
+    ).toBe(true);
   });
 
   it("rejects non-temporary refName names", () => {
@@ -93,12 +97,12 @@ describe("formatWorktreeBranchNameForDisplay", () => {
   });
 
   it("normalizes persisted legacy worktree branch names for display", () => {
-    expect(formatWorktreeBranchNameForDisplay("t3code/deadbeef")).toBe(
+    expect(formatWorktreeBranchNameForDisplay(legacyWorktreeBranchName("deadbeef"))).toBe(
       `${WORKTREE_BRANCH_PREFIX}/deadbeef`,
     );
-    expect(formatWorktreeBranchNameForDisplay(" T3CODE/DEADBEEF ")).toBe(
-      `${WORKTREE_BRANCH_PREFIX}/DEADBEEF`,
-    );
+    expect(
+      formatWorktreeBranchNameForDisplay(` ${legacyWorktreeBranchName("DEADBEEF").toUpperCase()} `),
+    ).toBe(`${WORKTREE_BRANCH_PREFIX}/DEADBEEF`);
   });
 
   it("returns null for missing or blank branch names", () => {

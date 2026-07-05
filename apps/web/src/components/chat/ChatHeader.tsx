@@ -24,6 +24,8 @@ interface ChatHeaderProps {
   draftId?: DraftId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
+  /** Prefix the title with the project name (split view: the shared top bar must say which project the focused pane belongs to). */
+  showProjectName?: boolean;
   openInCwd: string | null;
   activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
   preferredScriptId: string | null;
@@ -58,6 +60,7 @@ export const ChatHeader = memo(function ChatHeader({
   draftId,
   activeThreadTitle,
   activeProjectName,
+  showProjectName = false,
   openInCwd,
   activeProjectScripts,
   preferredScriptId,
@@ -79,6 +82,16 @@ export const ChatHeader = memo(function ChatHeader({
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
+        {showProjectName && activeProjectName && (
+          <span className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-3">
+            <span className="max-w-48 truncate text-sm text-muted-foreground">
+              {activeProjectName}
+            </span>
+            <span aria-hidden className="text-sm text-muted-foreground/50">
+              /
+            </span>
+          </span>
+        )}
         <Tooltip>
           <TooltipTrigger
             render={

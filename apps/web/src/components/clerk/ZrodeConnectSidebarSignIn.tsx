@@ -4,21 +4,21 @@ import { LogInIcon, SmartphoneIcon } from "lucide-react";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
 import { MobileClientsUserProfilePage } from "./MobileClientsUserProfilePage";
-import { useT3ConnectAuthPrompt } from "./useT3ConnectAuthPrompt";
+import { useZrodeConnectAuthPrompt } from "./useZrodeConnectAuthPrompt";
 
-export function T3ConnectSidebarSignIn() {
+export function ZrodeConnectSidebarSignIn() {
   if (!hasCloudPublicConfig()) return null;
 
-  return <ConfiguredT3ConnectSidebarSignIn />;
+  return <ConfiguredZrodeConnectSidebarSignIn />;
 }
 
-export function T3ConnectSidebarAvatar() {
+export function ZrodeConnectSidebarAvatar() {
   if (!hasCloudPublicConfig()) return null;
 
-  return <ConfiguredT3ConnectSidebarAvatar />;
+  return <ConfiguredZrodeConnectSidebarAvatar />;
 }
 
-function ConfiguredT3ConnectSidebarAvatar() {
+function ConfiguredZrodeConnectSidebarAvatar() {
   const { isLoaded, isSignedIn } = useAuth();
 
   if (!isLoaded || !isSignedIn) return null;
@@ -43,9 +43,9 @@ function ConfiguredT3ConnectSidebarAvatar() {
   );
 }
 
-function ConfiguredT3ConnectSidebarSignIn() {
+function ConfiguredZrodeConnectSidebarSignIn() {
   const { isLoaded, isSignedIn } = useAuth();
-  const { authPrompt, openAuthPrompt } = useT3ConnectAuthPrompt();
+  const { authPrompt, openAuthPrompt } = useZrodeConnectAuthPrompt();
 
   if (!isLoaded || isSignedIn) return null;
 
@@ -59,7 +59,7 @@ function ConfiguredT3ConnectSidebarSignIn() {
             onClick={openAuthPrompt}
           >
             <LogInIcon className="size-4" />
-            <span>Sign in to T3 Connect</span>
+            <span>Sign in to Zrode Connect</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>

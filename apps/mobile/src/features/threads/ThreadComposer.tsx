@@ -6,7 +6,7 @@ import type {
   OrchestrationThreadShell,
   ProviderInteractionMode,
   RuntimeMode,
-  ServerConfig as T3ServerConfig,
+  ServerConfig,
 } from "@t3tools/contracts";
 import {
   detectComposerTrigger,
@@ -89,7 +89,7 @@ export interface ThreadComposerProps {
    */
   readonly threadSyncPhase?: "loading" | "syncing" | null;
   readonly selectedThread: OrchestrationThreadShell;
-  readonly serverConfig: T3ServerConfig | null;
+  readonly serverConfig: ServerConfig | null;
   readonly queueCount: number;
   readonly activeThreadBusy: boolean;
   readonly environmentId: EnvironmentId;

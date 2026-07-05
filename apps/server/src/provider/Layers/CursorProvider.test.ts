@@ -152,7 +152,7 @@ const makeExitLogFixture = Effect.fn("makeExitLogFixture")(function* (prefix: st
   return {
     exitLogPath,
     wrapperPath: yield* makeMockAgentWrapper({
-      T3_ACP_EXIT_LOG_PATH: exitLogPath,
+      ZRODE_ACP_EXIT_LOG_PATH: exitLogPath,
     }),
   };
 });
@@ -458,7 +458,7 @@ describe("checkCursorProviderStatus", () => {
         },
         {
           ...process.env,
-          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+          ZRODE_ACP_REQUEST_LOG_PATH: requestLogPath,
         },
       ),
     );

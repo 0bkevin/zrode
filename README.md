@@ -28,7 +28,7 @@ Install the latest version of the desktop app from [GitHub Releases](https://git
 #### Windows (`winget`)
 
 ```bash
-winget install T3Tools.Zrode
+winget install Zrode.Zrode
 ```
 
 #### macOS (Homebrew)
@@ -86,5 +86,3 @@ vp i
 ```
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or PR.
-
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).

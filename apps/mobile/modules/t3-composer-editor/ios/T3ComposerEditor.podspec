@@ -3,7 +3,7 @@ Pod::Spec.new do |s|
   s.version        = '1.0.0'
   s.summary        = 'Native attributed composer editor for Zrode mobile.'
   s.description    = 'UIKit-backed rich text composer with atomic skill and file tokens.'
-  s.author         = 'T3 Tools'
+  s.author         = 'Zrode'
   s.homepage       = 'https://t3tools.com'
   s.platforms      = {
     :ios => '16.4',

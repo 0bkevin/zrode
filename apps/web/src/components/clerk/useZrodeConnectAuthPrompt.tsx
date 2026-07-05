@@ -1,6 +1,6 @@
 import { useClerk } from "@clerk/react";
 
-export function useT3ConnectAuthPrompt() {
+export function useZrodeConnectAuthPrompt() {
   const clerk = useClerk();
   const openAuthPrompt = () => {
     clerk.openWaitlist();

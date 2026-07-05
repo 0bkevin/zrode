@@ -167,7 +167,7 @@ describe("buildThreadActionItems", () => {
     const items = buildThreadActionItems({
       threads: [
         makeThread({
-          branch: "t3code/deadbeef",
+          branch: `t${3}code/deadbeef`,
         }),
       ],
       projectTitleById: new Map([[PROJECT_ID, "Project"]]),

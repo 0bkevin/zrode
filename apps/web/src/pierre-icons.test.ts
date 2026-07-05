@@ -4,7 +4,7 @@ import {
   hasSpecificPierreIconForFileName,
   resolvePierreIconForEntry,
   syntheticFileNameForLanguageId,
-  T3_PIERRE_ICONS,
+  ZRODE_PIERRE_ICONS,
 } from "./pierre-icons";
 
 describe("Pierre file icons", () => {
@@ -14,7 +14,7 @@ describe("Pierre file icons", () => {
     assert.equal(resolvePierreIconForEntry("vite.config.ts", "file")?.token, "vite");
   });
 
-  it("extends Pierre with T3-specific exact filename icons", () => {
+  it("extends Pierre with Zrode-specific exact filename icons", () => {
     assert.equal(
       resolvePierreIconForEntry("package.json", "file")?.name,
       "t3-file-icon-package-json",
@@ -34,9 +34,9 @@ describe("Pierre file icons", () => {
   });
 
   it("ships every custom icon referenced by the extended resolver", () => {
-    const customIconNames = new Set(Object.values(T3_PIERRE_ICONS.byFileName));
+    const customIconNames = new Set(Object.values(ZRODE_PIERRE_ICONS.byFileName));
     for (const iconName of customIconNames) {
-      assert.include(T3_PIERRE_ICONS.spriteSheet, `id="${iconName}"`);
+      assert.include(ZRODE_PIERRE_ICONS.spriteSheet, `id="${iconName}"`);
     }
   });
 

@@ -1469,7 +1469,7 @@ function SavedBackendListRow({
       : null;
   const metadataBits = [
     sshTarget ? `SSH ${formatDesktopSshTarget(sshTarget)}` : null,
-    environment.relayManaged ? "T3 Connect" : null,
+    environment.relayManaged ? "Zrode Connect" : null,
   ].filter((value): value is string => value !== null);
 
   // The WSL backend is a desktop-managed local backend (it surfaces as a bearer
@@ -1610,7 +1610,7 @@ function CloudLinkSwitch({
 }) {
   const control = (
     <Switch
-      aria-label="Enable T3 Connect"
+      aria-label="Enable Zrode Connect"
       checked={checked}
       disabled={disabled}
       {...(onCheckedChange ? { onCheckedChange } : {})}
@@ -1647,13 +1647,14 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
   const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
 
   const reportUpdateFailure = (cause: unknown) => {
-    const message = cause instanceof Error ? cause.message : "Could not update T3 Connect access.";
+    const message =
+      cause instanceof Error ? cause.message : "Could not update Zrode Connect access.";
     const traceId = findErrorTraceId(cause);
-    console.error("[t3-connect] Could not update T3 Connect", { message, traceId, cause });
+    console.error("[t3-connect] Could not update Zrode Connect", { message, traceId, cause });
     setOperationError(traceId ? `${message} Trace ID: ${traceId}` : message);
     toastManager.add({
       type: "error",
-      title: "Could not update T3 Connect",
+      title: "Could not update Zrode Connect",
       description: message,
       data: traceId
         ? {
@@ -1683,7 +1684,7 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
       return;
     }
     if (enabled && !tokenResult.value) {
-      reportUpdateFailure(new Error("Sign in to T3 Connect before linking this environment."));
+      reportUpdateFailure(new Error("Sign in to Zrode Connect before linking this environment."));
       setIsUpdating(false);
       return;
     }
@@ -1718,10 +1719,10 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
 
     toastManager.add({
       type: "success",
-      title: enabled ? "T3 Connect linked" : "T3 Connect unlinked",
+      title: enabled ? "Zrode Connect linked" : "Zrode Connect unlinked",
       description: enabled
-        ? "This environment is available through T3 Connect."
-        : "This environment is no longer available through T3 Connect.",
+        ? "This environment is available through Zrode Connect."
+        : "This environment is no longer available through Zrode Connect.",
     });
     setIsUpdating(false);
   };
@@ -1758,20 +1759,20 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     setIsUpdatingPreference(false);
   };
   const disabledReason = !isSignedIn
-    ? "Sign in to T3 Connect to manage this environment."
+    ? "Sign in to Zrode Connect to manage this environment."
     : !canManageRelay
-      ? "Your session does not have permission to manage T3 Connect access."
+      ? "Your session does not have permission to manage Zrode Connect access."
       : null;
   const linked = primaryCloudLinkState.data?.linked ?? false;
 
   return (
     <>
       <SettingsRow
-        title="T3 Connect"
+        title="Zrode Connect"
         description={
           linked
-            ? "This environment is available to your other devices through T3 Connect."
-            : "Make this environment available to your other devices through T3 Connect."
+            ? "This environment is available to your other devices through Zrode Connect."
+            : "Make this environment available to your other devices through Zrode Connect."
         }
         status={operationError ?? primaryCloudLinkState.error}
         control={
@@ -1824,7 +1825,7 @@ function EmptyRemoteEnvironments({ cloudEnabled = true }: { readonly cloudEnable
         <EmptyTitle>No saved remote environments</EmptyTitle>
         <EmptyDescription>
           {cloudEnabled
-            ? "Click “Add environment” to pair another environment, or connect one from T3 Connect."
+            ? "Click “Add environment” to pair another environment, or connect one from Zrode Connect."
             : "Click “Add environment” to pair another environment."}
         </EmptyDescription>
       </EmptyHeader>
@@ -1889,7 +1890,7 @@ function ConfiguredCloudRemoteEnvironmentRows({
       toastManager.add({
         type: "success",
         title: "Environment connected",
-        description: `${environment.label} is available through T3 Connect.`,
+        description: `${environment.label} is available through Zrode Connect.`,
       });
       return;
     }
@@ -1898,7 +1899,7 @@ function ConfiguredCloudRemoteEnvironmentRows({
     }
     const cause = squashAtomCommandFailure(result);
     const message =
-      cause instanceof Error ? cause.message : "Could not connect the T3 Connect environment.";
+      cause instanceof Error ? cause.message : "Could not connect the Zrode Connect environment.";
     const traceId = findErrorTraceId(cause);
     console.error("[t3-connect] Could not connect environment", { message, traceId, cause });
     toastManager.add({

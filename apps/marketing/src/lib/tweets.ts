@@ -40,7 +40,7 @@ export const tweets = [
   {
     handle: "BennettBuhner",
     content:
-      "Zrode is literally Codex but better; all your favorite models and harnesses, accessible anywhere! The app is great but the website is even greater, so instead of needing to SSH into a machine, T3 IS my SSH!",
+      "Zrode is literally Codex but better; all your favorite models and harnesses, accessible anywhere! The app is great but the website is even greater, so instead of needing to SSH into a machine, Zrode IS my SSH!",
     excerpt:
       "Zrode is literally Codex but better; all your favorite models and harnesses, accessible anywhere.",
     link: "https://x.com/BennettBuhner/status/2054667115697754387",
@@ -99,7 +99,7 @@ export const tweets = [
   {
     handle: "pocarles",
     content:
-      "Only using Codex and T3 now.\n\nI thought all AI coding harnesses had roughly the same impact. Using Zrode taught me how wrong I was. The interface between you and the model changes everything.",
+      "Only using Codex and Zrode now.\n\nI thought all AI coding harnesses had roughly the same impact. Using Zrode taught me how wrong I was. The interface between you and the model changes everything.",
     excerpt:
       "Using Zrode taught me how wrong I was. The interface between you and the model changes everything.",
     link: "https://x.com/pocarles/status/2054673964274758046",

@@ -1,12 +1,12 @@
-# T3 Connect Clerk Setup
+# Zrode Connect Clerk Setup
 
-T3 Connect uses one Clerk application for web, desktop, and mobile authentication. The relay accepts
+Zrode Connect uses one Clerk application for web, desktop, and mobile authentication. The relay accepts
 Clerk JWTs only when they are generated from the `t3-relay` template with the shared
 `zrode-relay` audience.
 
 ## Application Keys
 
-T3 Connect is disabled in a fresh clone. To enable it for source builds, add a repository-root `.env`
+Zrode Connect is disabled in a fresh clone. To enable it for source builds, add a repository-root `.env`
 or `.env.local` file:
 
 ```dotenv
@@ -36,9 +36,8 @@ production builds only need the Clerk publishable key, JWT template name, and re
 environment.
 
 When any client-facing public value is absent, cloud UI is omitted. When the CLI public values are
-absent, the `t3 connect` CLI command group is omitted. The bundled server still accepts runtime
-overrides for self-hosted or operator-managed
-deployments.
+absent, the Zrode Connect CLI command group is omitted. The bundled server still accepts runtime
+overrides for self-hosted or operator-managed deployments.
 
 For a hosted relay deployment, copy `infra/relay/.env.example` to `infra/relay/.env`. The relay
 deployment reads `RELAY_DOMAIN`, `RELAY_API_ZONE_NAME`, `RELAY_TUNNEL_ZONE_NAME`,
@@ -56,12 +55,12 @@ personal developer stage.
 
 ## Headless CLI OAuth Application
 
-The `t3 connect` commands authorize a headless environment with a separate Clerk OAuth application.
+The Zrode Connect CLI commands authorize a headless environment with a separate Clerk OAuth application.
 This uses an OAuth public client with PKCE, so the CLI stores no client secret.
 
 In **Clerk Dashboard > OAuth applications**:
 
-1. Create an OAuth application for the T3 CLI.
+1. Create an OAuth application for the Zrode CLI.
 2. Enable the **Public** option so authorization-code exchange uses PKCE.
 3. Add `http://127.0.0.1:34338/callback` as an allowed redirect URI.
 4. Enable the `openid`, `profile`, and `email` scopes.
@@ -86,7 +85,7 @@ t3 serve
 `t3 connect login` opens the Clerk authorization flow and stores the CLI credential without enabling
 cloud exposure. `t3 connect link` installs the pinned managed `cloudflared` binary when needed,
 authorizes when needed, and records durable intent to expose the environment. It works without a
-running T3 server. The next `t3 serve` or `t3 start` reconciles the relay link and launches the
+running Zrode server. The next `t3 serve` or `t3 start` reconciles the relay link and launches the
 managed tunnel. `t3 connect unlink` records disabled intent immediately, stops a reachable running
 connector, and attempts to revoke the relay-side environment record. It retains the stored CLI
 authorization so `t3 connect link` can re-enable exposure without another browser flow. `t3 connect
@@ -211,11 +210,11 @@ For a private beta where people should request access, use **Clerk Dashboard > W
 1. Toggle on **Enable waitlist** and save.
 2. Review requests on the same page and select **Invite** or **Deny**.
 
-Approved signed-in users manage T3 Connect under **Connections**. The web and desktop sidebars do
+Approved signed-in users manage Zrode Connect under **Connections**. The web and desktop sidebars do
 not expose a dedicated account or waitlist control. Signed-out users reach Clerk's waitlist and
-sign-in flow contextually from the T3 Connect controls on the Connections page.
+sign-in flow contextually from the Zrode Connect controls on the Connections page.
 
-On mobile, signed-out users open **Settings > T3 Account** to reach `/settings/waitlist` within the
+On mobile, signed-out users open **Settings > Zrode Account** to reach `/settings/waitlist` within the
 Settings form sheet. It submits enrollment through Clerk's `useWaitlist()` flow because the prebuilt
 `<Waitlist />` component is web-only in the Expo SDK. Approved users can use **Sign in** from that
 screen.

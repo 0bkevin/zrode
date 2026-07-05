@@ -69,8 +69,8 @@ export function RelayClientInstallDialog() {
           </DialogTitle>
           <DialogDescription>
             {isInstalling
-              ? "Zrode is preparing this environment for secure access through T3 Connect."
-              : "Zrode needs the relay client to make this environment available through T3 Connect."}
+              ? "Zrode is preparing this environment for secure access through Zrode Connect."
+              : "Zrode needs the relay client to make this environment available through Zrode Connect."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel scrollFade={false}>
