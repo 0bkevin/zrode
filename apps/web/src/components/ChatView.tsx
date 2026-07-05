@@ -133,6 +133,7 @@ import { closePreviewSession } from "./preview/closePreviewSession";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { RightPanelTabs } from "./RightPanelTabs";
+import { LocalServersStatusButton } from "./servers/LocalServersStatusButton";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
@@ -5235,14 +5236,14 @@ function ChatViewContent(props: ChatViewProps) {
               </div>
               <div
                 className={cn(
-                  "chat-composer-horizontal-inset chat-composer-lower-chrome relative z-10",
+                  "chat-composer-horizontal-inset chat-composer-lower-chrome relative z-10 flex items-end gap-2",
                   isGitRepo
                     ? "pb-[calc(env(safe-area-inset-bottom)+0.25rem)]"
                     : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
                 )}
               >
                 {isGitRepo && (
-                  <div className="pointer-events-auto">
+                  <div className="pointer-events-auto min-w-0 flex-1">
                     <BranchToolbar
                       environmentId={activeThread.environmentId}
                       threadId={activeThread.id}
@@ -5269,6 +5270,16 @@ function ChatViewContent(props: ChatViewProps) {
                     />
                   </div>
                 )}
+                {activeThreadRef ? (
+                  <div
+                    className={cn(
+                      "pointer-events-auto ml-auto shrink-0",
+                      isGitRepo ? "pb-3" : "pb-0",
+                    )}
+                  >
+                    <LocalServersStatusButton threadRef={activeThreadRef} />
+                  </div>
+                ) : null}
               </div>
             </div>
 

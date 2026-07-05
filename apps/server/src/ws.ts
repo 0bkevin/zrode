@@ -1703,8 +1703,11 @@ const makeWsRpcLayer = (
             WS_METHODS.subscribeDiscoveredLocalServers,
             Stream.callback<DiscoveredLocalServerList>((queue) =>
               Effect.gen(function* () {
+                // retain runs an immediate scan when the count was idle, so
+                // the last snapshot is fresh — no redundant scan per
+                // subscriber.
                 yield* portDiscovery.retain;
-                const initial = yield* portDiscovery.scan();
+                const initial = yield* portDiscovery.current;
                 const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
                 yield* Queue.offer(queue, {
                   servers: initial,

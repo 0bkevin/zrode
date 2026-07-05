@@ -122,6 +122,108 @@ effectIt.layer(TestPortDiscoveryLive)("PortDiscovery integration (TCP probe fall
   );
 });
 
+effectIt("parseLsofCwdOutput maps pids to their working directory", () =>
+  Effect.sync(() => {
+    const raw = ["p123", "fcwd", "n/Users/dev/app", "p456", "fcwd", "n/tmp/other", ""].join("\n");
+    const parsed = PortScanner.parseLsofCwdOutput(raw);
+    expect(parsed.get(123)).toBe("/Users/dev/app");
+    expect(parsed.get(456)).toBe("/tmp/other");
+    expect(parsed.size).toBe(2);
+  }),
+);
+
+effectIt("parseLsofCwdOutput strips lsof error suffixes from the path", () =>
+  Effect.sync(() => {
+    const raw = ["p123", "fcwd", "n/Users/dev/app (stat: Permission denied)", ""].join("\n");
+    const parsed = PortScanner.parseLsofCwdOutput(raw);
+    expect(parsed.get(123)).toBe("/Users/dev/app");
+  }),
+);
+
+effectIt("parsePsStatsOutput maps pids to quantized cpu, memory, and command line", () =>
+  Effect.sync(() => {
+    const raw = [
+      "  123   2.5  204800 node server.js --port 5173",
+      "456 0.0 1024 python -m http.server",
+      "",
+      "garbage",
+    ].join("\n");
+    const parsed = PortScanner.parsePsStatsOutput(raw);
+    expect(parsed.get(123)).toEqual({
+      cpuPercent: 3,
+      memoryBytes: 204800 * 1024,
+      commandLine: "node server.js --port 5173",
+    });
+    expect(parsed.get(456)).toEqual({
+      cpuPercent: 0,
+      memoryBytes: 1024 * 1024,
+      commandLine: "python -m http.server",
+    });
+    expect(parsed.size).toBe(2);
+  }),
+);
+
+effectIt("parsePsStatsOutput tolerates missing args and placeholder columns", () =>
+  Effect.sync(() => {
+    const raw = ["123 0.3 2048", "456 - -"].join("\n");
+    const parsed = PortScanner.parsePsStatsOutput(raw);
+    expect(parsed.get(123)).toEqual({
+      cpuPercent: 0,
+      memoryBytes: 2 * 1024 * 1024,
+      commandLine: null,
+    });
+    expect(parsed.get(456)).toEqual({
+      cpuPercent: null,
+      memoryBytes: null,
+      commandLine: null,
+    });
+  }),
+);
+
+effectIt("quantizes stats so idle jitter cannot defeat change detection", () =>
+  Effect.sync(() => {
+    expect(PortScanner.quantizeCpuPercent(0.2)).toBe(0);
+    expect(PortScanner.quantizeCpuPercent(Number.NaN)).toBeNull();
+    expect(PortScanner.quantizeCpuPercent(-1)).toBeNull();
+    expect(PortScanner.quantizeMemoryBytes(0)).toBe(0);
+    // Small but nonzero memory clamps up to 1 MiB instead of rounding to 0.
+    expect(PortScanner.quantizeMemoryBytes(200 * 1024)).toBe(1024 * 1024);
+    expect(PortScanner.quantizeMemoryBytes(1024 * 1024 + 5)).toBe(1024 * 1024);
+    expect(PortScanner.quantizeMemoryBytes(-5)).toBeNull();
+  }),
+);
+
+effectIt("applyProcessMetadata enriches only servers with a known pid", () =>
+  Effect.sync(() => {
+    const base = {
+      host: "localhost",
+      url: "http://localhost:5173",
+      processName: "node",
+      cwd: null,
+      commandLine: null,
+      cpuPercent: null,
+      memoryBytes: null,
+      terminal: null,
+    };
+    const enriched = PortScanner.applyProcessMetadata(
+      [
+        { ...base, port: 5173, pid: 123 },
+        { ...base, port: 3000, pid: null },
+      ],
+      new Map([[123, "/Users/dev/app"]]),
+      new Map([[123, { cpuPercent: 1.5, memoryBytes: 2048, commandLine: "node server.js" }]]),
+    );
+    expect(enriched[0]?.cwd).toBe("/Users/dev/app");
+    expect(enriched[0]?.commandLine).toBe("node server.js");
+    expect(enriched[0]?.cpuPercent).toBe(1.5);
+    expect(enriched[0]?.memoryBytes).toBe(2048);
+    expect(enriched[1]?.cwd).toBeNull();
+    expect(enriched[1]?.commandLine).toBeNull();
+    expect(enriched[1]?.cpuPercent).toBeNull();
+    expect(enriched[1]?.memoryBytes).toBeNull();
+  }),
+);
+
 effectIt("does not swallow process probe defects", () =>
   Effect.gen(function* () {
     const defect = new Error("unexpected process probe defect");

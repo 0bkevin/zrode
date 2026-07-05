@@ -283,6 +283,10 @@ describe("DiscoveredLocalServer", () => {
       url: "http://localhost:5173",
       processName: "node",
       pid: 12345,
+      cwd: "/Users/dev/app",
+      commandLine: "node server.js",
+      cpuPercent: 3,
+      memoryBytes: 1048576,
       terminal: null,
     });
     expect(server.port).toBe(5173);
@@ -296,9 +300,26 @@ describe("DiscoveredLocalServer", () => {
       url: "http://localhost:3000",
       processName: null,
       pid: null,
+      cwd: null,
+      commandLine: null,
+      cpuPercent: null,
+      memoryBytes: null,
       terminal: null,
     });
     expect(server.processName).toBeNull();
+  });
+
+  it("decodes payloads from older servers that omit process metadata", () => {
+    const server = decodeServer({
+      host: "localhost",
+      port: 3000,
+      url: "http://localhost:3000",
+      processName: null,
+      pid: null,
+      terminal: null,
+    });
+    expect(server.cwd ?? null).toBeNull();
+    expect(server.memoryBytes ?? null).toBeNull();
   });
 
   it("rejects invalid ports", () => {
@@ -309,6 +330,10 @@ describe("DiscoveredLocalServer", () => {
         url: "http://localhost:0",
         processName: null,
         pid: null,
+        cwd: null,
+        commandLine: null,
+        cpuPercent: null,
+        memoryBytes: null,
         terminal: null,
       }),
     ).toThrow();
@@ -319,6 +344,10 @@ describe("DiscoveredLocalServer", () => {
         url: "http://localhost:70000",
         processName: null,
         pid: null,
+        cwd: null,
+        commandLine: null,
+        cpuPercent: null,
+        memoryBytes: null,
         terminal: null,
       }),
     ).toThrow();

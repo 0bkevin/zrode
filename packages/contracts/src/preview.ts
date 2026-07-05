@@ -252,6 +252,18 @@ export const DiscoveredLocalServer = Schema.Struct({
   url: Url,
   processName: Schema.NullOr(TrimmedNonEmptyString),
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
+  // The process-metadata fields below are optional so payloads from older
+  // servers (which omit them) still decode; consumers treat missing as null.
+  /** Working directory of the owning process, when the scanner could resolve it. */
+  cwd: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(2048)))),
+  /** Full command line of the owning process, when the scanner could resolve it. */
+  commandLine: Schema.optional(
+    Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(2048))),
+  ),
+  /** CPU usage of the owning process in whole percent, when the scanner could resolve it. */
+  cpuPercent: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(-1)))),
+  /** Resident memory of the owning process in bytes, when the scanner could resolve it. */
+  memoryBytes: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(-1)))),
   terminal: Schema.NullOr(
     Schema.Struct({
       threadId: ThreadId,

@@ -2,8 +2,10 @@
  * In-process PortScanner implementation.
  *
  * macOS/Linux: parses `lsof -iTCP -sTCP:LISTEN -P -n -F pcn` (-F output is a
- * stable line-prefixed field format; this is the only `lsof` flag set we rely
- * on).
+ * stable line-prefixed field format), then enriches the listeners with each
+ * process's working directory (`lsof -a -p <pids> -d cwd -F pn`) and command
+ * line, CPU, and memory usage (`ps -p <pids> -o pid= -o %cpu= -o rss= -o args=`)
+ * on a best-effort basis.
  *
  * Windows / lsof missing: checks a curated list of common dev ports through
  * the shared Net service.
@@ -30,6 +32,8 @@ export class PortDiscovery extends Context.Service<
   PortDiscovery,
   {
     readonly scan: () => Effect.Effect<ReadonlyArray<DiscoveredLocalServer>>;
+    /** Last scan result without triggering a new scan (fresh while retained). */
+    readonly current: Effect.Effect<ReadonlyArray<DiscoveredLocalServer>>;
     readonly subscribe: (
       listener: (servers: ReadonlyArray<DiscoveredLocalServer>) => Effect.Effect<void>,
     ) => Effect.Effect<void, never, Scope.Scope>;
@@ -54,10 +58,19 @@ const POLL_INTERVAL = Duration.seconds(3);
 const LSOF_TIMEOUT_MS = 5_000;
 const WINDOWS_LISTENER_TIMEOUT_MS = 5_000;
 
+const EMPTY_CWD_METADATA: ReadonlyMap<number, string> = new Map();
+const EMPTY_PROCESS_STATS: ReadonlyMap<number, ProcessStats> = new Map();
+
 type Listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => Effect.Effect<void>;
 
 interface ScannerState {
   readonly lastSnapshot: ReadonlyArray<DiscoveredLocalServer>;
+  /**
+   * Per-pid working-directory cache (null = probed but unresolved). A process
+   * cwd rarely changes, so each pid is probed once and evicted when it stops
+   * listening.
+   */
+  readonly cwdByProcessId: ReadonlyMap<number, string | null>;
   readonly listeners: ReadonlySet<Listener>;
   readonly terminalProcesses: ReadonlyMap<
     string,
@@ -113,6 +126,10 @@ const parseLsofOutput = (
         url,
         processName,
         pid,
+        cwd: null,
+        commandLine: null,
+        cpuPercent: null,
+        memoryBytes: null,
         terminal: pid === null ? null : (terminalByProcessId.get(pid) ?? null),
       });
     }
@@ -136,13 +153,114 @@ const parsePortFromLsofName = (name: string): number | null => {
   return port;
 };
 
+/** Contracts cap `cwd`/`commandLine` at 2048 characters. */
+const MAX_METADATA_TEXT_LENGTH = 2048;
+
+/** lsof appends failure notes to the name field, e.g. `/path (stat: Permission denied)`. */
+const stripLsofNameSuffix = (value: string): string =>
+  value.replace(/ \((?:stat|readlink)[^)]*\)$/, "");
+
+/**
+ * Parses `lsof -a -p <pids> -d cwd -F pn` output into a pid → cwd map. The
+ * field format emits `p<pid>` process markers followed by `n<path>` name
+ * lines (plus `f` descriptor lines we ignore).
+ */
+export const parseLsofCwdOutput = (raw: string): ReadonlyMap<number, string> => {
+  const cwdByProcessId = new Map<number, string>();
+  let pid: number | null = null;
+  for (const line of raw.split("\n")) {
+    if (line.length === 0) continue;
+    const tag = line.charAt(0);
+    const value = line.slice(1);
+    if (tag === "p") {
+      const parsed = Number.parseInt(value, 10);
+      pid = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+      continue;
+    }
+    if (tag === "n" && pid !== null && !cwdByProcessId.has(pid)) {
+      const cwd = stripLsofNameSuffix(value.trim()).slice(0, MAX_METADATA_TEXT_LENGTH).trim();
+      if (cwd.length > 0) cwdByProcessId.set(pid, cwd);
+    }
+  }
+  return cwdByProcessId;
+};
+
+export interface ProcessStats {
+  readonly cpuPercent: number | null;
+  readonly memoryBytes: number | null;
+  readonly commandLine: string | null;
+}
+
+const MEMORY_QUANT_BYTES = 1024 * 1024;
+
+/** Round CPU to whole percent so idle jitter doesn't defeat change detection. */
+export const quantizeCpuPercent = (raw: number): number | null =>
+  Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : null;
+
+/** Round memory to whole MiB (min 1 MiB when nonzero) for the same reason. */
+export const quantizeMemoryBytes = (rawBytes: number): number | null => {
+  if (!Number.isFinite(rawBytes) || rawBytes < 0) return null;
+  if (rawBytes === 0) return 0;
+  return Math.max(
+    MEMORY_QUANT_BYTES,
+    Math.round(rawBytes / MEMORY_QUANT_BYTES) * MEMORY_QUANT_BYTES,
+  );
+};
+
+/**
+ * Parses `ps -p <pids> -o pid= -o %cpu= -o rss= -o args=` output into a
+ * pid → stats map. `rss` is reported in kilobytes on macOS and Linux. Stats
+ * are quantized so unchanged servers produce identical snapshots and the
+ * scanner only broadcasts on meaningful change.
+ */
+export const parsePsStatsOutput = (raw: string): ReadonlyMap<number, ProcessStats> => {
+  const statsByProcessId = new Map<number, ProcessStats>();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const match = /^(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/.exec(trimmed);
+    if (match === null) continue;
+    const pid = Number.parseInt(match[1]!, 10);
+    if (!Number.isFinite(pid) || pid <= 0 || statsByProcessId.has(pid)) continue;
+    const cpuPercent = Number.parseFloat(match[2]!);
+    const rssKilobytes = Number.parseInt(match[3]!, 10);
+    const commandLine = (match[4] ?? "").trim().slice(0, MAX_METADATA_TEXT_LENGTH).trim();
+    statsByProcessId.set(pid, {
+      cpuPercent: quantizeCpuPercent(cpuPercent),
+      memoryBytes:
+        Number.isFinite(rssKilobytes) && rssKilobytes >= 0
+          ? quantizeMemoryBytes(rssKilobytes * 1024)
+          : null,
+      commandLine: commandLine.length > 0 ? commandLine : null,
+    });
+  }
+  return statsByProcessId;
+};
+
+export const applyProcessMetadata = (
+  servers: ReadonlyArray<DiscoveredLocalServer>,
+  cwdByProcessId: ReadonlyMap<number, string | null>,
+  statsByProcessId: ReadonlyMap<number, ProcessStats>,
+): ReadonlyArray<DiscoveredLocalServer> =>
+  servers.map((server) => {
+    if (server.pid === null) return server;
+    const stats = statsByProcessId.get(server.pid);
+    return {
+      ...server,
+      cwd: cwdByProcessId.get(server.pid) ?? null,
+      commandLine: stats?.commandLine ?? null,
+      cpuPercent: stats?.cpuPercent ?? null,
+      memoryBytes: stats?.memoryBytes ?? null,
+    };
+  });
+
 const parseWindowsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
 ): ReadonlyArray<DiscoveredLocalServer> => {
   const seen = new Map<number, DiscoveredLocalServer>();
   for (const line of raw.split(/\r?\n/g)) {
-    const [hostRaw, portRaw, pidRaw, processNameRaw] = line.trim().split("|", 4);
+    const [hostRaw, portRaw, pidRaw, processNameRaw, workingSetRaw] = line.trim().split("|", 5);
     const host = hostRaw?.trim() ?? "";
     if (!LSOF_LOCAL_HOST_TOKENS.has(host) && host !== "::") continue;
     const port = Number(portRaw);
@@ -150,12 +268,20 @@ const parseWindowsListenerOutput = (
     if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
     const normalizedPid = Number.isInteger(pid) && pid > 0 ? pid : null;
     if (seen.has(port)) continue;
+    const workingSetBytes = Number(workingSetRaw);
     seen.set(port, {
       host: "localhost",
       port,
       url: `http://localhost:${port}`,
       processName: processNameRaw?.trim() || null,
       pid: normalizedPid,
+      cwd: null,
+      commandLine: null,
+      cpuPercent: null,
+      memoryBytes:
+        Number.isFinite(workingSetBytes) && workingSetBytes > 0
+          ? quantizeMemoryBytes(workingSetBytes)
+          : null,
       terminal: normalizedPid === null ? null : (terminalByProcessId.get(normalizedPid) ?? null),
     });
   }
@@ -177,6 +303,10 @@ const serversEqual = (
       a.url !== b.url ||
       a.processName !== b.processName ||
       a.pid !== b.pid ||
+      a.cwd !== b.cwd ||
+      a.commandLine !== b.commandLine ||
+      a.cpuPercent !== b.cpuPercent ||
+      a.memoryBytes !== b.memoryBytes ||
       a.terminal?.threadId !== b.terminal?.threadId ||
       a.terminal?.terminalId !== b.terminal?.terminalId
     ) {
@@ -192,6 +322,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
   const hostPlatform = yield* HostProcessPlatform;
   const stateRef = yield* Ref.make<ScannerState>({
     lastSnapshot: [],
+    cwdByProcessId: new Map(),
     listeners: new Set(),
     terminalProcesses: new Map(),
     retainCount: 0,
@@ -217,6 +348,10 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         url: `http://localhost:${result.port}`,
         processName: null,
         pid: null,
+        cwd: null,
+        commandLine: null,
+        cpuPercent: null,
+        memoryBytes: null,
         terminal: null,
       }));
   });
@@ -229,6 +364,84 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         platform: hostPlatform,
       }).pipe(Effect.as(null));
 
+  const logMetadataProbeFailure =
+    (probe: "lsof-cwd" | "ps-stats") => (error: ProcessRunner.ProcessRunError) =>
+      Effect.logDebug("preview port process metadata probe failed; keeping servers unenriched", {
+        cause: error,
+        probe,
+        platform: hostPlatform,
+      });
+
+  const recoverCwdProbeFailure = (error: ProcessRunner.ProcessRunError) =>
+    logMetadataProbeFailure("lsof-cwd")(error).pipe(Effect.as(EMPTY_CWD_METADATA));
+  const recoverStatsProbeFailure = (error: ProcessRunner.ProcessRunError) =>
+    logMetadataProbeFailure("ps-stats")(error).pipe(Effect.as(EMPTY_PROCESS_STATS));
+
+  // Best-effort second pass (macOS/Linux): resolve each listener's working
+  // directory and command line / CPU / memory so the UI can attribute servers
+  // to a project. Probe failures degrade to null fields, never to a failed
+  // scan. Working directories are cached per pid — only new pids are probed.
+  const enrichProcessMetadata = Effect.fn("PortDiscovery.enrichProcessMetadata")(function* (
+    servers: ReadonlyArray<DiscoveredLocalServer>,
+  ) {
+    const pids = [
+      ...new Set(servers.flatMap((server) => (server.pid === null ? [] : [server.pid]))),
+    ];
+    if (pids.length === 0) return servers;
+    const cachedCwd = (yield* Ref.get(stateRef)).cwdByProcessId;
+    const pidsNeedingCwd = pids.filter((pid) => !cachedCwd.has(pid));
+    const cwdProbe: Effect.Effect<ReadonlyMap<number, string>> =
+      pidsNeedingCwd.length === 0
+        ? Effect.succeed(EMPTY_CWD_METADATA)
+        : processRunner
+            .run({
+              command: "lsof",
+              args: ["-a", "-p", pidsNeedingCwd.join(","), "-d", "cwd", "-F", "pn"],
+              timeout: Duration.millis(LSOF_TIMEOUT_MS),
+              maxOutputBytes: 1024 * 1024,
+              outputMode: "truncate",
+            })
+            .pipe(
+              Effect.map((result) => parseLsofCwdOutput(result.stdout)),
+              Effect.catchTags({
+                ProcessSpawnError: recoverCwdProbeFailure,
+                ProcessStdinError: recoverCwdProbeFailure,
+                ProcessOutputLimitError: recoverCwdProbeFailure,
+                ProcessReadError: recoverCwdProbeFailure,
+                ProcessTimeoutError: recoverCwdProbeFailure,
+              }),
+            );
+    const statsProbe: Effect.Effect<ReadonlyMap<number, ProcessStats>> = processRunner
+      .run({
+        command: "ps",
+        args: ["-p", pids.join(","), "-o", "pid=", "-o", "%cpu=", "-o", "rss=", "-o", "args="],
+        timeout: Duration.millis(LSOF_TIMEOUT_MS),
+        maxOutputBytes: 1024 * 1024,
+        outputMode: "truncate",
+      })
+      .pipe(
+        Effect.map((result) => parsePsStatsOutput(result.stdout)),
+        Effect.catchTags({
+          ProcessSpawnError: recoverStatsProbeFailure,
+          ProcessStdinError: recoverStatsProbeFailure,
+          ProcessOutputLimitError: recoverStatsProbeFailure,
+          ProcessReadError: recoverStatsProbeFailure,
+          ProcessTimeoutError: recoverStatsProbeFailure,
+        }),
+      );
+    const [freshCwd, statsByProcessId] = yield* Effect.all([cwdProbe, statsProbe], {
+      concurrency: 2,
+    });
+    // Merge fresh results into the cache (unresolved probes cached as null so
+    // unreadable pids aren't re-probed every tick) and evict gone pids.
+    const cwdByProcessId = new Map<number, string | null>();
+    for (const pid of pids) {
+      cwdByProcessId.set(pid, freshCwd.get(pid) ?? cachedCwd.get(pid) ?? null);
+    }
+    yield* Ref.update(stateRef, (state) => ({ ...state, cwdByProcessId }));
+    return applyProcessMetadata(servers, cwdByProcessId, statsByProcessId);
+  });
+
   const scanOnce = Effect.fn("PortDiscovery.scan")(function* () {
     const state = yield* Ref.get(stateRef);
     const terminalByProcessId = new Map<number, TerminalProcessOwner>();
@@ -240,7 +453,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     if (hostPlatform === "win32") {
       const recoverWindowsProbeFailure = recoverProcessProbeFailure("windows-listeners");
       const command =
-        'Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { $processName = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName; Write-Output "$($_.LocalAddress)|$($_.LocalPort)|$($_.OwningProcess)|$processName" }';
+        'Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; Write-Output "$($_.LocalAddress)|$($_.LocalPort)|$($_.OwningProcess)|$($proc.ProcessName)|$($proc.WorkingSet64)" }';
       const listeners = yield* processRunner
         .run({
           command: "powershell.exe",
@@ -281,7 +494,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           ProcessTimeoutError: recoverLsofProbeFailure,
         }),
       );
-    if (lsofResult !== null) return lsofResult;
+    if (lsofResult !== null) return yield* enrichProcessMetadata(lsofResult);
     return yield* probeCommonPorts();
   });
 
@@ -378,8 +591,13 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     });
   });
 
+  const current: PortDiscovery["Service"]["current"] = Ref.get(stateRef).pipe(
+    Effect.map((state) => state.lastSnapshot),
+  );
+
   return PortDiscovery.of({
     scan: scanOnce,
+    current,
     subscribe,
     retain,
     registerTerminalProcesses,
