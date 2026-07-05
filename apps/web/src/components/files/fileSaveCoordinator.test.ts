@@ -96,7 +96,7 @@ describe("FileSaveCoordinator", () => {
     vi.useFakeTimers();
     const failure = AsyncResult.failure(Cause.fail(new Error("write failed")));
     const persist = vi
-      .fn<(contents: string) => Promise<AtomCommandResult<void, Error>>>()
+      .fn()
       .mockResolvedValueOnce(failure)
       .mockResolvedValueOnce(failure)
       .mockResolvedValue(AsyncResult.success(undefined));
@@ -131,7 +131,7 @@ describe("FileSaveCoordinator", () => {
   it("saves newer contents on the regular debounce after a failed write", async () => {
     vi.useFakeTimers();
     const persist = vi
-      .fn<(contents: string) => Promise<AtomCommandResult<void, Error>>>()
+      .fn()
       .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("write failed"))))
       .mockResolvedValue(AsyncResult.success(undefined));
     const onConfirmed = vi.fn();

@@ -112,6 +112,40 @@ const FILE_LINK_REVEAL_UNSAFE_CSS = `
     color: var(--diffs-selection-number-fg) !important;
   }
 `;
+// Soften the library's gutter "add comment" button: the default is a solid, full
+// line-height blue block that dominates the gutter. Render it as a small, translucent
+// ghost chip that only fills in on hover, so it stays out of the way while reading.
+const EDITABLE_GUTTER_BUTTON_CSS = `
+  [data-utility-button] {
+    width: 15px;
+    height: 15px;
+    min-width: 0;
+    border-radius: 5px;
+    background-color: color-mix(in oklab, var(--diffs-modified-base) 14%, transparent);
+    color: var(--diffs-modified-base);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--diffs-modified-base) 24%, transparent);
+    opacity: 0.72;
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      box-shadow 120ms ease,
+      opacity 120ms ease;
+  }
+
+  [data-utility-button]:hover,
+  [data-utility-button]:focus-visible {
+    background-color: var(--diffs-modified-base);
+    color: var(--diffs-bg);
+    box-shadow: none;
+    opacity: 1;
+  }
+
+  [data-utility-button] [data-icon] {
+    width: 10px;
+    height: 10px;
+  }
+`;
+const EDITABLE_FILE_UNSAFE_CSS = `${FILE_LINK_REVEAL_UNSAFE_CSS}${EDITABLE_GUTTER_BUTTON_CSS}`;
 type FilePostRender = NonNullable<FileOptions<unknown>["onPostRender"]>;
 
 function clampFileLine(contents: string, requestedLine: number): number {
@@ -583,7 +617,7 @@ function EditableFileSurface({
               overflow: wordWrap ? "wrap" : "scroll",
               theme: resolveDiffThemeName(resolvedTheme),
               themeType: resolvedTheme,
-              unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+              unsafeCSS: EDITABLE_FILE_UNSAFE_CSS,
               onPostRender: handlePostRender,
             }}
             selectedLines={selectedRange}
