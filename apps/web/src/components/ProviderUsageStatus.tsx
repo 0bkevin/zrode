@@ -14,19 +14,43 @@ import { useEnvironmentQuery } from "../state/query";
 import { primaryServerProvidersAtom, serverEnvironment } from "../state/server";
 import { useEnvironmentThread } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
-import { ClaudeAI, OpenAI } from "./Icons";
+import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon } from "./Icons";
 import { useRelativeTimeTick } from "./settings/settingsLayout";
 import { toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Skeleton } from "./ui/skeleton";
 
+/** Providers whose rate-limit windows zrode can meter server-side. */
 type UsageProviderKind = ProviderUsageSnapshot["provider"];
+/** Providers zrode integrates but whose vendors expose no usage API yet. */
+type UnmeteredProviderKind = "cursor" | "grok" | "opencode";
+type AnyUsageProviderKind = UsageProviderKind | UnmeteredProviderKind;
+
+/** An enabled + authenticated provider without a usage API. */
+interface UnmeteredProvider {
+  readonly kind: UnmeteredProviderKind;
+  readonly displayName: string;
+  readonly authLabel: string | null;
+  readonly email: string | null;
+}
 
 /** Provider usage/limits dashboard opened by the popover's "View details" link. */
-const PROVIDER_USAGE_URL: Record<ProviderUsageSnapshot["provider"], string> = {
+const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   claude: "https://claude.ai/settings/usage",
   codex: "https://chatgpt.com/codex/settings/usage",
+  cursor: "https://cursor.com/dashboard",
+  grok: "https://accounts.x.ai",
+  opencode: "https://opencode.ai",
+};
+
+/** Driver slug → usage-provider kind for every driver zrode ships. */
+const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
+  claudeAgent: "claude",
+  codex: "codex",
+  cursor: "cursor",
+  grok: "grok",
+  opencode: "opencode",
 };
 
 function openProviderUsagePage(url: string): void {
@@ -70,27 +94,49 @@ function formatDurationUntil(timestamp: number | null, nowMs: number): string | 
   return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
 }
 
-function providerDisplayName(provider: ProviderUsageSnapshot["provider"]): string {
-  return provider === "claude" ? "Claude" : "Codex";
+function providerDisplayName(provider: AnyUsageProviderKind): string {
+  switch (provider) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "cursor":
+      return "Cursor";
+    case "grok":
+      return "Grok";
+    case "opencode":
+      return "OpenCode";
+  }
 }
 
 function ProviderUsageIcon({
   provider,
   className,
 }: {
-  provider: ProviderUsageSnapshot["provider"];
+  provider: AnyUsageProviderKind;
   className?: string;
 }) {
-  return provider === "claude" ? (
-    <ClaudeAI className={className} />
-  ) : (
-    <OpenAI className={className} />
-  );
+  switch (provider) {
+    case "claude":
+      return <ClaudeAI className={className} />;
+    case "codex":
+      return <OpenAI className={className} />;
+    case "cursor":
+      return <CursorIcon className={className} />;
+    case "grok":
+      return <GrokIcon className={className} />;
+    case "opencode":
+      return <OpenCodeIcon className={className} />;
+  }
 }
 
-/** The most constrained (highest used) of the provider's default windows. */
+/** The most constrained (highest used) of ALL the provider's limit windows. */
 function maxPercentUsed(snapshot: ProviderUsageSnapshot): number | null {
-  const values = [snapshot.session, snapshot.weekly]
+  const values = [
+    snapshot.session,
+    snapshot.weekly,
+    ...snapshot.extraLimits.flatMap((limit) => [limit.session, limit.weekly]),
+  ]
     .filter((window): window is ProviderUsageWindow => window !== null)
     .map(percentUsed);
   return values.length > 0 ? Math.max(...values) : null;
@@ -382,12 +428,112 @@ function ProviderUsagePopoverContent({
 }
 
 /**
+ * Enabled + authenticated providers that have no usage API: they still get a
+ * footer tile (icon-only) whose popover shows the signed-in account and links
+ * to the vendor's own usage dashboard.
+ */
+function useUnmeteredProviders(): ReadonlyArray<UnmeteredProvider> {
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  return useMemo(() => {
+    const byKind = new Map<UnmeteredProviderKind, UnmeteredProvider>();
+    for (const provider of providers) {
+      const kind = DRIVER_TO_USAGE_KIND[provider.driver];
+      if (kind !== "cursor" && kind !== "grok" && kind !== "opencode") {
+        continue;
+      }
+      if (
+        byKind.has(kind) ||
+        !provider.enabled ||
+        !provider.installed ||
+        provider.auth.status !== "authenticated"
+      ) {
+        continue;
+      }
+      byKind.set(kind, {
+        kind,
+        displayName: provider.displayName ?? providerDisplayName(kind),
+        authLabel: provider.auth.label ?? null,
+        email: provider.auth.email ?? null,
+      });
+    }
+    return Array.from(byKind.values());
+  }, [providers]);
+}
+
+function UnmeteredProviderPill({ provider }: { provider: UnmeteredProvider }) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            className={cn(
+              "group inline-flex h-6 shrink-0 cursor-pointer items-center rounded-md px-1.5 outline-none transition-colors",
+              "hover:bg-accent data-[pressed]:bg-accent",
+              "focus-visible:ring-2 focus-visible:ring-ring",
+            )}
+            aria-label={`${provider.displayName} subscription`}
+          >
+            <ProviderUsageIcon
+              provider={provider.kind}
+              className="size-3 shrink-0 opacity-50 transition-opacity group-hover:opacity-90"
+            />
+          </button>
+        }
+      />
+      <PopoverPopup side="top" align="end" className="w-72 max-w-none p-0">
+        <div className="flex flex-col gap-3 p-3">
+          <div className="flex items-center gap-2">
+            <ProviderUsageIcon provider={provider.kind} className="size-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-1.5">
+                <span className="font-medium text-sm">{provider.displayName}</span>
+                {provider.authLabel ? (
+                  <span className="truncate text-[10px] text-muted-foreground/60">
+                    {provider.authLabel}
+                  </span>
+                ) : null}
+              </div>
+              {provider.email ? (
+                <div className="truncate text-[10px] text-muted-foreground/60">
+                  {provider.email}
+                </div>
+              ) : null}
+            </div>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="size-5 shrink-0 rounded-sm p-0 text-muted-foreground/60 hover:text-foreground"
+              onClick={() => openProviderUsagePage(PROVIDER_USAGE_URL[provider.kind])}
+              aria-label={`View ${provider.displayName} usage details`}
+            >
+              <ExternalLinkIcon className="size-3" />
+            </Button>
+          </div>
+          <div className="text-pretty text-[11px] text-muted-foreground/70">
+            {provider.displayName} doesn't expose live usage metering yet. Check your usage on the{" "}
+            {provider.displayName} dashboard.
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
+interface ActiveThreadUsageTarget {
+  /** Usage-provider kind the open thread runs on, when resolvable. */
+  readonly provider: AnyUsageProviderKind | null;
+  /** Identity of the open thread, so callers can react to thread changes. */
+  readonly threadKey: string | null;
+}
+
+/**
  * Resolve the usage-provider kind driving the thread currently open in the
  * route, so the footer meter reflects the subscription that thread spends.
  */
 function useActiveThreadUsageProvider(
   primaryEnvironmentId: string | null,
-): UsageProviderKind | null {
+): ActiveThreadUsageTarget {
   const routeThreadRef = useParams({
     strict: false,
     select: (params) => resolveThreadRouteRef(params),
@@ -404,23 +550,25 @@ function useActiveThreadUsageProvider(
   const providers = useAtomValue(primaryServerProvidersAtom);
   return useMemo(() => {
     if (!isPrimaryEnvironmentThread) {
-      return null;
+      return { provider: null, threadKey: null };
     }
+    const threadKey = `${routeThreadRef.environmentId}:${routeThreadRef.threadId}`;
     const thread = Option.getOrNull(threadState.data);
     const instanceId = thread?.modelSelection?.instanceId ?? null;
     if (instanceId === null) {
-      return null;
+      return { provider: null, threadKey };
     }
     // Resolve the instance's driver; default instance ids equal their driver
     // slug, so fall back to that invariant only for the known defaults
     // instead of guessing from arbitrary custom instance ids.
     const driver =
       providers.find((provider) => provider.instanceId === instanceId)?.driver ??
-      (instanceId === "claudeAgent" || instanceId === "codex" ? instanceId : null);
-    if (driver === "claudeAgent") return "claude";
-    if (driver === "codex") return "codex";
-    return null;
-  }, [isPrimaryEnvironmentThread, providers, threadState.data]);
+      (instanceId in DRIVER_TO_USAGE_KIND ? instanceId : null);
+    return {
+      provider: driver === null ? null : (DRIVER_TO_USAGE_KIND[driver] ?? null),
+      threadKey,
+    };
+  }, [isPrimaryEnvironmentThread, providers, routeThreadRef, threadState.data]);
 }
 
 function ProviderUsagePill({
@@ -503,9 +651,11 @@ function ProviderUsagePill({
  * Settings button. On a thread it pins to the provider that thread runs on
  * (one pill: icon + micro-bar + % used of the most constrained window),
  * switchable via the popover's provider selector. Outside a thread it shows
- * a general overview — one compact pill per available subscription. The
- * popover details session/weekly windows, model-scoped limits, credits, and
- * Codex rate-limit resets.
+ * a general overview — one compact pill per active subscription, including
+ * icon-only tiles for providers without a usage API (Cursor, Grok,
+ * OpenCode) that link out to the vendor's dashboard. The popover details
+ * session/weekly windows, model-scoped limits, credits, and Codex
+ * rate-limit resets.
  */
 export function ProviderUsageStatus() {
   const primaryEnvironment = usePrimaryEnvironment();
@@ -514,14 +664,17 @@ export function ProviderUsageStatus() {
     environmentId === null ? null : serverEnvironment.providerUsage({ environmentId, input: {} }),
   );
   const nowMs = useRelativeTimeTick(30_000);
-  const threadProvider = useActiveThreadUsageProvider(environmentId);
+  const threadTarget = useActiveThreadUsageProvider(environmentId);
+  const threadProvider = threadTarget.provider;
+  const unmeteredProviders = useUnmeteredProviders();
   const [manualProvider, setManualProvider] = useState<UsageProviderKind | null>(null);
 
-  // Entering a thread re-pins the meter to that thread's provider until the
-  // user explicitly switches again.
+  // Entering a thread — including another thread on the same provider —
+  // re-pins the meter to that thread's provider until the user explicitly
+  // switches again.
   useEffect(() => {
     setManualProvider(null);
-  }, [threadProvider]);
+  }, [threadTarget.threadKey, threadProvider]);
 
   if (environmentId === null) {
     return null;
@@ -548,51 +701,65 @@ export function ProviderUsageStatus() {
 
   const snapshots = data.usage.filter((snapshot) => snapshot.status !== "unavailable");
 
-  if (snapshots.length === 0) {
+  if (snapshots.length === 0 && unmeteredProviders.length === 0) {
     return null;
   }
 
   // On a thread: one pill pinned to that thread's provider, with the popover
-  // selector available to peek at the other subscription. The manual pick
-  // falls back to the thread's provider if its snapshot disappears (e.g. the
-  // provider was just disabled); if neither has a snapshot we fall through to
-  // the overview rather than silently substituting the other provider.
+  // selector available to peek at the other metered subscription. The manual
+  // pick falls back to the thread's provider if its snapshot disappears
+  // (e.g. the provider was just disabled); if the thread runs on a provider
+  // without metering, its account tile is pinned instead. Anything else
+  // falls through to the overview rather than silently substituting another
+  // provider.
   const pinnedSnapshot =
     threadProvider === null
       ? undefined
       : (snapshots.find((entry) => entry.provider === (manualProvider ?? threadProvider)) ??
         snapshots.find((entry) => entry.provider === threadProvider));
 
-  if (pinnedSnapshot === undefined) {
-    // No thread open (or the thread's provider is unavailable): general
-    // overview of every available subscription.
+  if (pinnedSnapshot !== undefined) {
     return (
-      <div className="flex shrink-0 items-center gap-0.5">
-        {snapshots.map((snapshot) => (
-          <ProviderUsagePill
-            key={snapshot.provider}
-            snapshot={snapshot}
-            availableProviders={[snapshot.provider]}
-            onSelectProvider={setManualProvider}
-            showBar={snapshots.length === 1}
-            nowMs={nowMs}
-            isPending={isPending}
-            refresh={refresh}
-          />
-        ))}
-      </div>
+      <ProviderUsagePill
+        snapshot={pinnedSnapshot}
+        availableProviders={snapshots.map((entry) => entry.provider)}
+        onSelectProvider={setManualProvider}
+        showBar
+        nowMs={nowMs}
+        isPending={isPending}
+        refresh={refresh}
+      />
     );
   }
 
+  const pinnedUnmetered =
+    threadProvider === null
+      ? undefined
+      : unmeteredProviders.find((provider) => provider.kind === threadProvider);
+
+  if (pinnedUnmetered !== undefined) {
+    return <UnmeteredProviderPill provider={pinnedUnmetered} />;
+  }
+
+  // No thread open (or the thread's provider is unavailable): general
+  // overview of every active subscription.
   return (
-    <ProviderUsagePill
-      snapshot={pinnedSnapshot}
-      availableProviders={snapshots.map((entry) => entry.provider)}
-      onSelectProvider={setManualProvider}
-      showBar
-      nowMs={nowMs}
-      isPending={isPending}
-      refresh={refresh}
-    />
+    <div className="flex shrink-0 items-center gap-0.5">
+      {snapshots.map((snapshot) => (
+        <ProviderUsagePill
+          key={snapshot.provider}
+          snapshot={snapshot}
+          availableProviders={[snapshot.provider]}
+          onSelectProvider={setManualProvider}
+          showBar={snapshots.length === 1}
+          nowMs={nowMs}
+          isPending={isPending}
+          refresh={refresh}
+        />
+      ))}
+      {unmeteredProviders.map((provider) => (
+        <UnmeteredProviderPill key={provider.kind} provider={provider} />
+      ))}
+    </div>
   );
 }
