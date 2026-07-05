@@ -35,6 +35,35 @@ export function formatFileCommentRange(startLine: number, endLine: number): stri
   return startLine === endLine ? `L${startLine}` : `L${startLine} to L${endLine}`;
 }
 
+export function areFileCommentAnnotationsEqual(
+  left: ReadonlyArray<FileCommentLineAnnotation>,
+  right: ReadonlyArray<FileCommentLineAnnotation>,
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (a.lineNumber !== b.lineNumber) return false;
+    const aEntries = a.metadata.entries;
+    const bEntries = b.metadata.entries;
+    if (aEntries.length !== bEntries.length) return false;
+    for (let entryIndex = 0; entryIndex < aEntries.length; entryIndex += 1) {
+      const aEntry = aEntries[entryIndex]!;
+      const bEntry = bEntries[entryIndex]!;
+      if (
+        aEntry.id !== bEntry.id ||
+        aEntry.kind !== bEntry.kind ||
+        aEntry.startLine !== bEntry.startLine ||
+        aEntry.endLine !== bEntry.endLine ||
+        aEntry.text !== bEntry.text
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function remapFileCommentAnnotations(
   annotations: ReadonlyArray<FileCommentLineAnnotation>,
 ): FileCommentLineAnnotation[] {

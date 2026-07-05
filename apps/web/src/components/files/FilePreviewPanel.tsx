@@ -40,6 +40,7 @@ import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import FileBrowserPanel from "./FileBrowserPanel";
 import {
+  areFileCommentAnnotationsEqual,
   type FileCommentAnnotationEntry,
   type FileCommentAnnotationGroup,
   type FileCommentLineAnnotation,
@@ -146,6 +147,7 @@ function useFileLineReveal(
   relativePath: string | null,
   revealLine: number | null,
   revealRequestId: number,
+  contents: string,
 ): FilePostRender {
   const [handledRequestIdsByPath] = useState(() => new Map<string, number>());
   const [latestRequestIdsByPath] = useState(() => new Map<string, number>());
@@ -168,8 +170,9 @@ function useFileLineReveal(
         return;
       }
 
-      const targetLine =
-        revealLine === null ? null : clampFileLine(instance.file?.contents ?? "", revealLine);
+      // Clamp against the query contents rather than instance.file: the editable
+      // surface keeps its file object frozen while typing, so instance.file goes stale.
+      const targetLine = revealLine === null ? null : clampFileLine(contents, revealLine);
       updateFileLinkReveal(fileContainer, targetLine);
 
       if (!(instance instanceof VirtualizedFile)) return;
@@ -231,6 +234,7 @@ function useFileLineReveal(
       pendingFramesByPath.set(relativePath, requestAnimationFrame(reveal));
     },
     [
+      contents,
       handledRequestIdsByPath,
       latestRequestIdsByPath,
       pendingFramesByPath,
@@ -259,6 +263,25 @@ interface FileSelectionOverride {
   range: SelectedLineRange | null;
 }
 
+interface EditorFileRef {
+  name: string;
+  contents: string;
+  cacheKey: string;
+}
+
+interface EditorFileState {
+  file: EditorFileRef;
+  editorContents: string;
+}
+
+function editorFileRef(cwd: string, relativePath: string, contents: string): EditorFileRef {
+  return {
+    name: relativePath,
+    contents,
+    cacheKey: projectFileCacheKey(cwd, relativePath, contents),
+  };
+}
+
 function useFileSaveCoordinator({
   environmentId,
   cwd,
@@ -281,6 +304,20 @@ function useFileSaveCoordinator({
           }),
         onConfirmed: (confirmedContents) => {
           confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents);
+        },
+        onSaveFailed: (result) => {
+          if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: `Unable to save ${relativePath}`,
+              description:
+                error instanceof Error
+                  ? `${error.message} Retrying automatically.`
+                  : "Retrying automatically.",
+            }),
+          );
         },
       }),
     [cwd, environmentId, onPendingChange, relativePath, writeFile],
@@ -322,17 +359,45 @@ function EditableFileSurface({
     relativePath,
     onPendingChange,
   });
+  // The Pierre editor owns the text document while the user types: handing its own
+  // onChange contents back through a new `file` prop makes it rebuild the document,
+  // which drops focus, caret position, and undo history on every keystroke. Keep the
+  // mounted file stable and only swap it when contents arrive that the editor did
+  // not produce (external writes, refetches — including reverts back to the mounted
+  // baseline). Assumes cwd/environment changes remount this surface: FilePreviewPanel
+  // is keyed by environment+cwd in ChatView, and this component by path+theme.
+  const [fileState, setFileState] = useState<EditorFileState>(() => ({
+    file: editorFileRef(cwd, relativePath, contents),
+    editorContents: contents,
+  }));
+  if (fileState.file.name !== relativePath || contents !== fileState.editorContents) {
+    setFileState({
+      file: editorFileRef(cwd, relativePath, contents),
+      editorContents: contents,
+    });
+  }
   const editor = useMemo(
     () =>
       new Editor<FileCommentAnnotationGroup>({
         onChange: (file, nextLineAnnotations) => {
-          setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
-          saveCoordinator.change(file.contents);
+          const nextContents = file.contents;
+          setFileState((current) =>
+            current.editorContents === nextContents
+              ? current
+              : { ...current, editorContents: nextContents },
+          );
+          setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+          saveCoordinator.change(nextContents);
           if (nextLineAnnotations) {
             const remapped = remapFileCommentAnnotations(
               nextLineAnnotations as FileCommentLineAnnotation[],
             );
-            setLineAnnotations(remapped);
+            // Preserve array identity when nothing moved: the File component
+            // full-renders (dropping the caret) whenever the annotations prop
+            // identity changes while annotations exist.
+            setLineAnnotations((current) =>
+              areFileCommentAnnotationsEqual(current, remapped) ? current : remapped,
+            );
             for (const annotation of remapped) {
               for (const entry of annotation.metadata.entries) {
                 if (entry.kind !== "comment") continue;
@@ -344,7 +409,7 @@ function EditableFileSurface({
                     startLine: entry.startLine,
                     endLine: entry.endLine,
                     text: entry.text,
-                    contents: file.contents,
+                    contents: nextContents,
                   }),
                 );
               }
@@ -391,7 +456,7 @@ function EditableFileSurface({
             startLine: entry.startLine,
             endLine: entry.endLine,
             text,
-            contents,
+            contents: fileState.editorContents,
           }),
         );
       }
@@ -411,7 +476,7 @@ function EditableFileSurface({
     [
       addReviewComment,
       composerDraftTarget,
-      contents,
+      fileState.editorContents,
       lineAnnotations,
       relativePath,
       setSelectedRange,
@@ -507,11 +572,7 @@ function EditableFileSurface({
           }}
         >
           <File<FileCommentAnnotationGroup>
-            file={{
-              name: relativePath,
-              contents,
-              cacheKey: projectFileCacheKey(cwd, relativePath, contents),
-            }}
+            file={fileState.file}
             options={{
               disableFileHeader: true,
               enableGutterUtility: !hasOpenCommentForm,
@@ -649,7 +710,12 @@ export default function FilePreviewPanel({
     () => (relativePath ? fileBreadcrumbs(projectName, relativePath) : []),
     [projectName, relativePath],
   );
-  const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
+  const onFilePostRender = useFileLineReveal(
+    relativePath,
+    revealLine,
+    revealRequestId,
+    file.data?.contents ?? "",
+  );
 
   useEffect(() => {
     const currentCrumb = breadcrumbRef.current?.querySelector<HTMLElement>(
