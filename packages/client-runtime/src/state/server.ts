@@ -145,6 +145,20 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
+    providerUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:provider-usage",
+      tag: WS_METHODS.serverGetProviderUsage,
+      staleTimeMs: 60_000,
+      refreshIntervalMs: 5 * 60_000,
+    }),
+    consumeCodexResetCredit: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:consume-codex-reset-credit",
+      tag: WS_METHODS.serverConsumeCodexResetCredit,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:welcome",

@@ -75,6 +75,12 @@ import {
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
+import {
+  consumeCodexResetCredit,
+  getProviderUsage,
+  providerUsageUnavailable,
+} from "./provider/providerUsage.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -284,6 +290,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.subscribeThread, AuthOrchestrationReadScope],
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
+  [WS_METHODS.serverGetProviderUsage, AuthOrchestrationReadScope],
+  [WS_METHODS.serverConsumeCodexResetCredit, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
   [WS_METHODS.serverRemoveKeybinding, AuthOrchestrationOperateScope],
@@ -1182,6 +1190,30 @@ const makeWsRpcLayer = (
             ).pipe(Effect.map((providers) => ({ providers }))),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.serverGetProviderUsage]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetProviderUsage,
+            serverSettings.getSettings.pipe(
+              Effect.flatMap((settings) => getProviderUsage(settings)),
+              Effect.catch((error) =>
+                Effect.logWarning("Failed to read settings for provider usage", {
+                  detail: error.message,
+                }).pipe(Effect.andThen(providerUsageUnavailable(error.message))),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverConsumeCodexResetCredit]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverConsumeCodexResetCredit,
+            serverSettings.getSettings.pipe(
+              Effect.flatMap((settings) => consumeCodexResetCredit(settings.providers.codex)),
+              Effect.catch((error) =>
+                Effect.succeed({ ok: false as const, message: error.message }),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
+          ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateProvider,
@@ -1815,6 +1847,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
             makeWsRpcLayer(session, previewAutomationBroker).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),
+              Layer.provide(ProcessRunner.layer),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(
