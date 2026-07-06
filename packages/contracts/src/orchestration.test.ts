@@ -11,6 +11,7 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationThread,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -741,5 +742,88 @@ it.effect("ModelSelection rejects malformed instance ids", () =>
       }),
     );
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("decodes legacy thread.created payloads without handoffSource", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadCreatedPayload({
+      threadId: "thread-1",
+      projectId: "project-1",
+      title: "Thread title",
+      modelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.4",
+      },
+      interactionMode: "default",
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.handoffSource, undefined);
+  }),
+);
+
+it.effect("decodes thread.created payloads carrying a handoffSource", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadCreatedPayload({
+      threadId: "thread-2",
+      projectId: "project-1",
+      title: "Handoff: Thread title",
+      modelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.4",
+      },
+      interactionMode: "default",
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      branch: null,
+      worktreePath: null,
+      handoffSource: {
+        threadId: "thread-1",
+        method: "summary",
+        createdAt: "2026-01-02T00:00:00.000Z",
+      },
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+    });
+
+    assert.deepStrictEqual(parsed.handoffSource, {
+      threadId: "thread-1",
+      method: "summary",
+      createdAt: "2026-01-02T00:00:00.000Z",
+    });
+  }),
+);
+
+it.effect("decodes legacy thread snapshots without handoffSource to null", () =>
+  Effect.gen(function* () {
+    const parsed = yield* Schema.decodeUnknownEffect(OrchestrationThread)({
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Thread title",
+      modelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.4",
+      },
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+      session: null,
+    });
+
+    assert.strictEqual(parsed.handoffSource, null);
   }),
 );

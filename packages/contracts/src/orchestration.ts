@@ -257,6 +257,22 @@ const SourceProposedPlanReference = Schema.Struct({
   planId: OrchestrationProposedPlanId,
 });
 
+export const ThreadHandoffMethod = Schema.Literals(["transcript", "summary"]);
+export type ThreadHandoffMethod = typeof ThreadHandoffMethod.Type;
+
+/**
+ * Lineage marker for threads created by handing off an existing conversation
+ * to another provider instance. `threadId` points at the source thread whose
+ * context was carried over (as a serialized transcript or a model-written
+ * summary).
+ */
+export const ThreadHandoffSource = Schema.Struct({
+  threadId: ThreadId,
+  method: ThreadHandoffMethod,
+  createdAt: IsoDateTime,
+});
+export type ThreadHandoffSource = typeof ThreadHandoffSource.Type;
+
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
   "starting",
@@ -352,6 +368,9 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  handoffSource: Schema.NullOr(ThreadHandoffSource).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -398,6 +417,9 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  handoffSource: Schema.NullOr(ThreadHandoffSource).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -503,6 +525,7 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  handoffSource: Schema.optional(ThreadHandoffSource),
   createdAt: IsoDateTime,
 });
 
@@ -847,6 +870,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  handoffSource: Schema.optional(ThreadHandoffSource),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

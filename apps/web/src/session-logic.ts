@@ -740,6 +740,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       entry.toolData = data.item;
     }
   }
+  if (activity.kind === "handoff.target-created") {
+    // The timeline renders these as link cards; carry the raw payload so the
+    // card can resolve the target thread id.
+    entry.toolData = payload;
+  }
   if (itemType) {
     entry.itemType = itemType;
   }

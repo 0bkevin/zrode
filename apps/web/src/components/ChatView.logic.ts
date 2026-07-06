@@ -49,6 +49,7 @@ export function buildLocalDraftThread(
     latestTurn: null,
     branch: draftThread.branch,
     worktreePath: draftThread.worktreePath,
+    handoffSource: null,
     checkpoints: [],
     activities: [],
     proposedPlans: [],
@@ -380,6 +381,119 @@ export async function waitForStartedServerThread(
 
     timeoutId = globalThis.setTimeout(() => {
       finish(false);
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Whether the thread can be handed off to another provider right now: it must
+ * have started (there is context to transfer) and be idle (no running turn,
+ * no starting session, no in-flight send).
+ */
+export function canHandOffThread(thread: Thread | null | undefined, isSendBusy: boolean): boolean {
+  if (!threadHasStarted(thread) || isSendBusy) {
+    return false;
+  }
+  const latestTurn = thread?.latestTurn ?? null;
+  if (latestTurn !== null && latestTurn.state === "running") {
+    return false;
+  }
+  // A "starting" session means a turn was queued but the provider hasn't
+  // reported running yet — handing off now would race that turn.
+  if (thread?.session?.status === "starting") {
+    return false;
+  }
+  return true;
+}
+
+export type SettledTurnAssistantTextResult =
+  | { outcome: "completed"; text: string }
+  | { outcome: "empty" }
+  | { outcome: "interrupted" }
+  | { outcome: "error" }
+  | { outcome: "timeout" };
+
+/**
+ * Wait for a NEW latest turn (different from `previousTurnId`) on `threadRef`
+ * to settle, and resolve the assistant reply text produced by that turn. Used
+ * by summary-mode handoff to capture the outgoing model's handoff document.
+ *
+ * Turn identity (not timestamps) is used to detect the new turn so client vs
+ * server clock skew can neither stall the wait nor match the previous turn.
+ * Providers may emit several assistant messages per turn (commentary between
+ * tool calls), so all of them are joined in order.
+ */
+export async function waitForSettledTurnAssistantText(
+  threadRef: ScopedThreadRef,
+  options: { previousTurnId: TurnId | null; timeoutMs?: number },
+): Promise<SettledTurnAssistantTextResult> {
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1_000;
+  const threadAtom = environmentThreadDetails.detailAtom(threadRef);
+
+  const resolveSettledResult = (
+    thread: Thread | null | undefined,
+  ): SettledTurnAssistantTextResult | undefined => {
+    const latestTurn = thread?.latestTurn ?? null;
+    if (!thread || latestTurn === null || latestTurn.turnId === options.previousTurnId) {
+      return undefined;
+    }
+    if (latestTurn.state === "running") {
+      return undefined;
+    }
+    if (latestTurn.state === "interrupted") {
+      return { outcome: "interrupted" };
+    }
+    if (latestTurn.state !== "completed") {
+      return { outcome: "error" };
+    }
+    const assistantMessages = thread.messages.filter(
+      (message) => message.role === "assistant" && message.turnId === latestTurn.turnId,
+    );
+    if (assistantMessages.some((message) => message.streaming)) {
+      return undefined;
+    }
+    const text = assistantMessages
+      .map((message) => message.text.trim())
+      .filter((part) => part.length > 0)
+      .join("\n\n");
+    return text.length > 0 ? { outcome: "completed", text } : { outcome: "empty" };
+  };
+
+  const initial = resolveSettledResult(appAtomRegistry.get(threadAtom));
+  if (initial !== undefined) {
+    return initial;
+  }
+
+  return await new Promise<SettledTurnAssistantTextResult>((resolve) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const finish = (result: SettledTurnAssistantTextResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutId !== null) {
+        globalThis.clearTimeout(timeoutId);
+      }
+      unsubscribe();
+      resolve(result);
+    };
+
+    const unsubscribe = appAtomRegistry.subscribe(threadAtom, (thread) => {
+      const result = resolveSettledResult(thread);
+      if (result !== undefined) {
+        finish(result);
+      }
+    });
+
+    const current = resolveSettledResult(appAtomRegistry.get(threadAtom));
+    if (current !== undefined) {
+      finish(current);
+      return;
+    }
+
+    timeoutId = globalThis.setTimeout(() => {
+      finish({ outcome: "timeout" });
     }, timeoutMs);
   });
 }
