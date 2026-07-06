@@ -145,11 +145,22 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
+    // Rate-limit windows move on ~5h/7d scales, so a 10-minute passive
+    // refresh is plenty for the always-mounted sidebar meter (each cold
+    // refresh can spawn a codex probe + several vendor HTTP calls). Both
+    // atoms revalidate on mount with a 60s stale time, so opening the
+    // popover or the usage page still fetches promptly.
     providerUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:provider-usage",
       tag: WS_METHODS.serverGetProviderUsage,
       staleTimeMs: 60_000,
-      refreshIntervalMs: 5 * 60_000,
+      refreshIntervalMs: 10 * 60_000,
+    }),
+    providerUsageHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:provider-usage-history",
+      tag: WS_METHODS.serverGetProviderUsageHistory,
+      staleTimeMs: 60_000,
+      refreshIntervalMs: 10 * 60_000,
     }),
     consumeCodexResetCredit: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:consume-codex-reset-credit",

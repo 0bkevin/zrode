@@ -80,6 +80,7 @@ import {
   getProviderUsage,
   providerUsageUnavailable,
 } from "./provider/providerUsage.ts";
+import * as ProviderUsageHistory from "./provider/ProviderUsageHistory.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -291,6 +292,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverGetConfig, AuthOrchestrationReadScope],
   [WS_METHODS.serverRefreshProviders, AuthOrchestrationOperateScope],
   [WS_METHODS.serverGetProviderUsage, AuthOrchestrationReadScope],
+  [WS_METHODS.serverGetProviderUsageHistory, AuthOrchestrationReadScope],
   [WS_METHODS.serverConsumeCodexResetCredit, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpdateProvider, AuthOrchestrationOperateScope],
   [WS_METHODS.serverUpsertKeybinding, AuthOrchestrationOperateScope],
@@ -441,6 +443,7 @@ const makeWsRpcLayer = (
       const sessions = yield* SessionStore.SessionStore;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
+      const providerUsageHistory = yield* ProviderUsageHistory.ProviderUsageHistory;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -1195,10 +1198,37 @@ const makeWsRpcLayer = (
             WS_METHODS.serverGetProviderUsage,
             serverSettings.getSettings.pipe(
               Effect.flatMap((settings) => getProviderUsage(settings)),
+              // Recording dedupes on the snapshot's updatedAt, so re-serving
+              // a cached snapshot never writes a duplicate history sample.
+              Effect.tap((result) => providerUsageHistory.record(result)),
               Effect.catch((error) =>
                 Effect.logWarning("Failed to read settings for provider usage", {
                   detail: error.message,
                 }).pipe(Effect.andThen(providerUsageUnavailable(error.message))),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverGetProviderUsageHistory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetProviderUsageHistory,
+            serverSettings.getSettings.pipe(
+              Effect.flatMap((settings) => providerUsageHistory.readHistory(input, settings)),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* Effect.logWarning("Failed to read settings for provider usage history", {
+                    detail: error.message,
+                  });
+                  const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+                  return {
+                    days: [],
+                    tokenActivity: [],
+                    isBackfilling: false,
+                    today: ProviderUsageHistory.localDayKey(nowMs),
+                    lastScanAt: null,
+                    retentionDays: 0,
+                  };
+                }),
               ),
             ),
             { "rpc.aggregate": "server" },

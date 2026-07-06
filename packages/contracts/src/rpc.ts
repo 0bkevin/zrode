@@ -132,7 +132,12 @@ import {
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
-import { ServerConsumeCodexResetCreditResult, ServerProviderUsageResult } from "./providerUsage.ts";
+import {
+  ServerConsumeCodexResetCreditResult,
+  ServerProviderUsageHistoryInput,
+  ServerProviderUsageHistoryResult,
+  ServerProviderUsageResult,
+} from "./providerUsage.ts";
 import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -205,6 +210,7 @@ export const WS_METHODS = {
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverGetProviderUsage: "server.getProviderUsage",
+  serverGetProviderUsageHistory: "server.getProviderUsageHistory",
   serverConsumeCodexResetCredit: "server.consumeCodexResetCredit",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
@@ -274,6 +280,15 @@ export const WsServerGetProviderUsageRpc = Rpc.make(WS_METHODS.serverGetProvider
   success: ServerProviderUsageResult,
   error: EnvironmentAuthorizationError,
 });
+
+export const WsServerGetProviderUsageHistoryRpc = Rpc.make(
+  WS_METHODS.serverGetProviderUsageHistory,
+  {
+    payload: ServerProviderUsageHistoryInput,
+    success: ServerProviderUsageHistoryResult,
+    error: EnvironmentAuthorizationError,
+  },
+);
 
 export const WsServerConsumeCodexResetCreditRpc = Rpc.make(
   WS_METHODS.serverConsumeCodexResetCredit,
@@ -703,6 +718,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerGetProviderUsageRpc,
+  WsServerGetProviderUsageHistoryRpc,
   WsServerConsumeCodexResetCreditRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
