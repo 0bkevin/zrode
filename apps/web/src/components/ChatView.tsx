@@ -227,7 +227,7 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   resolveEditableLastUserMessage,
-  deriveRetryableFailedTurnMessageIds,
+  deriveRetryableFailedTurnTargetsByActivityId,
   hasServerAcknowledgedLocalDispatch,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
@@ -1341,9 +1341,13 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const isServerThread = routeKind === "server" && serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
-  const retryableFailedTurnMessageIds = useMemo(
-    () => deriveRetryableFailedTurnMessageIds(isServerThread ? serverThread : null),
+  const retryableFailedTurnTargetsByActivityId = useMemo(
+    () => deriveRetryableFailedTurnTargetsByActivityId(isServerThread ? serverThread : null),
     [isServerThread, serverThread],
+  );
+  const retryableFailedTurnMessageIds = useMemo(
+    () => new Set(retryableFailedTurnTargetsByActivityId.values()),
+    [retryableFailedTurnTargetsByActivityId],
   );
   const sessionLastError = serverThread?.session?.lastError ?? null;
   // A fresh failure always arrives with a non-running status and a bumped `updatedAt`, so
@@ -6174,8 +6178,12 @@ function ChatViewContent(props: ChatViewProps) {
                   editableLastUserMessage.editable ? editableLastUserMessage.messageId : null
                 }
                 onEditUserMessage={onEditUserMessage}
-                retryableFailedTurnMessageIds={retryableFailedTurnMessageIds}
+                retryableFailedTurnTargetsByActivityId={retryableFailedTurnTargetsByActivityId}
                 retryingUserMessageIds={retryingUserMessageIds}
+                retryControlsDisabled={activeEnvironmentUnavailable}
+                retryControlsDisabledLabel={
+                  activeEnvironmentUnavailable ? "Reconnect to retry this message" : null
+                }
                 onRetryUserMessage={onRetryUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}

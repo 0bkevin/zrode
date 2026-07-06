@@ -18,7 +18,7 @@ import {
   buildThreadTurnInterruptInput,
   canHandOffThread,
   createLocalDispatchSnapshot,
-  deriveRetryableFailedTurnMessageIds,
+  deriveRetryableFailedTurnTargetsByActivityId,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
@@ -148,6 +148,25 @@ function makeTurnStartFailureActivity(
     turnId: null,
     sequence: 1,
     createdAt: now,
+    ...overrides,
+  };
+}
+
+function makeTurnRetryRequestedActivity(
+  overrides: Partial<Thread["activities"][number]> = {},
+): Thread["activities"][number] {
+  return {
+    id: EventId.make("activity-provider-retry-requested"),
+    tone: "info",
+    kind: "provider.turn.retry.requested",
+    summary: "Retry requested",
+    payload: {
+      messageId: userMessageId,
+      commandId: "cmd-retry",
+    },
+    turnId: null,
+    sequence: 2,
+    createdAt: "2026-03-29T00:00:01.000Z",
     ...overrides,
   };
 }
@@ -341,11 +360,11 @@ describe("buildThreadTurnInterruptInput", () => {
   });
 });
 
-describe("deriveRetryableFailedTurnMessageIds", () => {
-  it("returns the latest user message id when its latest turn-start failure is retryable", () => {
+describe("deriveRetryableFailedTurnTargetsByActivityId", () => {
+  it("returns the latest retryable turn-start failure activity target", () => {
     expect(
       Array.from(
-        deriveRetryableFailedTurnMessageIds(
+        deriveRetryableFailedTurnTargetsByActivityId(
           makeThread({
             session: readySession,
             messages: [makeUserMessage()],
@@ -353,12 +372,12 @@ describe("deriveRetryableFailedTurnMessageIds", () => {
           }),
         ),
       ),
-    ).toEqual([userMessageId]);
+    ).toEqual([[EventId.make("activity-provider-failure"), userMessageId]]);
   });
 
   it("ignores non-retryable failures and active sessions", () => {
     expect(
-      deriveRetryableFailedTurnMessageIds(
+      deriveRetryableFailedTurnTargetsByActivityId(
         makeThread({
           session: readySession,
           messages: [makeUserMessage()],
@@ -372,7 +391,7 @@ describe("deriveRetryableFailedTurnMessageIds", () => {
     ).toBe(0);
 
     expect(
-      deriveRetryableFailedTurnMessageIds(
+      deriveRetryableFailedTurnTargetsByActivityId(
         makeThread({
           session: { ...readySession, status: "running", activeTurnId: TurnId.make("turn-1") },
           messages: [makeUserMessage()],
@@ -384,11 +403,42 @@ describe("deriveRetryableFailedTurnMessageIds", () => {
 
   it("does not allow retry after assistant output exists for the message", () => {
     expect(
-      deriveRetryableFailedTurnMessageIds(
+      deriveRetryableFailedTurnTargetsByActivityId(
         makeThread({
           session: readySession,
           messages: [makeUserMessage(), makeAssistantMessage()],
           activities: [makeTurnStartFailureActivity()],
+        }),
+      ).size,
+    ).toBe(0);
+  });
+
+  it("targets only the latest failure and clears eligibility after a retry reservation", () => {
+    const firstFailure = makeTurnStartFailureActivity();
+    const secondFailure = makeTurnStartFailureActivity({
+      id: EventId.make("activity-provider-failure-2"),
+      sequence: 2,
+      createdAt: "2026-03-29T00:00:01.000Z",
+    });
+
+    expect(
+      Array.from(
+        deriveRetryableFailedTurnTargetsByActivityId(
+          makeThread({
+            session: readySession,
+            messages: [makeUserMessage()],
+            activities: [firstFailure, secondFailure],
+          }),
+        ),
+      ),
+    ).toEqual([[EventId.make("activity-provider-failure-2"), userMessageId]]);
+
+    expect(
+      deriveRetryableFailedTurnTargetsByActivityId(
+        makeThread({
+          session: readySession,
+          messages: [makeUserMessage()],
+          activities: [firstFailure, makeTurnRetryRequestedActivity()],
         }),
       ).size,
     ).toBe(0);

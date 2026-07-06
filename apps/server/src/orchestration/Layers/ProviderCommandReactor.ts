@@ -264,6 +264,7 @@ const make = Effect.gen(function* () {
     readonly createdAt: string;
     readonly messageId?: string;
     readonly retryable?: boolean;
+    readonly turnStart?: Record<string, unknown>;
     readonly requestId?: string;
   }) =>
     Effect.all({
@@ -284,6 +285,7 @@ const make = Effect.gen(function* () {
               detail: input.detail,
               ...(input.messageId ? { messageId: input.messageId } : {}),
               ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+              ...(input.turnStart !== undefined ? { turnStart: input.turnStart } : {}),
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
@@ -849,6 +851,17 @@ const make = Effect.gen(function* () {
       }
       const detail = formatFailureDetail(cause);
       const retryable = isRetryableTurnStartFailure(cause);
+      const turnStart = {
+        ...(event.payload.modelSelection !== undefined
+          ? { modelSelection: event.payload.modelSelection }
+          : {}),
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        runtimeMode: event.payload.runtimeMode,
+        interactionMode: event.payload.interactionMode,
+        ...(event.payload.sourceProposedPlan !== undefined
+          ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+          : {}),
+      };
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -864,6 +877,7 @@ const make = Effect.gen(function* () {
             createdAt: event.payload.createdAt,
             messageId: event.payload.messageId,
             retryable,
+            turnStart,
           }),
         ),
         Effect.asVoid,

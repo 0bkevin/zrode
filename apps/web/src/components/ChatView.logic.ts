@@ -193,10 +193,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
-export function deriveRetryableFailedTurnMessageIds(
+const PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND = "provider.turn.retry.requested";
+
+function compareRetryActivityOrder(
+  left: Pick<Thread["activities"][number], "createdAt" | "id" | "sequence">,
+  right: Pick<Thread["activities"][number], "createdAt" | "id" | "sequence">,
+): number {
+  return (
+    left.createdAt.localeCompare(right.createdAt) ||
+    (left.sequence ?? -1) - (right.sequence ?? -1) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+export function deriveRetryableFailedTurnTargetsByActivityId(
   thread: Pick<Thread, "messages" | "activities" | "session"> | null | undefined,
-): Set<MessageId> {
-  const result = new Set<MessageId>();
+): Map<string, MessageId> {
+  const result = new Map<string, MessageId>();
   if (!thread) {
     return result;
   }
@@ -220,17 +233,22 @@ export function deriveRetryableFailedTurnMessageIds(
     return result;
   }
 
-  for (let index = thread.activities.length - 1; index >= 0; index -= 1) {
-    const activity = thread.activities[index];
-    if (!activity || activity.kind !== "provider.turn.start.failed") {
-      continue;
-    }
+  const activities = thread.activities
+    .filter(
+      (activity) =>
+        activity.kind === "provider.turn.start.failed" ||
+        activity.kind === PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND,
+    )
+    .toSorted(compareRetryActivityOrder);
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index];
+    if (!activity) continue;
     const payload = isRecord(activity.payload) ? activity.payload : null;
     if (payload?.messageId !== latestUserMessage.id) {
       continue;
     }
-    if (payload.retryable === true) {
-      result.add(latestUserMessage.id);
+    if (activity.kind === "provider.turn.start.failed" && payload.retryable === true) {
+      result.set(activity.id, latestUserMessage.id);
     }
     return result;
   }

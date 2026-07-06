@@ -59,25 +59,88 @@ type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
 
+const PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND = "provider.turn.retry.requested";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
-function hasRetryableTurnStartFailureForMessage(
+type TurnStartRetryMetadata = Omit<
+  Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }>["payload"],
+  "threadId" | "messageId" | "createdAt"
+>;
+
+type TurnStartRetryState =
+  | {
+      readonly type: "retryable-failure";
+      readonly payload: Record<string, unknown>;
+    }
+  | {
+      readonly type: "retry-requested";
+    };
+
+function compareRetryActivityOrder(
+  left: OrchestrationReadModel["threads"][number]["activities"][number],
+  right: OrchestrationReadModel["threads"][number]["activities"][number],
+): number {
+  return (
+    left.createdAt.localeCompare(right.createdAt) ||
+    (left.sequence ?? -1) - (right.sequence ?? -1) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function resolveLatestTurnStartRetryStateForMessage(
   thread: OrchestrationReadModel["threads"][number],
   messageId: string,
-): boolean {
-  for (let index = thread.activities.length - 1; index >= 0; index -= 1) {
-    const activity = thread.activities[index];
-    if (!activity || activity.kind !== "provider.turn.start.failed") {
-      continue;
-    }
+): TurnStartRetryState | null {
+  const activities = thread.activities
+    .filter(
+      (activity) =>
+        activity.kind === "provider.turn.start.failed" ||
+        activity.kind === PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND,
+    )
+    .toSorted(compareRetryActivityOrder);
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index];
+    if (!activity) continue;
     const payload = isRecord(activity.payload) ? activity.payload : null;
     if (payload?.messageId === messageId) {
-      return payload.retryable === true;
+      return activity.kind === "provider.turn.start.failed" && payload.retryable === true
+        ? { type: "retryable-failure", payload }
+        : { type: "retry-requested" };
     }
   }
-  return false;
+  return null;
+}
+
+function isRuntimeMode(value: unknown): value is TurnStartRetryMetadata["runtimeMode"] {
+  return value === "approval-required" || value === "auto-accept-edits" || value === "full-access";
+}
+
+function isInteractionMode(value: unknown): value is TurnStartRetryMetadata["interactionMode"] {
+  return value === "default" || value === "plan";
+}
+
+function resolveStoredTurnStartRetryMetadata(
+  payload: Record<string, unknown>,
+): TurnStartRetryMetadata | null {
+  const turnStart = isRecord(payload.turnStart) ? payload.turnStart : null;
+  if (!turnStart) {
+    return null;
+  }
+  if (!isRuntimeMode(turnStart.runtimeMode) || !isInteractionMode(turnStart.interactionMode)) {
+    return null;
+  }
+  return {
+    ...(turnStart.modelSelection !== undefined ? { modelSelection: turnStart.modelSelection } : {}),
+    ...(typeof turnStart.titleSeed === "string" ? { titleSeed: turnStart.titleSeed } : {}),
+    runtimeMode: turnStart.runtimeMode,
+    interactionMode: turnStart.interactionMode,
+    ...(isRecord(turnStart.sourceProposedPlan)
+      ? { sourceProposedPlan: turnStart.sourceProposedPlan }
+      : {}),
+  } as TurnStartRetryMetadata;
 }
 
 function findCheckpointAfterUserMessageForEdit(
@@ -609,30 +672,74 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
-      if (!hasRetryableTurnStartFailureForMessage(targetThread, command.messageId)) {
+      const retryState = resolveLatestTurnStartRetryStateForMessage(
+        targetThread,
+        command.messageId,
+      );
+      if (retryState?.type !== "retryable-failure") {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `User message '${command.messageId}' does not have a retryable turn-start failure.`,
         });
       }
 
-      return {
+      const retryMetadata = resolveStoredTurnStartRetryMetadata(retryState.payload) ?? {
+        modelSelection: targetThread.modelSelection,
+        runtimeMode: targetThread.runtimeMode,
+        interactionMode: targetThread.interactionMode,
+      };
+
+      const retryRequestedBase = yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      });
+      const retryRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...retryRequestedBase,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: retryRequestedBase.eventId,
+            tone: "info",
+            kind: PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND,
+            summary: "Retry requested",
+            payload: {
+              messageId: command.messageId,
+              commandId: command.commandId,
+            },
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        },
+      };
+
+      const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
         })),
+        causationEventId: retryRequestedEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
-          modelSelection: targetThread.modelSelection,
-          runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
+          ...(retryMetadata.modelSelection !== undefined
+            ? { modelSelection: retryMetadata.modelSelection }
+            : {}),
+          ...(retryMetadata.titleSeed !== undefined ? { titleSeed: retryMetadata.titleSeed } : {}),
+          runtimeMode: retryMetadata.runtimeMode,
+          interactionMode: retryMetadata.interactionMode,
+          ...(retryMetadata.sourceProposedPlan !== undefined
+            ? { sourceProposedPlan: retryMetadata.sourceProposedPlan }
+            : {}),
           createdAt: command.createdAt,
         },
       };
+      return [retryRequestedEvent, turnStartRequestedEvent];
     }
 
     case "thread.last-user-message.edit": {

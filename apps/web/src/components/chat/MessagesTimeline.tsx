@@ -136,8 +136,10 @@ interface TimelineRowSharedState {
   onRequestHandoff: (() => void) | null;
   onRevertUserMessage: (messageId: MessageId) => void;
   onEditUserMessage: (messageId: MessageId) => void;
-  retryableFailedTurnMessageIds: ReadonlySet<MessageId>;
+  retryableFailedTurnTargetsByActivityId: ReadonlyMap<string, MessageId>;
   retryingUserMessageIds: ReadonlySet<MessageId>;
+  retryControlsDisabled: boolean;
+  retryControlsDisabledLabel: string | null;
   onRetryUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
@@ -177,8 +179,10 @@ interface MessagesTimelineProps {
   onRevertUserMessage: (messageId: MessageId) => void;
   editableUserMessageId?: MessageId | null;
   onEditUserMessage?: ((messageId: MessageId) => void) | undefined;
-  retryableFailedTurnMessageIds: ReadonlySet<MessageId>;
+  retryableFailedTurnTargetsByActivityId: ReadonlyMap<string, MessageId>;
   retryingUserMessageIds: ReadonlySet<MessageId>;
+  retryControlsDisabled: boolean;
+  retryControlsDisabledLabel: string | null;
   onRetryUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -224,8 +228,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onRevertUserMessage,
   editableUserMessageId = null,
   onEditUserMessage = noopEditUserMessage,
-  retryableFailedTurnMessageIds,
+  retryableFailedTurnTargetsByActivityId,
   retryingUserMessageIds,
+  retryControlsDisabled,
+  retryControlsDisabledLabel,
   onRetryUserMessage,
   isRevertingCheckpoint,
   onImageExpand,
@@ -458,8 +464,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRequestHandoff: onRequestHandoff ?? null,
       onRevertUserMessage,
       onEditUserMessage,
-      retryableFailedTurnMessageIds,
+      retryableFailedTurnTargetsByActivityId,
       retryingUserMessageIds,
+      retryControlsDisabled,
+      retryControlsDisabledLabel,
       onRetryUserMessage,
       onImageExpand,
       onOpenTurnDiff,
@@ -478,8 +486,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onRequestHandoff,
       onRevertUserMessage,
       onEditUserMessage,
-      retryableFailedTurnMessageIds,
+      retryableFailedTurnTargetsByActivityId,
       retryingUserMessageIds,
+      retryControlsDisabled,
+      retryControlsDisabledLabel,
       onRetryUserMessage,
       onImageExpand,
       onOpenTurnDiff,
@@ -2042,18 +2052,12 @@ const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation(
 
 function resolveRetryableTurnStartFailureMessageId(
   workEntry: TimelineWorkEntry,
-  retryableMessageIds: ReadonlySet<MessageId>,
+  retryTargetsByActivityId: ReadonlyMap<string, MessageId>,
 ): MessageId | null {
   if (workEntry.sourceActivityKind !== "provider.turn.start.failed") {
     return null;
   }
-  const payload =
-    workEntry.toolData !== null && typeof workEntry.toolData === "object"
-      ? (workEntry.toolData as Record<string, unknown>)
-      : null;
-  const messageId =
-    typeof payload?.messageId === "string" ? (payload.messageId as MessageId) : null;
-  return messageId !== null && retryableMessageIds.has(messageId) ? messageId : null;
+  return retryTargetsByActivityId.get(workEntry.id) ?? null;
 }
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
@@ -2104,9 +2108,10 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
   const retryMessageId = resolveRetryableTurnStartFailureMessageId(
     workEntry,
-    ctx.retryableFailedTurnMessageIds,
+    ctx.retryableFailedTurnTargetsByActivityId,
   );
   const isRetrying = retryMessageId !== null && ctx.retryingUserMessageIds.has(retryMessageId);
+  const retryDisabled = activity.isWorking || isRetrying || ctx.retryControlsDisabled;
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
@@ -2211,13 +2216,14 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                       type="button"
                       size="xs"
                       variant="ghost"
-                      disabled={activity.isWorking || isRetrying}
+                      disabled={retryDisabled}
                       className="h-6 gap-1 rounded-md px-1.5 text-[11px]"
                       aria-label="Retry failed message"
                       onClick={(event) => {
                         event.stopPropagation();
                         ctx.onRetryUserMessage(retryMessageId);
                       }}
+                      onKeyDown={stopRowToggle}
                       onPointerDown={stopRowToggle}
                     />
                   }
@@ -2225,7 +2231,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   <RefreshCwIcon className={cn("size-3", isRetrying && "animate-spin")} />
                   Retry
                 </TooltipTrigger>
-                <TooltipPopup side="top">Retry this failed message</TooltipPopup>
+                <TooltipPopup side="top">
+                  {ctx.retryControlsDisabled
+                    ? (ctx.retryControlsDisabledLabel ?? "Retry is unavailable")
+                    : "Retry this failed message"}
+                </TooltipPopup>
               </Tooltip>
             ) : null}
           </div>

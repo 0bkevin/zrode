@@ -39,7 +39,10 @@ function retryCommand(
   };
 }
 
-function seedReadModel(options: { readonly retryableFailure: boolean }) {
+function seedReadModel(options: {
+  readonly retryableFailure: boolean;
+  readonly turnStart?: Record<string, unknown>;
+}) {
   return Effect.gen(function* () {
     const initial = createEmptyReadModel(NOW);
     const withProject = yield* projectEvent(initial, {
@@ -138,6 +141,7 @@ function seedReadModel(options: { readonly retryableFailure: boolean }) {
             detail: "Rate limit exceeded.",
             messageId: USER_MESSAGE_ID,
             retryable: options.retryableFailure,
+            ...(options.turnStart !== undefined ? { turnStart: options.turnStart } : {}),
           },
           turnId: null,
           sequence: 4,
@@ -151,6 +155,66 @@ function seedReadModel(options: { readonly retryableFailure: boolean }) {
 it.layer(NodeServices.layer)("decider retry", (it) => {
   it.effect("retries a failed user message without appending a duplicate user message", () =>
     Effect.gen(function* () {
+      const turnStart = {
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+        titleSeed: "Implement plan",
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+        sourceProposedPlan: {
+          threadId: asThreadId("thread-source"),
+          planId: "plan-1",
+        },
+      };
+      const readModel = yield* seedReadModel({ retryableFailure: true, turnStart });
+      const decided = yield* decideOrchestrationCommand({
+        command: retryCommand(),
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+
+      expect(events).toHaveLength(2);
+      expect(events.some((event) => event.type === "thread.message-sent")).toBe(false);
+      expect(events[0]?.type).toBe("thread.activity-appended");
+      expect(events[1]?.type).toBe("thread.turn-start-requested");
+      if (events[0]?.type !== "thread.activity-appended") {
+        return;
+      }
+      expect(events[0].payload.activity).toMatchObject({
+        tone: "info",
+        kind: "provider.turn.retry.requested",
+        payload: {
+          messageId: USER_MESSAGE_ID,
+          commandId: CommandId.make("cmd-turn-retry"),
+        },
+      });
+      if (events[1]?.type !== "thread.turn-start-requested") {
+        return;
+      }
+      expect(events[1].causationEventId).toBe(events[0].eventId);
+      expect(events[1].payload).toMatchObject({
+        threadId: THREAD_ID,
+        messageId: USER_MESSAGE_ID,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+        titleSeed: "Implement plan",
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+        sourceProposedPlan: {
+          threadId: asThreadId("thread-source"),
+          planId: "plan-1",
+        },
+        createdAt: "2026-01-01T00:01:00.000Z",
+      });
+    }),
+  );
+
+  it.effect("rejects a second retry after the first retry has reserved the attempt", () =>
+    Effect.gen(function* () {
       const readModel = yield* seedReadModel({ retryableFailure: true });
       const decided = yield* decideOrchestrationCommand({
         command: retryCommand(),
@@ -158,23 +222,25 @@ it.layer(NodeServices.layer)("decider retry", (it) => {
       });
       const events = Array.isArray(decided) ? decided : [decided];
 
-      expect(events).toHaveLength(1);
-      expect(events.some((event) => event.type === "thread.message-sent")).toBe(false);
-      expect(events[0]?.type).toBe("thread.turn-start-requested");
-      if (events[0]?.type !== "thread.turn-start-requested") {
-        return;
+      let nextReadModel = readModel;
+      let sequence = nextReadModel.snapshotSequence;
+      for (const event of events) {
+        sequence += 1;
+        nextReadModel = yield* projectEvent(nextReadModel, {
+          ...event,
+          sequence,
+        });
       }
-      expect(events[0].payload).toMatchObject({
-        threadId: THREAD_ID,
-        messageId: USER_MESSAGE_ID,
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        runtimeMode: "approval-required",
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        createdAt: "2026-01-01T00:01:00.000Z",
-      });
+
+      const error = yield* decideOrchestrationCommand({
+        command: retryCommand({ commandId: CommandId.make("cmd-turn-retry-again") }),
+        readModel: nextReadModel,
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+      if (error._tag === "OrchestrationCommandInvariantError") {
+        expect(error.detail).toContain("does not have a retryable turn-start failure");
+      }
     }),
   );
 
