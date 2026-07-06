@@ -145,17 +145,17 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
-    // Rate-limit windows move on ~5h/7d scales, so a 10-minute passive
-    // refresh is plenty for the always-mounted sidebar meter (each cold
-    // refresh can spawn a codex probe + several vendor HTTP calls). Both
-    // atoms revalidate on mount with a 60s stale time, so opening the
-    // popover or the usage page still fetches promptly.
+    // Live provider usage can touch vendor APIs. Usage surfaces mount it on
+    // open or after a delayed footer overview load; the slow refresh keeps the
+    // overview current while server-side cache/backoff protects vendor APIs.
     providerUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:provider-usage",
       tag: WS_METHODS.serverGetProviderUsage,
       staleTimeMs: 60_000,
       refreshIntervalMs: 10 * 60_000,
     }),
+    // History reads local persisted data and may backfill local logs; it does
+    // not call vendor usage APIs.
     providerUsageHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:provider-usage-history",
       tag: WS_METHODS.serverGetProviderUsageHistory,
