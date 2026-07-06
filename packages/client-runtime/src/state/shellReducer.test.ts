@@ -32,6 +32,7 @@ const stubThread = {
   interactionMode: "default" as const,
   branch: null,
   worktreePath: null,
+  handoffSource: null,
   latestTurn: null,
   createdAt: "2026-04-01T00:00:00.000Z",
   updatedAt: "2026-04-01T00:00:00.000Z",

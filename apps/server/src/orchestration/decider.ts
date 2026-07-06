@@ -222,14 +222,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      return {
+      const handoffSource = command.handoffSource;
+      if (handoffSource !== undefined) {
+        const sourceThread = yield* requireThread({
+          readModel,
+          command,
+          threadId: handoffSource.threadId,
+        });
+        if (sourceThread.deletedAt !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Handoff source thread '${handoffSource.threadId}' has been deleted.`,
+          });
+        }
+        if (sourceThread.projectId !== command.projectId) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Handoff source thread '${handoffSource.threadId}' belongs to project '${sourceThread.projectId}', not '${command.projectId}'.`,
+          });
+        }
+      }
+      const threadCreatedEvent = {
         ...(yield* withEventBase({
-          aggregateKind: "thread",
+          aggregateKind: "thread" as const,
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
         })),
-        type: "thread.created",
+        type: "thread.created" as const,
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
@@ -239,10 +259,42 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          ...(handoffSource !== undefined ? { handoffSource } : {}),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
       };
+      if (handoffSource === undefined) {
+        return threadCreatedEvent;
+      }
+      const sourceActivityBase = yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: handoffSource.threadId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      });
+      return [
+        threadCreatedEvent,
+        {
+          ...sourceActivityBase,
+          type: "thread.activity-appended" as const,
+          payload: {
+            threadId: handoffSource.threadId,
+            activity: {
+              id: sourceActivityBase.eventId,
+              tone: "info" as const,
+              kind: "handoff.target-created",
+              summary: `Handed off to '${command.title}'.`,
+              payload: {
+                targetThreadId: command.threadId,
+                method: handoffSource.method,
+              },
+              turnId: null,
+              createdAt: command.createdAt,
+            },
+          },
+        },
+      ];
     }
 
     case "thread.delete": {

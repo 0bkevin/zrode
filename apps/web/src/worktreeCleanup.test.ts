@@ -18,6 +18,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     },
     runtimeMode: DEFAULT_RUNTIME_MODE,
     interactionMode: DEFAULT_INTERACTION_MODE,
+    handoffSource: null,
     session: null,
     messages: [],
     checkpoints: [],

@@ -7,6 +7,7 @@ import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
   buildThreadTurnInterruptInput,
+  canHandOffThread,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
@@ -34,6 +35,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     },
     runtimeMode: "full-access",
     interactionMode: "default",
+    handoffSource: null,
     session: null,
     messages: [],
     proposedPlans: [],
@@ -69,6 +71,51 @@ const readySession = {
   lastError: null,
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
+
+describe("canHandOffThread", () => {
+  it("rejects threads that have not started", () => {
+    expect(canHandOffThread(makeThread(), false)).toBe(false);
+    expect(canHandOffThread(null, false)).toBe(false);
+  });
+
+  it("rejects while a send is in flight", () => {
+    expect(canHandOffThread(makeThread({ latestTurn: completedTurn }), true)).toBe(false);
+  });
+
+  it("rejects while the latest turn is running", () => {
+    expect(
+      canHandOffThread(
+        makeThread({ latestTurn: { ...completedTurn, state: "running", completedAt: null } }),
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects while the session is still starting a queued turn", () => {
+    expect(
+      canHandOffThread(
+        makeThread({
+          latestTurn: completedTurn,
+          session: { ...readySession, status: "starting" },
+        }),
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  it("allows a started idle thread", () => {
+    expect(canHandOffThread(makeThread({ latestTurn: completedTurn }), false)).toBe(true);
+    expect(
+      canHandOffThread(
+        makeThread({ latestTurn: { ...completedTurn, state: "interrupted" } }),
+        false,
+      ),
+    ).toBe(true);
+    expect(
+      canHandOffThread(makeThread({ latestTurn: completedTurn, session: readySession }), false),
+    ).toBe(true);
+  });
+});
 
 describe("buildThreadTurnInterruptInput", () => {
   it("targets the session's active running turn", () => {

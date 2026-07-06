@@ -20,6 +20,7 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
+  type ThreadHandoffMethod,
 } from "@t3tools/contracts";
 import {
   connectionStatusText,
@@ -219,6 +220,7 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildThreadTurnInterruptInput,
+  canHandOffThread,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
@@ -235,8 +237,21 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  waitForSettledTurnAssistantText,
   waitForStartedServerThread,
 } from "./ChatView.logic";
+import {
+  buildHandoffSeedPrompt,
+  buildHandoffSummaryRequestPrompt,
+  buildHandoffThreadTitle,
+  serializeThreadTranscript,
+} from "../threadHandoff";
+import { HandoffSourceCard } from "./chat/HandoffCards";
+import {
+  ThreadHandoffDialog,
+  type ThreadHandoffPhase,
+  type ThreadHandoffTarget,
+} from "./chat/ThreadHandoffDialog";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
@@ -4753,6 +4768,327 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef,
   ]);
 
+  // ------------------------------------------------------------------
+  // Thread handoff — fork this conversation onto another provider.
+  // ------------------------------------------------------------------
+  const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
+  const [handoffPhase, setHandoffPhase] = useState<ThreadHandoffPhase>("idle");
+  // Monotonic run id. Cancelling (or closing the dialog mid-generation)
+  // bumps it, and the async flow aborts at its next checkpoint.
+  const handoffRunSeqRef = useRef(0);
+
+  const canHandOff =
+    isServerThread &&
+    !isConnecting &&
+    !activeEnvironmentUnavailable &&
+    canHandOffThread(activeThread, isSendBusy);
+
+  const onRequestHandoff = useCallback(() => {
+    if (canHandOff) {
+      setHandoffPhase("idle");
+      setHandoffDialogOpen(true);
+    }
+  }, [canHandOff]);
+
+  // Only needed while the user is choosing options; skip recomputing it on
+  // every streamed token once a summary turn is running.
+  const handoffTranscriptPreview = useMemo(
+    () =>
+      handoffDialogOpen && handoffPhase === "idle" && activeThread
+        ? serializeThreadTranscript(activeThread)
+        : null,
+    [handoffDialogOpen, handoffPhase, activeThread],
+  );
+
+  // Plan-mode threads can't answer the summary request with a plain assistant
+  // message (the turn produces a proposed plan instead), so summary mode is
+  // unavailable for them.
+  const handoffSummaryUnavailableReason =
+    activeThread?.interactionMode === "plan"
+      ? "This thread is in plan mode; the model would produce a plan instead of a handoff document. Switch to the full transcript, or set the thread back to default mode first."
+      : null;
+
+  const activeThreadHandoffSource = activeThread?.handoffSource ?? null;
+  const handoffSourceCard = useMemo(() => {
+    if (!activeThreadHandoffSource || !activeThread) {
+      return null;
+    }
+    const shellSnapshot = activeEnvironmentShell.data?.snapshot;
+    const sourceShell =
+      shellSnapshot && shellSnapshot._tag === "Some"
+        ? (shellSnapshot.value.threads.find(
+            (shell) => shell.id === activeThreadHandoffSource.threadId,
+          ) ?? null)
+        : null;
+    return (
+      <HandoffSourceCard
+        environmentId={activeThread.environmentId}
+        sourceThreadId={activeThreadHandoffSource.threadId}
+        sourceTitle={sourceShell?.title ?? null}
+        method={activeThreadHandoffSource.method}
+      />
+    );
+  }, [activeThreadHandoffSource, activeThread, activeEnvironmentShell.data]);
+
+  const handoffContextMessageId = useMemo(() => {
+    if (!activeThreadHandoffSource || !activeThread) {
+      return null;
+    }
+    return activeThread.messages.find((message) => message.role === "user")?.id ?? null;
+  }, [activeThreadHandoffSource, activeThread]);
+
+  const onCancelHandoffGeneration = useCallback(() => {
+    // Invalidate the in-flight run first: even if the interrupt below misses
+    // the turn (it may not be running yet), the flow aborts at its next
+    // checkpoint instead of creating a thread the user no longer wants.
+    handoffRunSeqRef.current += 1;
+    setHandoffPhase("idle");
+    if (!activeThread) {
+      return;
+    }
+    void interruptThreadTurn({
+      environmentId,
+      input: buildThreadTurnInterruptInput(activeThread),
+    });
+  }, [activeThread, environmentId, interruptThreadTurn]);
+
+  const onConfirmHandoff = useCallback(
+    async ({ target, method }: { target: ThreadHandoffTarget; method: ThreadHandoffMethod }) => {
+      if (sendInFlightRef.current) {
+        return;
+      }
+      if (!activeThread || !activeProject || !canHandOff) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Cannot hand off right now",
+            description: "The thread is busy (a turn may be running). Try again when it is idle.",
+          }),
+        );
+        return;
+      }
+      const sourceThread = activeThread;
+      const sourceThreadRef = scopeThreadRef(sourceThread.environmentId, sourceThread.id);
+      const runId = handoffRunSeqRef.current + 1;
+      handoffRunSeqRef.current = runId;
+      const isAborted = () => handoffRunSeqRef.current !== runId;
+
+      sendInFlightRef.current = true;
+      beginLocalDispatch({ preparingWorktree: false });
+      const finish = () => {
+        sendInFlightRef.current = false;
+        resetLocalDispatch();
+      };
+
+      // 1. Resolve the context body: serialized transcript, or a handoff
+      //    document generated by the outgoing model on its own session.
+      let body: string;
+      if (method === "transcript") {
+        setHandoffPhase("creating-thread");
+        body = serializeThreadTranscript(sourceThread).text;
+      } else {
+        setHandoffPhase("generating-summary");
+        const previousTurnId = sourceThread.latestTurn?.turnId ?? null;
+        const summaryTurnResult = await startThreadTurn({
+          environmentId,
+          input: {
+            threadId: sourceThread.id,
+            message: {
+              messageId: newMessageId(),
+              role: "user",
+              text: buildHandoffSummaryRequestPrompt(),
+              attachments: [],
+            },
+            modelSelection: sourceThread.modelSelection,
+            runtimeMode: sourceThread.runtimeMode,
+            interactionMode: "default",
+            createdAt: new Date().toISOString(),
+          },
+        });
+        if (summaryTurnResult._tag === "Failure") {
+          setHandoffPhase("idle");
+          finish();
+          if (!isAtomCommandInterrupted(summaryTurnResult)) {
+            const error = squashAtomCommandFailure(summaryTurnResult);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not generate handoff summary",
+                description:
+                  error instanceof Error ? error.message : "Failed to start the summary turn.",
+              }),
+            );
+          }
+          return;
+        }
+        const summaryResult = await waitForSettledTurnAssistantText(sourceThreadRef, {
+          previousTurnId,
+        });
+        if (isAborted()) {
+          finish();
+          return;
+        }
+        if (summaryResult.outcome !== "completed") {
+          setHandoffPhase("idle");
+          finish();
+          if (summaryResult.outcome !== "interrupted") {
+            const description =
+              summaryResult.outcome === "timeout"
+                ? "The summary turn did not finish in time. The thread was not handed off."
+                : summaryResult.outcome === "empty"
+                  ? "The model produced no handoff document. The thread was not handed off."
+                  : "The summary turn failed. The thread was not handed off.";
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not generate handoff summary",
+                description,
+              }),
+            );
+          }
+          return;
+        }
+        body = summaryResult.text;
+        setHandoffPhase("creating-thread");
+      }
+      if (body.trim().length === 0) {
+        setHandoffPhase("idle");
+        finish();
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Nothing to hand off",
+            description: "This thread has no transferable conversation content yet.",
+          }),
+        );
+        return;
+      }
+
+      // 2. Fork: create the new thread on the target instance, seeded with
+      //    the context as its first user message. Mirrors the plan
+      //    implementation fork, including cleanup on failure.
+      const createdAt = new Date().toISOString();
+      const nextThreadId = newThreadId();
+      const nextThreadTitle = truncate(buildHandoffThreadTitle(sourceThread.title));
+      const seedPrompt = buildHandoffSeedPrompt({
+        method,
+        sourceTitle: sourceThread.title,
+        body,
+      });
+
+      const createResult = await createThread({
+        environmentId,
+        input: {
+          threadId: nextThreadId,
+          projectId: activeProject.id,
+          title: nextThreadTitle,
+          modelSelection: { instanceId: target.instanceId, model: target.model },
+          runtimeMode: sourceThread.runtimeMode,
+          interactionMode: "default",
+          branch: activeThreadBranch,
+          worktreePath: sourceThread.worktreePath,
+          handoffSource: {
+            threadId: sourceThread.id,
+            method,
+            createdAt,
+          },
+          createdAt,
+        },
+      });
+      let failure: AtomCommandResult<unknown, unknown> | null =
+        createResult._tag === "Failure" ? createResult : null;
+
+      if (failure === null) {
+        const startResult = await startThreadTurn({
+          environmentId,
+          input: {
+            threadId: nextThreadId,
+            message: {
+              messageId: newMessageId(),
+              role: "user",
+              text: seedPrompt,
+              attachments: [],
+            },
+            modelSelection: { instanceId: target.instanceId, model: target.model },
+            titleSeed: nextThreadTitle,
+            runtimeMode: sourceThread.runtimeMode,
+            interactionMode: "default",
+            createdAt,
+          },
+        });
+        failure = startResult._tag === "Failure" ? startResult : null;
+      }
+
+      if (failure === null) {
+        const startedResult = await settlePromise(() =>
+          waitForStartedServerThread(scopeThreadRef(sourceThread.environmentId, nextThreadId)),
+        );
+        failure = startedResult._tag === "Failure" ? startedResult : null;
+      }
+
+      if (failure === null) {
+        const navigateResult = await settlePromise(() =>
+          navigate({
+            to: "/$environmentId/$threadId",
+            params: {
+              environmentId: sourceThread.environmentId,
+              threadId: nextThreadId,
+            },
+          }),
+        );
+        failure = navigateResult._tag === "Failure" ? navigateResult : null;
+      }
+
+      if (failure !== null) {
+        const cleanupResult = await deleteThread({
+          environmentId,
+          input: {
+            threadId: nextThreadId,
+          },
+        });
+        if (cleanupResult._tag === "Failure" && !isAtomCommandInterrupted(cleanupResult)) {
+          console.warn(
+            "Failed to clean up handoff thread after start failure.",
+            squashAtomCommandFailure(cleanupResult),
+          );
+        }
+        if (!isAtomCommandInterrupted(failure)) {
+          const error = squashAtomCommandFailure(failure);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not hand off thread",
+              description:
+                error instanceof Error
+                  ? error.message
+                  : "An error occurred while creating the new thread.",
+            }),
+          );
+        }
+        setHandoffPhase("idle");
+        finish();
+        return;
+      }
+
+      setHandoffPhase("idle");
+      setHandoffDialogOpen(false);
+      finish();
+    },
+    [
+      activeProject,
+      activeThread,
+      activeThreadBranch,
+      beginLocalDispatch,
+      canHandOff,
+      createThread,
+      deleteThread,
+      environmentId,
+      navigate,
+      resetLocalDispatch,
+      startThreadTurn,
+    ],
+  );
+
   const getModelDisabledReason = useCallback(
     (instanceId: ProviderInstanceId, model: string): string | null => {
       if (!activeThread) {
@@ -5120,6 +5456,10 @@ function ChatViewContent(props: ChatViewProps) {
                 contentInsetEndAdjustment={composerOverlayHeight}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                canHandOff={canHandOff}
+                onRequestHandoff={onRequestHandoff}
+                handoffContextMessageId={handoffContextMessageId}
+                handoffSourceCard={handoffSourceCard}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -5386,6 +5726,25 @@ function ChatViewContent(props: ChatViewProps) {
           onClose={closeExpandedImage}
         />
       )}
+
+      {activeThread ? (
+        <ThreadHandoffDialog
+          open={handoffDialogOpen}
+          onOpenChange={setHandoffDialogOpen}
+          sourceThreadTitle={activeThread.title}
+          currentInstanceId={
+            activeThread.session?.providerInstanceId ?? activeThread.modelSelection.instanceId
+          }
+          providerStatuses={providerStatuses as ServerProvider[]}
+          settings={settings}
+          keybindings={keybindings}
+          transcriptPreview={handoffTranscriptPreview}
+          phase={handoffPhase}
+          summaryUnavailableReason={handoffSummaryUnavailableReason}
+          onConfirm={onConfirmHandoff}
+          onCancelGeneration={onCancelHandoffGeneration}
+        />
+      ) : null}
     </div>
   );
 }

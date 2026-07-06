@@ -39,7 +39,9 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { HandoffTargetCard, parseHandoffTargetPayload } from "./HandoffCards";
 import {
+  ArrowRightLeftIcon,
   BotIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -129,6 +131,8 @@ interface TimelineRowSharedState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
+  handoffContextMessageId: MessageId | null;
+  onRequestHandoff: (() => void) | null;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
@@ -179,6 +183,14 @@ interface MessagesTimelineProps {
   contentInsetEndAdjustment: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
+  /** Whether the thread is currently eligible for a provider handoff. */
+  canHandOff?: boolean;
+  /** Opens the handoff dialog; rendered on the last assistant message. */
+  onRequestHandoff?: (() => void) | undefined;
+  /** First user message of a handoff-created thread — labelled as seeded context. */
+  handoffContextMessageId?: MessageId | null;
+  /** Lineage card rendered above the first message of a handoff-created thread. */
+  handoffSourceCard?: React.ReactNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +224,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   contentInsetEndAdjustment,
   onIsAtEndChange,
   onManualNavigation,
+  canHandOff = false,
+  onRequestHandoff,
+  handoffContextMessageId = null,
+  handoffSourceCard,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -303,6 +319,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnStartedAt,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
+        canHandOff,
       }),
     [
       timelineEntries,
@@ -314,6 +331,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnStartedAt,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
+      canHandOff,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -416,6 +434,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      handoffContextMessageId,
+      onRequestHandoff: onRequestHandoff ?? null,
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
@@ -430,6 +450,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
+      handoffContextMessageId,
+      onRequestHandoff,
       onRevertUserMessage,
       onImageExpand,
       onOpenTurnDiff,
@@ -499,7 +521,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             }}
             onScroll={handleScroll}
             className="scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5"
-            ListHeaderComponent={TIMELINE_LIST_HEADER}
+            ListHeaderComponent={
+              handoffSourceCard ? (
+                <div className="pt-3 sm:pt-4">
+                  <div className="mx-auto w-full min-w-0 max-w-3xl pb-4">{handoffSourceCard}</div>
+                </div>
+              ) : (
+                TIMELINE_LIST_HEADER
+              )
+            }
             ListFooterComponent={TIMELINE_LIST_FOOTER}
           />
           <TimelineMinimap
@@ -847,8 +877,16 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
+  const isHandoffContext = ctx.handoffContextMessageId === row.message.id;
+
   return (
     <div className="group flex flex-col items-end gap-1">
+      {isHandoffContext ? (
+        <span className="flex items-center gap-1.5 pe-1 text-[11px] text-muted-foreground">
+          <ArrowRightLeftIcon className="size-3" />
+          Handoff context carried over from the previous thread
+        </span>
+      ) : null}
       <div className="relative max-w-[80%] rounded-2xl border border-border bg-secondary p-3">
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
@@ -1011,8 +1049,37 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             )}
           </div>
         ) : null}
+        {row.showHandoffButton && ctx.onRequestHandoff !== null ? (
+          <AssistantHandoffButton onRequestHandoff={ctx.onRequestHandoff} />
+        ) : null}
       </div>
     </>
+  );
+}
+
+// Stays visible (unlike the hover-only meta row) so the affordance is
+// discoverable at the point where the user decides how to continue.
+function AssistantHandoffButton({ onRequestHandoff }: { onRequestHandoff: () => void }) {
+  return (
+    <div className="mt-1.5">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border/60 bg-card px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:border-border hover:text-foreground"
+              onClick={onRequestHandoff}
+            />
+          }
+        >
+          <ArrowRightLeftIcon className="size-3" />
+          Hand off
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          Continue this conversation on another provider or subscription
+        </TooltipPopup>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -1134,17 +1201,39 @@ const WorkGroupSection = memo(function WorkGroupSection({
         </p>
       )}
       <div className="space-y-px">
-        {nonEmptyEntries.map((workEntry) => (
-          <SimpleWorkEntryRow
-            key={workEntry.id}
-            workEntry={workEntry}
-            workspaceRoot={workspaceRoot}
-          />
-        ))}
+        {nonEmptyEntries.map((workEntry) => {
+          if (workEntry.sourceActivityKind === "handoff.target-created") {
+            return <HandoffTargetWorkEntryRow key={workEntry.id} workEntry={workEntry} />;
+          }
+          return (
+            <SimpleWorkEntryRow
+              key={workEntry.id}
+              workEntry={workEntry}
+              workspaceRoot={workspaceRoot}
+            />
+          );
+        })}
       </div>
     </section>
   );
 });
+
+function HandoffTargetWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
+  const ctx = use(TimelineRowCtx);
+  const target = parseHandoffTargetPayload(workEntry.toolData);
+  if (!target) {
+    return null;
+  }
+  return (
+    <div className="py-1">
+      <HandoffTargetCard
+        environmentId={ctx.activeThreadEnvironmentId}
+        targetThreadId={target.targetThreadId}
+        method={target.method}
+      />
+    </div>
+  );
+}
 
 function WorkGroupToggleTimelineRow({
   row,
