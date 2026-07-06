@@ -362,6 +362,13 @@ type ChatViewProps =
        * the focused pane's top bar into the shared full-width slot).
        */
       topBarSlot?: HTMLElement | null;
+      /**
+       * Where the local-servers status pill renders: undefined keeps it inline
+       * in the composer footer (default), null hides it, and an element portals
+       * it there (split panes portal only the focused pane's pill into a single
+       * shared bottom-corner slot, so it shows once instead of once per pane).
+       */
+      serverStatusSlot?: HTMLElement | null;
       routeKind: "server";
       draftId?: never;
     }
@@ -371,6 +378,7 @@ type ChatViewProps =
       onDiffPanelOpen?: () => void;
       reserveTitleBarControlInset?: boolean;
       topBarSlot?: HTMLElement | null;
+      serverStatusSlot?: HTMLElement | null;
       routeKind: "draft";
       draftId: DraftId;
     };
@@ -1011,6 +1019,7 @@ function ChatViewContent(props: ChatViewProps) {
     onDiffPanelOpen,
     reserveTitleBarControlInset = true,
     topBarSlot,
+    serverStatusSlot,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
@@ -5610,15 +5619,30 @@ function ChatViewContent(props: ChatViewProps) {
                     />
                   </div>
                 )}
+                {/* Servers pill: inline in the footer by default; split panes
+                    portal only the focused pane's pill into the shared
+                    bottom-corner slot so it renders once, not once per pane. */}
                 {activeThreadRef ? (
-                  <div
-                    className={cn(
-                      "pointer-events-auto ml-auto shrink-0",
-                      isGitRepo ? "pb-3" : "pb-0",
-                    )}
-                  >
-                    <LocalServersStatusButton threadRef={activeThreadRef} />
-                  </div>
+                  serverStatusSlot === undefined ? (
+                    <div
+                      className={cn(
+                        "pointer-events-auto ml-auto shrink-0",
+                        isGitRepo ? "pb-3" : "pb-0",
+                      )}
+                    >
+                      <LocalServersStatusButton threadRef={activeThreadRef} />
+                    </div>
+                  ) : serverStatusSlot === null ? null : (
+                    // Split panes: floats over pane content with no composer bar
+                    // behind it, so give it a subtle translucent backdrop to stay
+                    // legible (single-pane relies on the composer chrome instead).
+                    createPortal(
+                      <div className="pointer-events-auto rounded-md bg-card/80 backdrop-blur-sm">
+                        <LocalServersStatusButton threadRef={activeThreadRef} />
+                      </div>,
+                      serverStatusSlot,
+                    )
+                  )
                 ) : null}
               </div>
             </div>

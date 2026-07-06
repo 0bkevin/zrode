@@ -76,11 +76,22 @@ const PaneActionsContext = createContext<PaneActions | null>(null);
  */
 const PaneTopBarContext = createContext<HTMLElement | null>(null);
 
+/**
+ * DOM node the focused pane portals its local-servers status pill into, so it
+ * renders once in the bottom corner (on top of everything) instead of once per
+ * pane. The pill reflects the focused pane's environment — the URL and shared
+ * top bar already follow the focused pane, so the corner pill stays consistent
+ * with them. Trade-off: when a split's panes span different environments, only
+ * the focused pane's servers show; focus another pane to see its servers.
+ */
+const PaneServerStatusContext = createContext<HTMLElement | null>(null);
+
 export default function ThreadSplitView({ threadRef }: { threadRef: ScopedThreadRef }) {
   const navigate = useNavigate();
   const isMobile = useIsMobile();
   const root = usePaneLayoutStore((state) => state.root);
   const [topBarNode, setTopBarNode] = useState<HTMLElement | null>(null);
+  const [serverStatusNode, setServerStatusNode] = useState<HTMLElement | null>(null);
   const routeThreadKey = scopedThreadKey(threadRef);
   const routeThreadKeyRef = useRef(routeThreadKey);
   useEffect(() => {
@@ -266,9 +277,19 @@ export default function ThreadSplitView({ threadRef }: { threadRef: ScopedThread
       <div className="relative flex min-h-0 w-full min-w-0 flex-1">
         <PaneActionsContext.Provider value={actions}>
           <PaneTopBarContext.Provider value={topBarNode}>
-            <PaneTree node={root} />
+            <PaneServerStatusContext.Provider value={serverStatusNode}>
+              <PaneTree node={root} />
+            </PaneServerStatusContext.Provider>
           </PaneTopBarContext.Provider>
         </PaneActionsContext.Provider>
+        {/* Single shared servers-pill slot: bottom-right corner, above the
+            panes. The focused pane portals its pill here. The offsets mirror
+            the inline pill's resting spot — the composer's 1.25rem horizontal
+            inset plus the scrollbar-width margin, and ~1rem up from the bottom. */}
+        <div
+          ref={setServerStatusNode}
+          className="pointer-events-none absolute bottom-4 right-[calc(1.25rem_+_var(--app-scrollbar-width))] z-30"
+        />
       </div>
     </div>
   );
@@ -284,6 +305,7 @@ function PaneTree({ node }: { node: PaneNode }) {
 const LeafPane = memo(function LeafPane({ leaf }: { leaf: PaneLeafNode }) {
   const actions = useContext(PaneActionsContext);
   const topBarNode = useContext(PaneTopBarContext);
+  const serverStatusNode = useContext(PaneServerStatusContext);
   const isFocused = usePaneLayoutStore((state) => state.focusedLeafId === leaf.id);
   const threadRef = useMemo(() => parseScopedThreadKey(leaf.threadKey), [leaf.threadKey]);
   const thread = useThread(threadRef);
@@ -381,6 +403,7 @@ const LeafPane = memo(function LeafPane({ leaf }: { leaf: PaneLeafNode }) {
             threadId={threadRef.threadId}
             routeKind="server"
             topBarSlot={isFocused ? topBarNode : null}
+            serverStatusSlot={isFocused ? serverStatusNode : null}
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">

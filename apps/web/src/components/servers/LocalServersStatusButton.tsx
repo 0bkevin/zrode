@@ -235,7 +235,7 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
       </PopoverTrigger>
       <PopoverPopup side="top" align="end" className="w-[26rem] max-w-[calc(100vw-1.5rem)] p-0">
         {servers.length === 0 ? (
-          <div className="flex flex-col items-center gap-1.5 px-4 py-6 text-center">
+          <div className="flex flex-col items-center gap-1.5 px-4 py-5 text-center">
             <RadioTower className="size-4.5 text-muted-foreground" />
             <p className="text-sm font-medium text-foreground">No local servers</p>
             <p className="text-xs text-muted-foreground">
@@ -306,7 +306,7 @@ function LocalServerRow({
     server.memoryBytes != null ? formatBytes(server.memoryBytes) : null,
   ].filter((part): part is string => part !== null);
   return (
-    <div className="group flex items-start gap-2.5 rounded-md px-2.5 py-2 transition-colors hover:bg-accent/50">
+    <div className="group flex items-start gap-2.5 rounded-md px-2.5 py-1.5 transition-colors hover:bg-accent/50">
       <span className="flex h-5 items-center">
         <StatusDot listening />
       </span>
