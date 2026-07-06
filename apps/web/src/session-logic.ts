@@ -745,6 +745,9 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     // card can resolve the target thread id.
     entry.toolData = payload;
   }
+  if (activity.kind === "provider.turn.start.failed") {
+    entry.toolData = payload;
+  }
   if (itemType) {
     entry.itemType = itemType;
   }

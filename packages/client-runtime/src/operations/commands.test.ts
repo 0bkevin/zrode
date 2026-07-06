@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
@@ -21,7 +22,13 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { archiveThread, createProject, stopThreadSession } from "./commands.ts";
+import {
+  archiveThread,
+  createProject,
+  editLastUserMessage,
+  retryThreadTurn,
+  stopThreadSession,
+} from "./commands.ts";
 
 const TEST_CRYPTO_LAYER = Layer.succeed(
   Crypto.Crypto,
@@ -130,6 +137,60 @@ describe("environment commands", () => {
           type: "thread.archive",
           commandId: "archive-command",
           threadId: "thread-1",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches thread turn retry commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      const result = yield* retryThreadTurn({
+        commandId: CommandId.make("retry-command"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-user-1"),
+        createdAt: "2026-06-06T00:02:00.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(result).toEqual({ sequence: 1 });
+      expect(dispatched).toEqual([
+        {
+          type: "thread.turn.retry",
+          commandId: "retry-command",
+          threadId: "thread-1",
+          messageId: "message-user-1",
+          createdAt: "2026-06-06T00:02:00.000Z",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches last user message edit commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      const result = yield* editLastUserMessage({
+        commandId: CommandId.make("edit-command"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-user-1"),
+        text: "Edited text",
+        titleSeed: "Edited text",
+        createdAt: "2026-06-06T00:03:00.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(result).toEqual({ sequence: 1 });
+      expect(dispatched).toEqual([
+        {
+          type: "thread.last-user-message.edit",
+          commandId: "edit-command",
+          threadId: "thread-1",
+          messageId: "message-user-1",
+          text: "Edited text",
+          titleSeed: "Edited text",
+          createdAt: "2026-06-06T00:03:00.000Z",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

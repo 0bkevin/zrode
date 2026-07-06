@@ -7,6 +7,7 @@ import {
   type ModelSelection,
   type ProjectScript,
   type ProjectId,
+  type PreviewAnnotationPayload,
   type ProviderApprovalDecision,
   ProviderInstanceId,
   type ServerProvider,
@@ -225,6 +226,8 @@ import {
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
+  resolveEditableLastUserMessage,
+  deriveRetryableFailedTurnTargetsByActivityId,
   hasServerAcknowledgedLocalDispatch,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
@@ -348,6 +351,47 @@ function formatOutgoingPrompt(params: {
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
   return applyClaudePromptEffortPrefix(params.text, promptEffort);
 }
+
+interface LastUserMessageEditDraftSnapshot {
+  readonly prompt: string;
+  readonly images: ComposerImageAttachment[];
+  readonly terminalContexts: TerminalContextDraft[];
+  readonly elementContexts: ElementContextDraft[];
+  readonly previewAnnotations: PreviewAnnotationPayload[];
+  readonly reviewComments: ReviewCommentContext[];
+}
+
+type ComposerDraftTarget = ScopedThreadRef | DraftId;
+
+interface LastUserMessageEditState {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly originalText: string;
+  readonly targetTurnCount: number;
+  readonly draftTarget: ComposerDraftTarget;
+  readonly draftSnapshot: LastUserMessageEditDraftSnapshot;
+}
+
+interface PendingLastUserMessageEditState {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly requestedAt: string;
+}
+
+function composerDraftTargetKey(target: ComposerDraftTarget): string {
+  return typeof target === "string" ? target.trim() : scopedThreadKey(target);
+}
+
+function sameComposerDraftTarget(left: ComposerDraftTarget, right: ComposerDraftTarget): boolean {
+  return composerDraftTargetKey(left) === composerDraftTargetKey(right);
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 
@@ -1047,6 +1091,10 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const retryThreadTurn = useAtomCommand(threadEnvironment.retryTurn, { reportFailure: false });
+  const editLastUserMessage = useAtomCommand(threadEnvironment.editLastUserMessage, {
+    reportFailure: false,
+  });
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
@@ -1068,7 +1116,7 @@ function ChatViewContent(props: ChatViewProps) {
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
   );
-  const composerDraftTarget: ScopedThreadRef | DraftId =
+  const composerDraftTarget: ComposerDraftTarget =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const serverThread = useThread(routeKind === "server" ? routeThreadRef : null);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
@@ -1182,6 +1230,14 @@ function ChatViewContent(props: ChatViewProps) {
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
     Record<string, string[]>
   >({});
+  const [retryingUserMessageIds, setRetryingUserMessageIds] = useState<ReadonlySet<MessageId>>(
+    () => new Set(),
+  );
+  const [lastUserMessageEdit, setLastUserMessageEdit] = useState<LastUserMessageEditState | null>(
+    null,
+  );
+  const [pendingLastUserMessageEdit, setPendingLastUserMessageEdit] =
+    useState<PendingLastUserMessageEditState | null>(null);
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
@@ -1285,6 +1341,14 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const isServerThread = routeKind === "server" && serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  const retryableFailedTurnTargetsByActivityId = useMemo(
+    () => deriveRetryableFailedTurnTargetsByActivityId(isServerThread ? serverThread : null),
+    [isServerThread, serverThread],
+  );
+  const retryableFailedTurnMessageIds = useMemo(
+    () => new Set(retryableFailedTurnTargetsByActivityId.values()),
+    [retryableFailedTurnTargetsByActivityId],
+  );
   const sessionLastError = serverThread?.session?.lastError ?? null;
   // A fresh failure always arrives with a non-running status and a bumped `updatedAt`, so
   // `updatedAt::message` uniquely identifies one error occurrence — even when two
@@ -1884,7 +1948,78 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isLastUserMessageEditPendingForActiveThread =
+    pendingLastUserMessageEdit !== null &&
+    activeThread !== undefined &&
+    pendingLastUserMessageEdit.environmentId === activeThread.environmentId &&
+    pendingLastUserMessageEdit.threadId === activeThread.id;
+  const isRetryingUserMessage = retryingUserMessageIds.size > 0;
+  const isCommandBusy =
+    isSendBusy || isLastUserMessageEditPendingForActiveThread || isRetryingUserMessage;
+  const isWorking = phase === "running" || isCommandBusy || isConnecting || isRevertingCheckpoint;
+  const editableLastUserMessage = useMemo(
+    () =>
+      resolveEditableLastUserMessage({
+        thread: activeThread,
+        isServerThread,
+        isSendBusy: isCommandBusy,
+        isConnecting,
+        isRevertingCheckpoint,
+        hasPendingApproval: activePendingApproval !== null,
+        hasPendingUserInput: activePendingUserInput !== null,
+        environmentUnavailable: activeEnvironmentUnavailable,
+      }),
+    [
+      activeEnvironmentUnavailable,
+      activePendingApproval,
+      activePendingUserInput,
+      activeThread,
+      isConnecting,
+      isCommandBusy,
+      isRevertingCheckpoint,
+      isServerThread,
+    ],
+  );
+  useEffect(() => {
+    if (
+      pendingLastUserMessageEdit === null ||
+      activeThread === undefined ||
+      pendingLastUserMessageEdit.environmentId !== activeThread.environmentId ||
+      pendingLastUserMessageEdit.threadId !== activeThread.id
+    ) {
+      return;
+    }
+
+    const editedMessage = activeThread.messages.find(
+      (message) =>
+        message.id === pendingLastUserMessageEdit.messageId &&
+        message.role === "user" &&
+        message.text === pendingLastUserMessageEdit.text,
+    );
+    if (editedMessage) {
+      setPendingLastUserMessageEdit(null);
+      return;
+    }
+
+    const failed = activeThread.activities.some((activity) => {
+      if (
+        activity.kind !== "message.edit.failed" ||
+        activity.createdAt < pendingLastUserMessageEdit.requestedAt
+      ) {
+        return false;
+      }
+      const payload = isUnknownRecord(activity.payload) ? activity.payload : null;
+      const payloadMessageId =
+        typeof payload?.messageId === "string" ? payload.messageId : undefined;
+      return (
+        payloadMessageId === undefined || payloadMessageId === pendingLastUserMessageEdit.messageId
+      );
+    });
+    if (failed) {
+      setPendingLastUserMessageEdit(null);
+      resetLocalDispatch();
+    }
+  }, [activeThread, pendingLastUserMessageEdit, resetLocalDispatch]);
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -2348,6 +2483,152 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [draftId, localServerError, routeThreadKey, routeThreadRef, serverThread],
   );
+
+  const readLastUserMessageEditDraftSnapshot = useCallback((): LastUserMessageEditDraftSnapshot => {
+    const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    return {
+      prompt: promptRef.current,
+      images: [...composerImagesRef.current],
+      terminalContexts: [...composerTerminalContextsRef.current],
+      elementContexts: [...composerElementContextsRef.current],
+      previewAnnotations: [...(draft?.previewAnnotations ?? [])],
+      reviewComments: [...(draft?.reviewComments ?? [])],
+    };
+  }, [composerDraftTarget]);
+
+  const restoreLastUserMessageEditDraftSnapshot = useCallback(
+    (
+      target: ComposerDraftTarget,
+      snapshot: LastUserMessageEditDraftSnapshot,
+      options?: { readonly updateVisibleComposer?: boolean },
+    ) => {
+      clearComposerDraftContent(target);
+      const updateVisibleComposer =
+        options?.updateVisibleComposer ?? sameComposerDraftTarget(target, composerDraftTarget);
+      if (updateVisibleComposer) {
+        promptRef.current = snapshot.prompt;
+        composerImagesRef.current = [...snapshot.images];
+        composerTerminalContextsRef.current = [...snapshot.terminalContexts];
+        composerElementContextsRef.current = [...snapshot.elementContexts];
+      }
+
+      setComposerDraftPrompt(target, snapshot.prompt);
+      if (snapshot.images.length > 0) {
+        addComposerDraftImages(target, snapshot.images);
+      }
+      setComposerDraftTerminalContexts(target, snapshot.terminalContexts);
+      setComposerDraftElementContexts(target, snapshot.elementContexts);
+      setComposerDraftPreviewAnnotations(target, snapshot.previewAnnotations);
+      setComposerDraftReviewComments(target, snapshot.reviewComments);
+      if (updateVisibleComposer) {
+        composerRef.current?.resetCursorState({
+          cursor: collapseExpandedComposerCursor(snapshot.prompt, snapshot.prompt.length),
+          prompt: snapshot.prompt,
+          detectTrigger: true,
+        });
+      }
+    },
+    [
+      addComposerDraftImages,
+      clearComposerDraftContent,
+      composerDraftTarget,
+      composerRef,
+      setComposerDraftElementContexts,
+      setComposerDraftPreviewAnnotations,
+      setComposerDraftPrompt,
+      setComposerDraftReviewComments,
+      setComposerDraftTerminalContexts,
+    ],
+  );
+
+  const cancelLastUserMessageEdit = useCallback(() => {
+    if (!lastUserMessageEdit) {
+      return;
+    }
+    restoreLastUserMessageEditDraftSnapshot(
+      lastUserMessageEdit.draftTarget,
+      lastUserMessageEdit.draftSnapshot,
+    );
+    setLastUserMessageEdit(null);
+  }, [lastUserMessageEdit, restoreLastUserMessageEditDraftSnapshot]);
+
+  const onEditUserMessage = useCallback(
+    (messageId: MessageId) => {
+      if (!activeThread) {
+        return;
+      }
+      if (!editableLastUserMessage.editable || editableLastUserMessage.messageId !== messageId) {
+        setThreadError(activeThread.id, "This message can no longer be edited.");
+        setLastUserMessageEdit(null);
+        return;
+      }
+      const message = activeThread.messages.find((candidate) => candidate.id === messageId);
+      if (!message || message.role !== "user") {
+        setThreadError(activeThread.id, "This message can no longer be edited.");
+        setLastUserMessageEdit(null);
+        return;
+      }
+
+      const draftSnapshot = readLastUserMessageEditDraftSnapshot();
+      clearComposerDraftContent(composerDraftTarget);
+      promptRef.current = message.text;
+      composerImagesRef.current = [];
+      composerTerminalContextsRef.current = [];
+      composerElementContextsRef.current = [];
+      setComposerDraftPrompt(composerDraftTarget, message.text);
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(message.text, message.text.length),
+        prompt: message.text,
+        detectTrigger: true,
+      });
+      setLastUserMessageEdit({
+        threadId: activeThread.id,
+        messageId,
+        originalText: message.text,
+        targetTurnCount: editableLastUserMessage.targetTurnCount,
+        draftTarget: composerDraftTarget,
+        draftSnapshot,
+      });
+      setThreadError(activeThread.id, null);
+      window.requestAnimationFrame(() => {
+        composerRef.current?.focusAtEnd();
+      });
+    },
+    [
+      activeThread,
+      clearComposerDraftContent,
+      composerDraftTarget,
+      composerRef,
+      editableLastUserMessage,
+      readLastUserMessageEditDraftSnapshot,
+      setComposerDraftPrompt,
+      setThreadError,
+    ],
+  );
+
+  useEffect(() => {
+    if (!lastUserMessageEdit) {
+      return;
+    }
+    if (
+      editableLastUserMessage.editable &&
+      editableLastUserMessage.messageId === lastUserMessageEdit.messageId
+    ) {
+      return;
+    }
+    restoreLastUserMessageEditDraftSnapshot(
+      lastUserMessageEdit.draftTarget,
+      lastUserMessageEdit.draftSnapshot,
+    );
+    setLastUserMessageEdit(null);
+    setThreadError(lastUserMessageEdit.threadId, "This message can no longer be edited.");
+  }, [
+    activeThread?.id,
+    editableLastUserMessage,
+    lastUserMessageEdit,
+    restoreLastUserMessageEditDraftSnapshot,
+    setThreadError,
+  ]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
@@ -4131,7 +4412,7 @@ function ChatViewContent(props: ChatViewProps) {
         );
         return;
       }
-      if (phase === "running" || isSendBusy || isConnecting) {
+      if (phase === "running" || isCommandBusy || isConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
         return;
       }
@@ -4171,9 +4452,82 @@ function ChatViewContent(props: ChatViewProps) {
       environmentId,
       isConnecting,
       isRevertingCheckpoint,
-      isSendBusy,
+      isCommandBusy,
       phase,
       revertThreadCheckpoint,
+      setThreadError,
+    ],
+  );
+
+  const onRetryUserMessage = useCallback(
+    async (messageId: MessageId) => {
+      if (
+        !activeThread ||
+        !isServerThread ||
+        isCommandBusy ||
+        isConnecting ||
+        activeEnvironmentUnavailable ||
+        sendInFlightRef.current ||
+        !retryableFailedTurnMessageIds.has(messageId)
+      ) {
+        return;
+      }
+
+      setRetryingUserMessageIds((current) => {
+        if (current.has(messageId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.add(messageId);
+        return next;
+      });
+      setThreadError(activeThread.id, null);
+      enableTimelineLiveFollowAtEnd();
+      sendInFlightRef.current = true;
+
+      try {
+        const result = await retryThreadTurn({
+          environmentId,
+          input: {
+            threadId: activeThread.id,
+            messageId,
+          },
+        });
+
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to retry message.",
+          );
+        }
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to retry message.",
+        );
+      } finally {
+        sendInFlightRef.current = false;
+        setRetryingUserMessageIds((current) => {
+          if (!current.has(messageId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(messageId);
+          return next;
+        });
+      }
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeThread,
+      enableTimelineLiveFollowAtEnd,
+      environmentId,
+      isConnecting,
+      isCommandBusy,
+      isServerThread,
+      retryThreadTurn,
+      retryableFailedTurnMessageIds,
       setThreadError,
     ],
   );
@@ -4182,7 +4536,7 @@ function ChatViewContent(props: ChatViewProps) {
     e?.preventDefault();
     if (
       !activeThread ||
-      isSendBusy ||
+      isCommandBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
       sendInFlightRef.current
@@ -4221,6 +4575,101 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
+    if (lastUserMessageEdit) {
+      if (
+        !editableLastUserMessage.editable ||
+        editableLastUserMessage.messageId !== lastUserMessageEdit.messageId
+      ) {
+        restoreLastUserMessageEditDraftSnapshot(
+          lastUserMessageEdit.draftTarget,
+          lastUserMessageEdit.draftSnapshot,
+        );
+        setLastUserMessageEdit(null);
+        setThreadError(activeThread.id, "This message can no longer be edited.");
+        return;
+      }
+      if (!trimmed) {
+        setThreadError(activeThread.id, "Edited message cannot be empty.");
+        return;
+      }
+      if (
+        composerImages.length > 0 ||
+        composerTerminalContexts.length > 0 ||
+        composerElementContexts.length > 0 ||
+        composerPreviewAnnotations.length > 0 ||
+        composerReviewComments.length > 0
+      ) {
+        setThreadError(activeThread.id, "Message editing only supports text.");
+        return;
+      }
+      if (trimmed === lastUserMessageEdit.originalText.trim()) {
+        cancelLastUserMessageEdit();
+        return;
+      }
+
+      const outgoingMessageText = formatOutgoingPrompt({
+        provider: ctxSelectedProvider,
+        model: ctxSelectedModel,
+        models: ctxSelectedProviderModels,
+        effort: ctxSelectedPromptEffort,
+        text: trimmed,
+      });
+
+      const editRequestedAt = new Date().toISOString();
+      sendInFlightRef.current = true;
+      setThreadError(activeThread.id, null);
+      enableTimelineLiveFollowAtEnd();
+      setTimelineAnchor({
+        threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id)),
+        messageId: lastUserMessageEdit.messageId,
+      });
+
+      try {
+        const result = await editLastUserMessage({
+          environmentId,
+          input: {
+            threadId: activeThread.id,
+            messageId: lastUserMessageEdit.messageId,
+            text: outgoingMessageText,
+            modelSelection: ctxSelectedModelSelection,
+            titleSeed: truncate(trimmed),
+            createdAt: editRequestedAt,
+          },
+        });
+
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setThreadError(
+              activeThread.id,
+              error instanceof Error ? error.message : "Failed to edit message.",
+            );
+          }
+          return;
+        }
+
+        setPendingLastUserMessageEdit({
+          environmentId: activeThread.environmentId,
+          threadId: activeThread.id,
+          messageId: lastUserMessageEdit.messageId,
+          text: outgoingMessageText,
+          requestedAt: editRequestedAt,
+        });
+        restoreLastUserMessageEditDraftSnapshot(
+          lastUserMessageEdit.draftTarget,
+          lastUserMessageEdit.draftSnapshot,
+        );
+        setLastUserMessageEdit(null);
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to edit message.",
+        );
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -4730,7 +5179,7 @@ function ChatViewContent(props: ChatViewProps) {
       if (
         !activeThread ||
         !isServerThread ||
-        isSendBusy ||
+        isCommandBusy ||
         isConnecting ||
         sendInFlightRef.current
       ) {
@@ -4874,7 +5323,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeProposedPlan,
       beginLocalDispatch,
       isConnecting,
-      isSendBusy,
+      isCommandBusy,
       isServerThread,
       persistThreadSettingsForNextTurn,
       resetLocalDispatch,
@@ -4894,7 +5343,7 @@ function ChatViewContent(props: ChatViewProps) {
       !activeProject ||
       !activeProposedPlan ||
       !isServerThread ||
-      isSendBusy ||
+      isCommandBusy ||
       isConnecting ||
       activeEnvironmentUnavailable ||
       sendInFlightRef.current
@@ -5037,7 +5486,7 @@ function ChatViewContent(props: ChatViewProps) {
     createThread,
     deleteThread,
     isConnecting,
-    isSendBusy,
+    isCommandBusy,
     isServerThread,
     navigate,
     resetLocalDispatch,
@@ -5061,7 +5510,7 @@ function ChatViewContent(props: ChatViewProps) {
     isServerThread &&
     !isConnecting &&
     !activeEnvironmentUnavailable &&
-    canHandOffThread(activeThread, isSendBusy);
+    canHandOffThread(activeThread, isCommandBusy);
 
   const onRequestHandoff = useCallback(() => {
     if (canHandOff) {
@@ -5725,6 +6174,17 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                editableUserMessageId={
+                  editableLastUserMessage.editable ? editableLastUserMessage.messageId : null
+                }
+                onEditUserMessage={onEditUserMessage}
+                retryableFailedTurnTargetsByActivityId={retryableFailedTurnTargetsByActivityId}
+                retryingUserMessageIds={retryingUserMessageIds}
+                retryControlsDisabled={activeEnvironmentUnavailable}
+                retryControlsDisabledLabel={
+                  activeEnvironmentUnavailable ? "Reconnect to retry this message" : null
+                }
+                onRetryUserMessage={onRetryUserMessage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
@@ -5797,8 +6257,9 @@ function ChatViewContent(props: ChatViewProps) {
                       isLocalDraftThread={isLocalDraftThread}
                       phase={phase}
                       isConnecting={isConnecting}
-                      isSendBusy={isSendBusy}
+                      isSendBusy={isCommandBusy}
                       isPreparingWorktree={isPreparingWorktree}
+                      isEditingLastUserMessage={lastUserMessageEdit !== null}
                       environmentUnavailable={activeEnvironmentUnavailableState}
                       activePendingApproval={activePendingApproval}
                       pendingApprovals={pendingApprovals}
@@ -5833,6 +6294,7 @@ function ChatViewContent(props: ChatViewProps) {
                       composerElementContextsRef={composerElementContextsRef}
                       onSend={onSend}
                       onInterrupt={onInterrupt}
+                      onCancelLastUserMessageEdit={cancelLastUserMessageEdit}
                       onImplementPlanInNewThread={onImplementPlanInNewThread}
                       onRespondToApproval={onRespondToApproval}
                       onSelectActivePendingUserInputOption={onSelectActivePendingUserInputOption}

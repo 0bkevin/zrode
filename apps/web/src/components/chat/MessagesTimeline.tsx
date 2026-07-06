@@ -54,6 +54,7 @@ import {
   MousePointerClickIcon,
   PaintbrushIcon,
   MinusIcon,
+  RefreshCwIcon,
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
@@ -134,6 +135,12 @@ interface TimelineRowSharedState {
   handoffContextMessageId: MessageId | null;
   onRequestHandoff: (() => void) | null;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onEditUserMessage: (messageId: MessageId) => void;
+  retryableFailedTurnTargetsByActivityId: ReadonlyMap<string, MessageId>;
+  retryingUserMessageIds: ReadonlySet<MessageId>;
+  retryControlsDisabled: boolean;
+  retryControlsDisabledLabel: string | null;
+  onRetryUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -151,6 +158,7 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const noopEditUserMessage = () => {};
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -169,6 +177,13 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  editableUserMessageId?: MessageId | null;
+  onEditUserMessage?: ((messageId: MessageId) => void) | undefined;
+  retryableFailedTurnTargetsByActivityId: ReadonlyMap<string, MessageId>;
+  retryingUserMessageIds: ReadonlySet<MessageId>;
+  retryControlsDisabled: boolean;
+  retryControlsDisabledLabel: string | null;
+  onRetryUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -211,6 +226,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  editableUserMessageId = null,
+  onEditUserMessage = noopEditUserMessage,
+  retryableFailedTurnTargetsByActivityId,
+  retryingUserMessageIds,
+  retryControlsDisabled,
+  retryControlsDisabledLabel,
+  onRetryUserMessage,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -321,6 +343,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnStartedAt,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
+        editableUserMessageId,
         canHandOff,
       }),
     [
@@ -333,6 +356,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnStartedAt,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
+      editableUserMessageId,
       canHandOff,
     ],
   );
@@ -439,6 +463,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       handoffContextMessageId,
       onRequestHandoff: onRequestHandoff ?? null,
       onRevertUserMessage,
+      onEditUserMessage,
+      retryableFailedTurnTargetsByActivityId,
+      retryingUserMessageIds,
+      retryControlsDisabled,
+      retryControlsDisabledLabel,
+      onRetryUserMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -455,6 +485,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       handoffContextMessageId,
       onRequestHandoff,
       onRevertUserMessage,
+      onEditUserMessage,
+      retryableFailedTurnTargetsByActivityId,
+      retryingUserMessageIds,
+      retryControlsDisabled,
+      retryControlsDisabledLabel,
+      onRetryUserMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -958,6 +994,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
+            {row.canEditUserMessage && <EditUserMessageButton messageId={row.message.id} />}
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
@@ -966,6 +1003,31 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         </div>
       </div>
     </div>
+  );
+}
+
+function EditUserMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={activity.isRevertingCheckpoint || activity.isWorking}
+            onClick={() => ctx.onEditUserMessage(messageId)}
+            aria-label="Edit message"
+          />
+        }
+      >
+        <SquarePenIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Edit message</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -1988,11 +2050,22 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
 
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
+function resolveRetryableTurnStartFailureMessageId(
+  workEntry: TimelineWorkEntry,
+  retryTargetsByActivityId: ReadonlyMap<string, MessageId>,
+): MessageId | null {
+  if (workEntry.sourceActivityKind !== "provider.turn.start.failed") {
+    return null;
+  }
+  return retryTargetsByActivityId.get(workEntry.id) ?? null;
+}
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
+  const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
@@ -2033,6 +2106,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const showSuccessIndicator =
     workEntryIndicatesToolSuccess(workEntry) ||
     (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+  const retryMessageId = resolveRetryableTurnStartFailureMessageId(
+    workEntry,
+    ctx.retryableFailedTurnTargetsByActivityId,
+  );
+  const isRetrying = retryMessageId !== null && ctx.retryingUserMessageIds.has(retryMessageId);
+  const retryDisabled = activity.isWorking || isRetrying || ctx.retryControlsDisabled;
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
@@ -2129,6 +2208,36 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                 </Tooltip>
               ) : null}
             </span>
+            {retryMessageId !== null ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={retryDisabled}
+                      className="h-6 gap-1 rounded-md px-1.5 text-[11px]"
+                      aria-label="Retry failed message"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        ctx.onRetryUserMessage(retryMessageId);
+                      }}
+                      onKeyDown={stopRowToggle}
+                      onPointerDown={stopRowToggle}
+                    />
+                  }
+                >
+                  <RefreshCwIcon className={cn("size-3", isRetrying && "animate-spin")} />
+                  Retry
+                </TooltipTrigger>
+                <TooltipPopup side="top">
+                  {ctx.retryControlsDisabled
+                    ? (ctx.retryControlsDisabledLabel ?? "Retry is unavailable")
+                    : "Retry this failed message"}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
           </div>
         </div>
       </div>

@@ -1,6 +1,7 @@
 import { pipe } from "effect/Function";
 import * as Arr from "effect/Array";
 import * as O from "effect/Order";
+import { retainMessagesAfterCheckpointRevert } from "@t3tools/shared/orchestrationRevert";
 import type {
   MessageId,
   OrchestrationCheckpointSummary,
@@ -419,7 +420,15 @@ export function applyThreadDetailEvent(
       );
 
       const retainedTurnIds = new Set(Arr.map(checkpoints, (entry) => entry.turnId));
-      const messages = retainMessagesAfterRevert(thread.messages, retainedTurnIds);
+      const messages = retainMessagesAfterCheckpointRevert({
+        messages: thread.messages,
+        retainedTurnIds,
+        turnCount: event.payload.turnCount,
+        getId: (message) => message.id,
+        getRole: (message) => message.role,
+        getTurnId: (message) => message.turnId,
+        getCreatedAt: (message) => message.createdAt,
+      });
       const proposedPlans = pipe(
         thread.proposedPlans,
         Arr.filter((plan) => plan.turnId === null || retainedTurnIds.has(plan.turnId)),
@@ -475,6 +484,7 @@ export function applyThreadDetailEvent(
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
     case "thread.checkpoint-revert-requested":
+    case "thread.last-user-message-edit-requested":
       return { kind: "unchanged" };
   }
 
@@ -528,21 +538,4 @@ function rebindCheckpointAssistantMessage(
   return Arr.map(checkpoints, (entry) =>
     entry.turnId === turnId ? { ...entry, assistantMessageId: messageId } : entry,
   );
-}
-
-function retainMessagesAfterRevert(
-  messages: ReadonlyArray<OrchestrationMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-): OrchestrationMessage[] {
-  // Keep messages that belong to a retained turn, plus system messages and
-  // messages without a turn binding (pre-turn-0 user messages).
-  return Arr.filter(messages, (message) => {
-    if (message.role === "system") {
-      return true;
-    }
-    if (message.turnId === null) {
-      return true;
-    }
-    return retainedTurnIds.has(message.turnId);
-  });
 }

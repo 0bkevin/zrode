@@ -961,6 +961,16 @@ describe("ProviderCommandReactor", () => {
             detail: expect.stringContaining(
               "cannot switch models after the conversation has started",
             ),
+            messageId: asMessageId("user-message-restricted-2"),
+            retryable: false,
+            turnStart: {
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5.1-codex",
+              },
+              runtimeMode: "approval-required",
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            },
           },
         });
       }),

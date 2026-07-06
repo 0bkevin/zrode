@@ -539,6 +539,48 @@ it.effect("accepts a source proposed plan reference in thread.turn.start", () =>
   }),
 );
 
+it.effect("decodes thread.last-user-message.edit commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.last-user-message.edit",
+      commandId: "cmd-edit",
+      threadId: "thread-1",
+      messageId: "msg-user-1",
+      text: "Edited prompt",
+      modelSelection: {
+        provider: "codex",
+        model: "gpt-5.4",
+      },
+      titleSeed: "Edited prompt",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.last-user-message.edit");
+    if (parsed.type === "thread.last-user-message.edit") {
+      assert.strictEqual(parsed.text, "Edited prompt");
+      assert.strictEqual(parsed.modelSelection?.instanceId, "codex");
+    }
+  }),
+);
+
+it.effect("rejects malformed thread.last-user-message.edit commands", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeOrchestrationCommand({
+        type: "thread.last-user-message.edit",
+        commandId: "cmd-edit",
+        threadId: "thread-1",
+        messageId: "msg-user-1",
+        text: "Edited prompt",
+        titleSeed: "   ",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
 it.effect(
   "decodes thread.turn-start-requested defaults for provider, runtime mode, and interaction mode",
   () =>
@@ -582,6 +624,73 @@ it.effect("decodes thread.turn-start-requested title seed when present", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.titleSeed, "Investigate reconnect failures");
+  }),
+);
+
+it.effect("decodes thread.last-user-message-edit-requested events", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 10,
+      eventId: "event-edit-requested",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.last-user-message-edit-requested",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "cmd-edit",
+      causationEventId: null,
+      correlationId: "cmd-edit",
+      metadata: {},
+      payload: {
+        threadId: "thread-1",
+        messageId: "msg-user-1",
+        text: "Edited prompt",
+        targetTurnCount: 0,
+        checkpointTurnId: "turn-1",
+        checkpointTurnCount: 1,
+        expectedCurrentTurnCount: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+    assert.strictEqual(parsed.type, "thread.last-user-message-edit-requested");
+    if (parsed.type === "thread.last-user-message-edit-requested") {
+      assert.strictEqual(parsed.payload.targetTurnCount, 0);
+      assert.strictEqual(parsed.payload.checkpointTurnId, "turn-1");
+      assert.strictEqual(parsed.payload.checkpointTurnCount, 1);
+      assert.strictEqual(parsed.payload.expectedCurrentTurnCount, 1);
+      assert.strictEqual(parsed.payload.text, "Edited prompt");
+    }
+  }),
+);
+
+it.effect("rejects malformed thread.last-user-message-edit-requested events", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeOrchestrationEvent({
+        sequence: 10,
+        eventId: "event-edit-requested",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        type: "thread.last-user-message-edit-requested",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        commandId: "cmd-edit",
+        causationEventId: null,
+        correlationId: "cmd-edit",
+        metadata: {},
+        payload: {
+          threadId: "thread-1",
+          messageId: "msg-user-1",
+          text: "Edited prompt",
+          targetTurnCount: -1,
+          checkpointTurnId: "turn-1",
+          checkpointTurnCount: 1,
+          expectedCurrentTurnCount: 1,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      }),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
   }),
 );
 

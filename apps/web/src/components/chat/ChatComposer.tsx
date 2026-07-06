@@ -447,6 +447,7 @@ export interface ChatComposerProps {
   isConnecting: boolean;
   isSendBusy: boolean;
   isPreparingWorktree: boolean;
+  isEditingLastUserMessage: boolean;
   environmentUnavailable: {
     readonly label: string;
     readonly connection: EnvironmentConnectionPresentation;
@@ -507,6 +508,7 @@ export interface ChatComposerProps {
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
   onInterrupt: () => void;
+  onCancelLastUserMessageEdit: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
@@ -556,6 +558,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isConnecting,
     isSendBusy,
     isPreparingWorktree,
+    isEditingLastUserMessage,
     environmentUnavailable,
     activePendingApproval,
     pendingApprovals,
@@ -591,6 +594,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerElementContextsRef,
     onSend,
     onInterrupt,
+    onCancelLastUserMessageEdit,
     onImplementPlanInNewThread,
     onRespondToApproval,
     onSelectActivePendingUserInputOption,
@@ -1762,6 +1766,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   const addComposerImages = (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
+    if (isEditingLastUserMessage) {
+      setThreadError(activeThreadId, "Message editing only supports text.");
+      return;
+    }
     if (pendingUserInputs.length > 0) {
       toastManager.add({
         type: "error",
@@ -1823,6 +1831,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
+    if (isEditingLastUserMessage) return;
     event.preventDefault();
     dragDepthRef.current += 1;
     setIsDragOverComposer(true);
@@ -1830,6 +1839,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const onComposerDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
+    if (isEditingLastUserMessage) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
     setIsDragOverComposer(true);
@@ -1837,6 +1847,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const onComposerDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
+    if (isEditingLastUserMessage) return;
     event.preventDefault();
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
@@ -1848,6 +1859,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const onComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
+    if (isEditingLastUserMessage) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
@@ -1960,6 +1975,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         );
       },
       addTerminalContext: (selection: TerminalContextSelection) => {
+        if (isEditingLastUserMessage) {
+          return;
+        }
         if (!activeThread) return;
         const snapshot = composerEditorRef.current?.readSnapshot() ?? {
           value: promptRef.current,
@@ -2022,6 +2040,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations,
       composerReviewComments,
       isConnecting,
+      isEditingLastUserMessage,
       isComposerApprovalState,
       pendingUserInputs.length,
       environmentUnavailable,
@@ -2259,6 +2278,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             )}
 
             {!isComposerCollapsedMobile &&
+              isEditingLastUserMessage &&
+              !isComposerApprovalState &&
+              pendingUserInputs.length === 0 && (
+                <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/35 px-3 py-2 text-sm">
+                  <span className="min-w-0 truncate text-foreground/85">Editing message</span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    className="shrink-0 gap-1"
+                    onClick={onCancelLastUserMessageEdit}
+                  >
+                    <XIcon className="size-3" />
+                    Cancel
+                  </Button>
+                </div>
+              )}
+
+            {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
               pendingUserInputs.length === 0 &&
               composerPreviewAnnotations.length > 0 && (
@@ -2392,7 +2430,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 cursor={composerCursor}
                 terminalContexts={
-                  !isComposerApprovalState && pendingUserInputs.length === 0
+                  !isEditingLastUserMessage &&
+                  !isComposerApprovalState &&
+                  pendingUserInputs.length === 0
                     ? composerTerminalContexts
                     : []
                 }
@@ -2407,15 +2447,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
                     : activePendingProgress
                       ? "Type your own answer, or leave this blank to use the selected option"
-                      : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "Add feedback to refine the plan, or leave this blank to implement it"
-                        : environmentUnavailable
-                          ? `${environmentUnavailable.label}: ${connectionStatusText(
-                              environmentUnavailable.connection,
-                            )}`
-                          : phase === "disconnected"
-                            ? "Ask for follow-up changes or attach images"
-                            : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                      : isEditingLastUserMessage
+                        ? "Edit message"
+                        : showPlanFollowUpPrompt && activeProposedPlan
+                          ? "Add feedback to refine the plan, or leave this blank to implement it"
+                          : environmentUnavailable
+                            ? `${environmentUnavailable.label}: ${connectionStatusText(
+                                environmentUnavailable.connection,
+                              )}`
+                            : phase === "disconnected"
+                              ? "Ask for follow-up changes or attach images"
+                              : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
                 disabled={
                   isConnecting ||

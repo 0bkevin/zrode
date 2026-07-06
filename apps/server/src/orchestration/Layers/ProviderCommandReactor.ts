@@ -116,10 +116,46 @@ function canReplaceThreadTitle(currentTitle: string, titleSeed?: string): boolea
 }
 
 function findProviderAdapterRequestError(
-  cause: Cause.Cause<ProviderServiceError>,
+  cause: Cause.Cause<unknown>,
 ): ProviderAdapterRequestError | undefined {
   const failReason = cause.reasons.find(Cause.isFailReason);
   return isProviderAdapterRequestError(failReason?.error) ? failReason.error : undefined;
+}
+
+function isRetryableTurnStartFailureDetail(detail: string): boolean {
+  const normalized = detail.toLowerCase();
+  return (
+    normalized.includes("rate limit") ||
+    normalized.includes("rate_limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("429") ||
+    normalized.includes("timeout") ||
+    normalized.includes("timed out") ||
+    normalized.includes("network") ||
+    normalized.includes("connect") ||
+    normalized.includes("connection") ||
+    normalized.includes("socket") ||
+    normalized.includes("websocket") ||
+    normalized.includes("fetch failed") ||
+    normalized.includes("econn") ||
+    normalized.includes("enotfound") ||
+    normalized.includes("eai_again") ||
+    normalized.includes("temporarily") ||
+    normalized.includes("try again") ||
+    normalized.includes("unavailable") ||
+    normalized.includes("overloaded") ||
+    normalized.includes("502") ||
+    normalized.includes("503") ||
+    normalized.includes("504")
+  );
+}
+
+export function isRetryableTurnStartFailure(cause: Cause.Cause<unknown>): boolean {
+  const providerError = findProviderAdapterRequestError(cause);
+  if (providerError) {
+    return isRetryableTurnStartFailureDetail(providerError.detail);
+  }
+  return isRetryableTurnStartFailureDetail(Cause.pretty(cause));
 }
 
 function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderServiceError>): boolean {
@@ -226,6 +262,9 @@ const make = Effect.gen(function* () {
     readonly detail: string;
     readonly turnId: TurnId | null;
     readonly createdAt: string;
+    readonly messageId?: string;
+    readonly retryable?: boolean;
+    readonly turnStart?: Record<string, unknown>;
     readonly requestId?: string;
   }) =>
     Effect.all({
@@ -244,6 +283,9 @@ const make = Effect.gen(function* () {
             summary: input.summary,
             payload: {
               detail: input.detail,
+              ...(input.messageId ? { messageId: input.messageId } : {}),
+              ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+              ...(input.turnStart !== undefined ? { turnStart: input.turnStart } : {}),
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
@@ -390,7 +432,7 @@ const make = Effect.gen(function* () {
       activeSession !== undefined &&
       activeSession.providerInstanceId !== undefined
         ? activeSession.providerInstanceId
-        : thread.modelSelection.instanceId;
+        : (thread.session?.providerInstanceId ?? thread.modelSelection.instanceId);
     const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
     const desiredInstanceId = desiredModelSelection.instanceId;
     const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
@@ -766,6 +808,8 @@ const make = Effect.gen(function* () {
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
         createdAt: event.payload.createdAt,
+        messageId: event.payload.messageId,
+        retryable: false,
       });
       return;
     }
@@ -806,6 +850,18 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
+      const retryable = isRetryableTurnStartFailure(cause);
+      const turnStart = {
+        ...(event.payload.modelSelection !== undefined
+          ? { modelSelection: event.payload.modelSelection }
+          : {}),
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        runtimeMode: event.payload.runtimeMode,
+        interactionMode: event.payload.interactionMode,
+        ...(event.payload.sourceProposedPlan !== undefined
+          ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+          : {}),
+      };
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -819,6 +875,9 @@ const make = Effect.gen(function* () {
             detail,
             turnId: null,
             createdAt: event.payload.createdAt,
+            messageId: event.payload.messageId,
+            retryable,
+            turnStart,
           }),
         ),
         Effect.asVoid,

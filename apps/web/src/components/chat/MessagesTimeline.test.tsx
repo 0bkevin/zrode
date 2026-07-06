@@ -179,6 +179,11 @@ function buildProps() {
     onOpenTurnDiff: () => {},
     revertTurnCountByUserMessageId: new Map(),
     onRevertUserMessage: () => {},
+    retryableFailedTurnTargetsByActivityId: new Map<string, MessageId>(),
+    retryingUserMessageIds: new Set<MessageId>(),
+    retryControlsDisabled: false,
+    retryControlsDisabledLabel: null,
+    onRetryUserMessage: () => {},
     isRevertingCheckpoint: false,
     onImageExpand: () => {},
     activeThreadEnvironmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
@@ -447,6 +452,75 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Context compacted");
     expect(markup).toContain("Work Log");
+  });
+
+  it("renders retry control for retryable turn-start failures", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const retryMessageId = MessageId.make("message-1");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        retryableFailedTurnTargetsByActivityId={new Map([["work-1", retryMessageId]])}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider failed to start turn",
+              tone: "error",
+              sourceActivityKind: "provider.turn.start.failed",
+              toolData: {
+                detail: "Rate limit exceeded.",
+                messageId: retryMessageId,
+                retryable: true,
+              },
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Retry");
+    expect(markup).toContain('aria-label="Retry failed message"');
+    expect(markup).toContain("lucide-refresh-cw");
+  });
+
+  it("disables retry control when retries are unavailable", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const retryMessageId = MessageId.make("message-1");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        retryControlsDisabled
+        retryControlsDisabledLabel="Reconnect to retry this message"
+        retryableFailedTurnTargetsByActivityId={new Map([["work-1", retryMessageId]])}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Provider failed to start turn",
+              tone: "error",
+              sourceActivityKind: "provider.turn.start.failed",
+              toolData: {
+                detail: "Rate limit exceeded.",
+                messageId: retryMessageId,
+                retryable: true,
+              },
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Retry failed message"');
+    expect(markup).toContain("disabled");
   });
 
   it("formats changed file paths from the workspace root", async () => {
