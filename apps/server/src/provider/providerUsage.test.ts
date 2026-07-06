@@ -1,14 +1,24 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
-import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type ProviderUsageSnapshot,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import { layer as NodeServicesLayer } from "@effect/platform-node/NodeServices";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import { FetchHttpClient } from "effect/unstable/http";
+import * as Path from "effect/Path";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import * as ProcessRunner from "../processRunner.ts";
 import {
+  __testing,
   consumeCodexResetCredit,
   getProviderUsage,
   invalidateProviderUsageCache,
@@ -18,7 +28,10 @@ import {
   parseClaudeOAuthCredentials,
   parseCodexBackendAuth,
   parseCodexResetCredits,
+  parseRetryAfterMs,
+  providerUsageSettingsKey,
   resetProviderUsageStateForTests,
+  selectProviderUsageSnapshotForCache,
   SESSION_WINDOW_MINUTES,
   usageSettingsKey,
   WEEKLY_WINDOW_MINUTES,
@@ -37,6 +50,34 @@ const DISABLED_SETTINGS: ServerSettings = {
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
   },
 };
+
+function snapshot(overrides: Partial<ProviderUsageSnapshot>): ProviderUsageSnapshot {
+  return {
+    provider: "claude",
+    status: "ok",
+    session: { usedPercent: 10, windowMinutes: SESSION_WINDOW_MINUTES, resetsAt: null },
+    weekly: { usedPercent: 20, windowMinutes: WEEKLY_WINDOW_MINUTES, resetsAt: null },
+    extraLimits: [],
+    planLabel: null,
+    extraUsage: null,
+    credits: null,
+    resetCredits: null,
+    message: null,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+const makeTempCodexHomeWithAuth = Effect.fn("makeTempCodexHomeWithAuth")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const dir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "zrode-codex-usage-" });
+  yield* fileSystem.writeFileString(
+    path.join(dir, "auth.json"),
+    '{"tokens":{"access_token":"codex-token","account_id":"account-1"}}',
+  );
+  return dir;
+});
 
 describe("normalizeResetsAt", () => {
   it("parses ISO-8601 strings to epoch milliseconds", () => {
@@ -59,6 +100,24 @@ describe("normalizeResetsAt", () => {
     expect(normalizeResetsAt(null)).toBeNull();
     expect(normalizeResetsAt(undefined)).toBeNull();
     expect(normalizeResetsAt({})).toBeNull();
+  });
+});
+
+describe("parseRetryAfterMs", () => {
+  it("parses delta seconds", () => {
+    expect(parseRetryAfterMs("120", Date.parse("2026-07-06T12:00:00Z"))).toBe(120_000);
+  });
+
+  it("parses HTTP dates relative to the response time", () => {
+    expect(
+      parseRetryAfterMs("Mon, 06 Jul 2026 12:05:00 GMT", Date.parse("2026-07-06T12:00:00Z")),
+    ).toBe(300_000);
+  });
+
+  it("rejects malformed values", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    expect(parseRetryAfterMs(undefined, nowMs)).toBeNull();
+    expect(parseRetryAfterMs("not a retry date", nowMs)).toBeNull();
   });
 });
 
@@ -267,6 +326,140 @@ describe("usageSettingsKey", () => {
     };
     expect(usageSettingsKey(a)).not.toBe(usageSettingsKey(b));
   });
+
+  it("splits provider keys so one provider cache cannot invalidate the other", () => {
+    const otherClaudeHome: ServerSettings = {
+      ...DISABLED_SETTINGS,
+      providers: {
+        ...DISABLED_SETTINGS.providers,
+        claudeAgent: {
+          ...DISABLED_SETTINGS.providers.claudeAgent,
+          homePath: "/tmp/other-claude-home",
+        },
+      },
+    };
+    expect(providerUsageSettingsKey("claude", otherClaudeHome)).not.toBe(
+      providerUsageSettingsKey("claude", DISABLED_SETTINGS),
+    );
+    expect(providerUsageSettingsKey("codex", otherClaudeHome)).toBe(
+      providerUsageSettingsKey("codex", DISABLED_SETTINGS),
+    );
+  });
+});
+
+describe("selectProviderUsageSnapshotForCache", () => {
+  const claudeRateLimited = snapshot({
+    provider: "claude",
+    status: "error",
+    session: null,
+    weekly: null,
+    message:
+      "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.",
+    updatedAt: 2,
+  });
+
+  it("keeps showing the last good provider snapshot during a 429 backoff", () => {
+    const cachedClaude = snapshot({ provider: "claude", updatedAt: 1 });
+    expect(selectProviderUsageSnapshotForCache(claudeRateLimited, cachedClaude, true)).toBe(
+      cachedClaude,
+    );
+  });
+
+  it("surfaces the rate-limit snapshot when no good cached value exists", () => {
+    expect(
+      selectProviderUsageSnapshotForCache(
+        claudeRateLimited,
+        snapshot({ provider: "claude", status: "unauthenticated" }),
+        true,
+      ),
+    ).toBe(claudeRateLimited);
+  });
+
+  it("does not reuse cached data for ordinary provider errors", () => {
+    const cachedClaude = snapshot({ provider: "claude", updatedAt: 1 });
+    expect(selectProviderUsageSnapshotForCache(claudeRateLimited, cachedClaude, false)).toBe(
+      claudeRateLimited,
+    );
+  });
+});
+
+describe("provider usage cache policy", () => {
+  it("does not let auxiliary reset-credit backoff extend the main usage cache TTL", () => {
+    const completedAt = 1_000;
+    const state = __testing.makeProviderUsageCacheState({
+      key: "codex-key",
+      generation: 0,
+      completedAt,
+      fetched: {
+        snapshot: snapshot({ provider: "codex", resetCredits: null, updatedAt: completedAt }),
+        auxiliaryBackoffTtlMs: 10 * 60_000,
+      },
+      cached: null,
+    });
+
+    expect(state.expiresAt).toBe(completedAt + 60_000);
+  });
+
+  it("preserves cached Codex reset credits while reset-credit enrichment is rate limited", () => {
+    const resetCredits = {
+      availableCount: 1,
+      totalEarnedCount: 2,
+      nextExpiresAt: Date.parse("2026-07-10T00:00:00Z"),
+    };
+    const cached = __testing.makeProviderUsageCacheState({
+      key: "codex-key",
+      generation: 0,
+      completedAt: 1_000,
+      fetched: {
+        snapshot: snapshot({ provider: "codex", resetCredits, updatedAt: 1_000 }),
+      },
+      cached: null,
+    });
+    const refreshed = __testing.makeProviderUsageCacheState({
+      key: "codex-key",
+      generation: 0,
+      completedAt: 2_000,
+      fetched: {
+        snapshot: snapshot({ provider: "codex", resetCredits: null, updatedAt: 2_000 }),
+        auxiliaryBackoffTtlMs: 5 * 60_000,
+      },
+      cached,
+    });
+
+    expect(refreshed.snapshot.resetCredits).toEqual(resetCredits);
+    expect(refreshed.expiresAt).toBe(62_000);
+  });
+
+  it("backs off a primary rate-limited provider while keeping the last good snapshot", () => {
+    const cached = __testing.makeProviderUsageCacheState({
+      key: "claude-key",
+      generation: 0,
+      completedAt: 1_000,
+      fetched: { snapshot: snapshot({ provider: "claude", updatedAt: 1_000 }) },
+      cached: null,
+    });
+    const refreshed = __testing.makeProviderUsageCacheState({
+      key: "claude-key",
+      generation: 0,
+      completedAt: 2_000,
+      fetched: {
+        snapshot: snapshot({
+          provider: "claude",
+          status: "error",
+          session: null,
+          weekly: null,
+          message:
+            "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.",
+          updatedAt: 2_000,
+        }),
+        mainBackoffTtlMs: 120_000,
+      },
+      cached,
+    });
+
+    expect(refreshed.snapshot).toBe(cached.snapshot);
+    expect(refreshed.expiresAt).toBe(122_000);
+  });
 });
 
 describe("getProviderUsage caching", () => {
@@ -288,7 +481,8 @@ describe("getProviderUsage caching", () => {
     Effect.gen(function* () {
       const first = yield* getProviderUsage(DISABLED_SETTINGS);
       const second = yield* getProviderUsage(DISABLED_SETTINGS);
-      expect(second).toBe(first);
+      expect(second.usage[0]).toBe(first.usage[0]);
+      expect(second.usage[1]).toBe(first.usage[1]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -297,7 +491,8 @@ describe("getProviderUsage caching", () => {
       const first = yield* getProviderUsage(DISABLED_SETTINGS);
       invalidateProviderUsageCache();
       const second = yield* getProviderUsage(DISABLED_SETTINGS);
-      expect(second).not.toBe(first);
+      expect(second.usage[0]).not.toBe(first.usage[0]);
+      expect(second.usage[1]).not.toBe(first.usage[1]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -311,8 +506,128 @@ describe("getProviderUsage caching", () => {
         ],
         { concurrency: "unbounded" },
       );
+      expect(second.usage[0]).toBe(first.usage[0]);
+      expect(second.usage[1]).toBe(first.usage[1]);
+      expect(third.usage[0]).toBe(first.usage[0]);
+      expect(third.usage[1]).toBe(first.usage[1]);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  effectIt.live("coalesces concurrent active fetches before the first response settles", () =>
+    Effect.gen(function* () {
+      const fetchStarted = yield* Deferred.make<void>();
+      const releaseFetch = yield* Deferred.make<void>();
+      const fetchedSnapshot = snapshot({ provider: "claude", updatedAt: 101 });
+      let fetchCount = 0;
+      const fetch = Effect.gen(function* () {
+        fetchCount += 1;
+        yield* Deferred.succeed(fetchStarted, undefined);
+        yield* Deferred.await(releaseFetch);
+        return { snapshot: fetchedSnapshot };
+      });
+
+      const firstFiber = yield* __testing
+        .getProviderUsageSnapshot("claude", "same-key", fetch)
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(fetchStarted);
+      const secondFiber = yield* __testing
+        .getProviderUsageSnapshot("claude", "same-key", fetch)
+        .pipe(Effect.forkChild);
+      yield* Deferred.succeed(releaseFetch, undefined);
+
+      const [first, second] = yield* Effect.all([Fiber.join(firstFiber), Fiber.join(secondFiber)], {
+        concurrency: "unbounded",
+      }).pipe(Effect.timeout(Duration.seconds(2)));
+      expect(fetchCount).toBe(1);
+      expect(first).toBe(fetchedSnapshot);
       expect(second).toBe(first);
-      expect(third).toBe(first);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  effectIt.live("supersedes stale in-flight fetches when the settings key changes", () =>
+    Effect.gen(function* () {
+      const firstFetchStarted = yield* Deferred.make<void>();
+      const releaseFirstFetch = yield* Deferred.make<void>();
+      const firstFetchCompleted = yield* Deferred.make<void>();
+      const staleSnapshot = snapshot({ provider: "claude", updatedAt: 201 });
+      const freshSnapshot = snapshot({ provider: "claude", updatedAt: 202 });
+      let freshFetchCount = 0;
+      const staleFetch = Effect.gen(function* () {
+        yield* Deferred.succeed(firstFetchStarted, undefined);
+        yield* Deferred.await(releaseFirstFetch);
+        yield* Deferred.succeed(firstFetchCompleted, undefined);
+        return { snapshot: staleSnapshot };
+      });
+      const freshFetch = Effect.sync(() => {
+        freshFetchCount += 1;
+        return { snapshot: freshSnapshot };
+      });
+
+      const staleFiber = yield* __testing
+        .getProviderUsageSnapshot("claude", "old-key", staleFetch)
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(firstFetchStarted);
+
+      const fresh = yield* __testing.getProviderUsageSnapshot("claude", "new-key", freshFetch);
+      const stale = yield* Fiber.join(staleFiber).pipe(Effect.timeout(Duration.seconds(2)));
+      yield* Deferred.succeed(releaseFirstFetch, undefined);
+      yield* Deferred.await(firstFetchCompleted).pipe(Effect.timeout(Duration.seconds(2)));
+      yield* Effect.yieldNow;
+      const cachedFresh = yield* __testing.getProviderUsageSnapshot(
+        "claude",
+        "new-key",
+        freshFetch,
+      );
+
+      expect(fresh).toBe(freshSnapshot);
+      expect(stale.status).toBe("error");
+      expect(stale.message).toContain("superseded");
+      expect(cachedFresh).toBe(freshSnapshot);
+      expect(freshFetchCount).toBe(1);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  effectIt.live("does not cache a provider fetch that completes after invalidation", () =>
+    Effect.gen(function* () {
+      const staleFetchStarted = yield* Deferred.make<void>();
+      const releaseStaleFetch = yield* Deferred.make<void>();
+      const staleFetchCompleted = yield* Deferred.make<void>();
+      const staleSnapshot = snapshot({ provider: "claude", updatedAt: 301 });
+      const freshSnapshot = snapshot({ provider: "claude", updatedAt: 302 });
+      let freshFetchCount = 0;
+      const staleFetch = Effect.gen(function* () {
+        yield* Deferred.succeed(staleFetchStarted, undefined);
+        yield* Deferred.await(releaseStaleFetch);
+        yield* Deferred.succeed(staleFetchCompleted, undefined);
+        return { snapshot: staleSnapshot };
+      });
+      const freshFetch = Effect.sync(() => {
+        freshFetchCount += 1;
+        return { snapshot: freshSnapshot };
+      });
+
+      const staleFiber = yield* __testing
+        .getProviderUsageSnapshot("claude", "stable-key", staleFetch)
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(staleFetchStarted);
+      invalidateProviderUsageCache("claude");
+
+      const fresh = yield* __testing.getProviderUsageSnapshot("claude", "stable-key", freshFetch);
+      yield* Deferred.succeed(releaseStaleFetch, undefined);
+      const stale = yield* Fiber.join(staleFiber).pipe(Effect.timeout(Duration.seconds(2)));
+      yield* Deferred.await(staleFetchCompleted).pipe(Effect.timeout(Duration.seconds(2)));
+      yield* Effect.yieldNow;
+      const cachedFresh = yield* __testing.getProviderUsageSnapshot(
+        "claude",
+        "stable-key",
+        freshFetch,
+      );
+
+      expect(fresh).toBe(freshSnapshot);
+      expect(stale.status).toBe("error");
+      expect(stale.message).toContain("superseded");
+      expect(cachedFresh).toBe(freshSnapshot);
+      expect(freshFetchCount).toBe(1);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -355,4 +670,61 @@ describe("consumeCodexResetCredit guards", () => {
       expect(result.message).toContain("not authenticated");
     }).pipe(Effect.provide(TestLayer)),
   );
+
+  effectIt.live("honors reset-credit consume Retry-After without repeat HTTP calls", () => {
+    const requests: Array<{ readonly method: string; readonly url: string }> = [];
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        requests.push({ method: request.method, url: request.url });
+        if (request.method === "GET" && request.url.endsWith("/rate-limit-reset-credits")) {
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                credits: [{ status: "available", expires_at: "2026-07-10T00:00:00.000Z" }],
+              }),
+            ),
+          );
+        }
+        if (
+          request.method === "POST" &&
+          request.url.endsWith("/rate-limit-reset-credits/consume")
+        ) {
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response("{}", {
+                status: 429,
+                headers: { "Retry-After": "120" },
+              }),
+            ),
+          );
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json({}, { status: 404 })),
+        );
+      }),
+    );
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const codexHome = yield* makeTempCodexHomeWithAuth();
+        const settings = {
+          ...DEFAULT_SERVER_SETTINGS.providers.codex,
+          enabled: true,
+          homePath: codexHome,
+          shadowHomePath: "",
+        };
+        const first = yield* consumeCodexResetCredit(settings);
+        const second = yield* consumeCodexResetCredit(settings);
+
+        expect(first.ok).toBe(false);
+        expect(first.message).toContain("rate limited");
+        expect(second.ok).toBe(false);
+        expect(second.message).toContain("wait a moment");
+        expect(requests.map((request) => request.method)).toEqual(["GET", "POST"]);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, httpLayer)));
+  });
 });

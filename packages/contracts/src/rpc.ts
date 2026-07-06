@@ -276,7 +276,12 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
 });
 
 export const WsServerGetProviderUsageRpc = Rpc.make(WS_METHODS.serverGetProviderUsage, {
-  payload: Schema.Struct({}),
+  payload: Schema.Struct({
+    // Client-only cache discriminator. The server ignores this value; it lets
+    // clients isolate query cache entries across provider/account context
+    // changes without widening the usage response contract.
+    contextKey: Schema.optional(Schema.String),
+  }),
   success: ServerProviderUsageResult,
   error: EnvironmentAuthorizationError,
 });

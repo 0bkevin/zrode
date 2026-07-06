@@ -48,7 +48,6 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -79,9 +78,18 @@ const USAGE_HTTP_TIMEOUT_MS = 10_000;
 const CODEX_APP_SERVER_USAGE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`;
+const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
+const CLAUDE_USAGE_RATE_LIMIT_MESSAGE =
+  "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.";
 
 /** How long a fetched usage snapshot stays fresh for all connected clients. */
 const USAGE_CACHE_TTL_MS = 60_000;
+/** Fallback backoff when a provider 429 omits Retry-After. */
+const USAGE_CACHE_RATE_LIMIT_DEFAULT_TTL_MS = 5 * 60_000;
+/** Any 429 should suppress immediate retries, even if Retry-After is tiny. */
+const USAGE_CACHE_RATE_LIMIT_MIN_TTL_MS = 60_000;
+/** Cap vendor backoff hints so stale UI can eventually self-heal. */
+const USAGE_CACHE_RATE_LIMIT_MAX_TTL_MS = 30 * 60_000;
 /** How long a successfully-read Claude token is reused before re-reading. */
 const CLAUDE_TOKEN_CACHE_TTL_MS = 15 * 60_000;
 /** How long "no credentials found" is trusted before re-probing keychain/file. */
@@ -143,6 +151,32 @@ function uniquifyLimitLabel(label: string, seen: Map<string, number>): string {
  * folding transport errors, timeouts, and body failures into `null` payloads
  * so callers can branch purely on `{ status, payload }`.
  */
+export function parseRetryAfterMs(raw: string | undefined, nowMs: number): number | null {
+  if (raw === undefined) {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+  const dateMs = Date.parse(trimmed);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - nowMs) : null;
+}
+
+function rateLimitTtlMs(retryAfterMs: number | null): number {
+  return Math.min(
+    USAGE_CACHE_RATE_LIMIT_MAX_TTL_MS,
+    Math.max(
+      USAGE_CACHE_RATE_LIMIT_MIN_TTL_MS,
+      retryAfterMs ?? USAGE_CACHE_RATE_LIMIT_DEFAULT_TTL_MS,
+    ),
+  );
+}
+
 const fetchJsonWithTimeout = Effect.fn("fetchJsonWithTimeout")(function* (
   request: HttpClientRequest.HttpClientRequest,
 ) {
@@ -151,18 +185,32 @@ const fetchJsonWithTimeout = Effect.fn("fetchJsonWithTimeout")(function* (
     Effect.flatMap(
       (
         response: HttpClientResponse.HttpClientResponse,
-      ): Effect.Effect<{ readonly status: number; readonly payload: unknown }> =>
-        response.status >= 200 && response.status < 300
-          ? response.json.pipe(
-              Effect.map((payload) => ({ status: response.status, payload })),
-              Effect.orElseSucceed(() => ({ status: response.status, payload: null })),
-            )
-          : // Drain non-2xx bodies so the socket is released promptly instead
-            // of waiting for the response object to be garbage-collected.
-            response.text.pipe(
-              Effect.orElseSucceed(() => ""),
-              Effect.map(() => ({ status: response.status, payload: null })),
-            ),
+      ): Effect.Effect<{
+        readonly status: number;
+        readonly payload: unknown;
+        readonly retryAfterMs: number | null;
+      }> =>
+        Effect.gen(function* () {
+          const receivedAt = DateTime.toEpochMillis(yield* DateTime.now);
+          const retryAfterMs = parseRetryAfterMs(response.headers["retry-after"], receivedAt);
+          const readResponse =
+            response.status >= 200 && response.status < 300
+              ? response.json.pipe(
+                  Effect.map((payload) => ({ status: response.status, payload, retryAfterMs })),
+                  Effect.orElseSucceed(() => ({
+                    status: response.status,
+                    payload: null,
+                    retryAfterMs,
+                  })),
+                )
+              : // Drain non-2xx bodies so the socket is released promptly instead
+                // of waiting for the response object to be garbage-collected.
+                response.text.pipe(
+                  Effect.orElseSucceed(() => ""),
+                  Effect.map(() => ({ status: response.status, payload: null, retryAfterMs })),
+                );
+          return yield* readResponse;
+        }),
     ),
     Effect.timeoutOption(Duration.millis(USAGE_HTTP_TIMEOUT_MS)),
     Effect.map(Option.getOrNull),
@@ -179,33 +227,105 @@ const fetchJsonWithTimeout = Effect.fn("fetchJsonWithTimeout")(function* (
 
 interface ProviderUsageCacheState {
   readonly key: string;
+  readonly generation: number;
   readonly expiresAt: number;
-  readonly result: ServerProviderUsageResult;
+  readonly snapshot: ProviderUsageSnapshot;
+  readonly lastOkSnapshot: ProviderUsageSnapshot | null;
 }
 
 interface ProviderUsageInFlightState {
   readonly key: string;
-  readonly deferred: Deferred.Deferred<ServerProviderUsageResult>;
+  readonly generation: number;
+  readonly deferred: Deferred.Deferred<ProviderUsageSnapshot>;
 }
 
-let usageCache: ProviderUsageCacheState | null = null;
-let usageInFlight: ProviderUsageInFlightState | null = null;
+interface ProviderUsageFetchResult {
+  readonly snapshot: ProviderUsageSnapshot;
+  /**
+   * Backoff requested by the provider's primary usage source. A failed
+   * primary request may reuse the last good snapshot while this is active.
+   */
+  readonly mainBackoffTtlMs: number | null;
+  /**
+   * Backoff requested by secondary enrichment sources such as Codex reset
+   * credits. This slows future enrichment reads but must not hide primary
+   * usage failures.
+   */
+  readonly auxiliaryBackoffTtlMs: number | null;
+}
 
-export function invalidateProviderUsageCache(): void {
-  usageCache = null;
+let usageCache = new Map<ProviderUsageProviderKind, ProviderUsageCacheState>();
+let usageInFlight = new Map<ProviderUsageProviderKind, ProviderUsageInFlightState>();
+let usageGeneration = new Map<ProviderUsageProviderKind, number>();
+
+const PROVIDER_USAGE_KINDS = [
+  "claude",
+  "codex",
+] as const satisfies ReadonlyArray<ProviderUsageProviderKind>;
+
+function providerUsageFetchResult(
+  snapshot: ProviderUsageSnapshot,
+  options: {
+    readonly mainBackoffTtlMs?: number | null;
+    readonly auxiliaryBackoffTtlMs?: number | null;
+  } = {},
+): ProviderUsageFetchResult {
+  return {
+    snapshot,
+    mainBackoffTtlMs: options.mainBackoffTtlMs ?? null,
+    auxiliaryBackoffTtlMs: options.auxiliaryBackoffTtlMs ?? null,
+  };
+}
+
+function providerUsageGeneration(provider: ProviderUsageProviderKind): number {
+  return usageGeneration.get(provider) ?? 0;
+}
+
+function bumpProviderUsageGeneration(provider: ProviderUsageProviderKind): void {
+  usageGeneration.set(provider, providerUsageGeneration(provider) + 1);
+}
+
+export function invalidateProviderUsageCache(provider?: ProviderUsageProviderKind): void {
+  if (provider !== undefined) {
+    usageCache.delete(provider);
+    usageInFlight.delete(provider);
+    bumpProviderUsageGeneration(provider);
+    return;
+  }
+  usageCache = new Map();
+  usageInFlight = new Map();
+  for (const kind of PROVIDER_USAGE_KINDS) {
+    bumpProviderUsageGeneration(kind);
+  }
 }
 
 export function usageSettingsKey(settings: ServerSettings): string {
-  const claude = settings.providers.claudeAgent;
-  const codex = settings.providers.codex;
   return JSON.stringify([
-    claude.enabled,
-    claude.homePath,
-    codex.enabled,
-    codex.binaryPath,
-    codex.homePath,
-    codex.shadowHomePath,
+    claudeUsageSettingsKey(settings.providers.claudeAgent),
+    codexUsageSettingsKey(settings.providers.codex),
   ]);
+}
+
+function claudeUsageSettingsKey(settings: ClaudeSettings): string {
+  return JSON.stringify([settings.enabled, settings.homePath]);
+}
+
+function codexUsageSettingsKey(settings: CodexSettings): string {
+  return JSON.stringify([
+    settings.enabled,
+    settings.binaryPath,
+    settings.homePath,
+    settings.shadowHomePath,
+  ]);
+}
+
+export function providerUsageSettingsKey(
+  provider: ProviderUsageProviderKind,
+  settings: ServerSettings,
+): string {
+  return provider === "claude"
+    ? claudeUsageSettingsKey(settings.providers.claudeAgent)
+    : codexUsageSettingsKey(settings.providers.codex);
 }
 
 // ── Claude ───────────────────────────────────────────────────────────
@@ -353,6 +473,7 @@ export function parseClaudeLimits(usage: ClaudeUsagePayload): {
 
 interface ClaudeTokenCacheState {
   readonly home: string;
+  readonly fileFingerprint: string | null;
   readonly credentials: ClaudeOAuthCredentials | null;
   readonly expiresAt: number;
 }
@@ -372,10 +493,27 @@ function markClaudeCredentialsRejected(rejectedAt: number): void {
   }
   claudeTokenCache = {
     home: cached.home,
+    fileFingerprint: cached.fileFingerprint,
     credentials: { ...cached.credentials, expiresAt: rejectedAt - 1 },
     expiresAt: rejectedAt + CLAUDE_TOKEN_NEGATIVE_TTL_MS,
   };
 }
+
+const claudeCredentialsFileFingerprint = Effect.fn("claudeCredentialsFileFingerprint")(function* (
+  fileSystem: FileSystem.FileSystem,
+  credentialsPath: string,
+) {
+  return yield* fileSystem.stat(credentialsPath).pipe(
+    Effect.map((info) => {
+      const mtimeMs = Option.match(info.mtime, {
+        onNone: () => 0,
+        onSome: (mtime) => mtime.getTime(),
+      });
+      return `${info.size}:${mtimeMs}`;
+    }),
+    Effect.orElseSucceed(() => null),
+  );
+});
 
 /**
  * Resolve the Claude Code OAuth credentials: the credentials file inside the
@@ -388,13 +526,19 @@ const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
 ) {
   const now = DateTime.toEpochMillis(yield* DateTime.now);
   const home = yield* resolveClaudeHomePath(settings);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const credentialsPath = `${home}/.claude/.credentials.json`;
+  const fileFingerprint = yield* claudeCredentialsFileFingerprint(fileSystem, credentialsPath);
   const cached = claudeTokenCache;
-  if (cached && cached.home === home && cached.expiresAt > now) {
+  if (
+    cached &&
+    cached.home === home &&
+    cached.fileFingerprint === fileFingerprint &&
+    cached.expiresAt > now
+  ) {
     return cached.credentials;
   }
 
-  const fileSystem = yield* FileSystem.FileSystem;
-  const credentialsPath = `${home}/.claude/.credentials.json`;
   let credentials = yield* fileSystem.readFileString(credentialsPath).pipe(
     Effect.map(parseClaudeOAuthCredentials),
     Effect.orElseSucceed(() => null),
@@ -424,37 +568,41 @@ const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
     credentials !== null && (credentials.expiresAt === null || credentials.expiresAt > now);
   claudeTokenCache = {
     home,
+    fileFingerprint,
     credentials,
     expiresAt: now + (looksValid ? CLAUDE_TOKEN_CACHE_TTL_MS : CLAUDE_TOKEN_NEGATIVE_TTL_MS),
   };
   return credentials;
 });
 
-export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (settings: ClaudeSettings) {
+const fetchClaudeUsageResult = Effect.fn("fetchClaudeUsageResult")(function* (
+  settings: ClaudeSettings,
+) {
   const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
   if (!settings.enabled) {
-    return usageSnapshot(
-      "claude",
-      "unavailable",
-      "Claude is disabled in Zrode settings.",
-      startedAt,
+    return providerUsageFetchResult(
+      usageSnapshot("claude", "unavailable", "Claude is disabled in Zrode settings.", startedAt),
     );
   }
   const credentials = yield* readClaudeCredentials(settings);
   if (!credentials) {
-    return usageSnapshot(
-      "claude",
-      "unauthenticated",
-      "No Claude Code credentials found. Sign in with the Claude CLI first.",
-      startedAt,
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "claude",
+        "unauthenticated",
+        "No Claude Code credentials found. Sign in with the Claude CLI first.",
+        startedAt,
+      ),
     );
   }
   if (credentials.expiresAt !== null && credentials.expiresAt <= startedAt) {
-    return usageSnapshot(
-      "claude",
-      "unauthenticated",
-      "The Claude Code token has expired — run the Claude CLI once to refresh it.",
-      startedAt,
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "claude",
+        "unauthenticated",
+        "The Claude Code token has expired — run the Claude CLI once to refresh it.",
+        startedAt,
+      ),
     );
   }
   const request = HttpClientRequest.get(CLAUDE_OAUTH_USAGE_URL).pipe(
@@ -467,31 +615,38 @@ export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (setting
   const response = yield* fetchJsonWithTimeout(request);
   const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
   if (response === null) {
-    return usageSnapshot("claude", "error", "Failed to reach the Claude usage API.", updatedAt);
+    return providerUsageFetchResult(
+      usageSnapshot("claude", "error", "Failed to reach the Claude usage API.", updatedAt),
+    );
   }
   if (response.status === 401 || response.status === 403) {
     markClaudeCredentialsRejected(updatedAt);
-    return usageSnapshot(
-      "claude",
-      "unauthenticated",
-      "The Claude Code token has expired — run the Claude CLI once to refresh it.",
-      updatedAt,
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "claude",
+        "unauthenticated",
+        "The Claude Code token has expired — run the Claude CLI once to refresh it.",
+        updatedAt,
+      ),
     );
   }
-  if (response.status === 429) {
-    return usageSnapshot(
-      "claude",
-      "error",
-      "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.",
-      updatedAt,
-    );
+  if (response.status === 429 || (response.status === 503 && response.retryAfterMs !== null)) {
+    const message =
+      response.status === 429
+        ? CLAUDE_USAGE_RATE_LIMIT_MESSAGE
+        : "Claude usage API is temporarily unavailable — data will refresh automatically.";
+    return providerUsageFetchResult(usageSnapshot("claude", "error", message, updatedAt), {
+      mainBackoffTtlMs: rateLimitTtlMs(response.retryAfterMs),
+    });
   }
   if (response.payload === null || typeof response.payload !== "object") {
-    return usageSnapshot(
-      "claude",
-      "error",
-      `Claude usage API returned an unexpected response (HTTP ${response.status}).`,
-      updatedAt,
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "claude",
+        "error",
+        `Claude usage API returned an unexpected response (HTTP ${response.status}).`,
+        updatedAt,
+      ),
     );
   }
   const usage = response.payload as ClaudeUsagePayload;
@@ -505,7 +660,7 @@ export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (setting
             : null,
       }
     : null;
-  return {
+  return providerUsageFetchResult({
     provider: "claude",
     status: "ok",
     session: limits.session,
@@ -517,7 +672,11 @@ export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (setting
     resetCredits: null,
     message: null,
     updatedAt,
-  } satisfies ProviderUsageSnapshot;
+  } satisfies ProviderUsageSnapshot);
+});
+
+export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (settings: ClaudeSettings) {
+  return (yield* fetchClaudeUsageResult(settings)).snapshot;
 });
 
 // ── Codex ────────────────────────────────────────────────────────────
@@ -642,27 +801,93 @@ export function parseCodexResetCredits(payload: unknown): ProviderUsageResetCred
 
 /**
  * Fetch the account's rate-limit reset credits ("Full reset (Weekly + 5 hr)"
- * grants) from the ChatGPT backend. Best-effort: any failure yields `null`.
+ * grants) from the ChatGPT backend. Best-effort, but failure modes stay
+ * explicit so consume preflight and usage enrichment can make different calls.
  */
-const fetchCodexResetCredits = Effect.fn("fetchCodexResetCredits")(function* (
+interface CodexResetCreditsFetchResult {
+  readonly status: "ok" | "unauthenticated" | "rate-limited" | "error";
+  readonly credits: ProviderUsageResetCredits | null;
+  readonly rateLimitTtlMs: number | null;
+}
+
+let codexResetCreditsBackoffUntil = new Map<string, number>();
+
+function setCodexResetCreditsBackoff(
+  key: string,
+  now: number,
+  retryAfterMs: number | null,
+): number {
+  const ttlMs = rateLimitTtlMs(retryAfterMs);
+  codexResetCreditsBackoffUntil.set(key, now + ttlMs);
+  return ttlMs;
+}
+
+const fetchCodexResetCreditsResult = Effect.fn("fetchCodexResetCreditsResult")(function* (
   settings: CodexSettings,
 ) {
+  const key = codexUsageSettingsKey(settings);
   const auth = yield* readCodexBackendAuth(settings);
   if (auth === null) {
-    return null;
+    codexResetCreditsBackoffUntil.delete(key);
+    return {
+      status: "unauthenticated",
+      credits: null,
+      rateLimitTtlMs: null,
+    } satisfies CodexResetCreditsFetchResult;
+  }
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const backoffUntil = codexResetCreditsBackoffUntil.get(key) ?? 0;
+  if (backoffUntil > now) {
+    return {
+      status: "rate-limited",
+      credits: null,
+      rateLimitTtlMs: backoffUntil - now,
+    } satisfies CodexResetCreditsFetchResult;
   }
   const request = HttpClientRequest.get(CODEX_RESET_CREDITS_URL).pipe(
     HttpClientRequest.setHeaders(codexBackendHeaders(auth)),
   );
-  const response = yield* fetchJsonWithTimeout(request);
-  if (response === null || response.status < 200 || response.status >= 300) {
-    return null;
+  const response = yield* fetchJsonWithTimeout(request).pipe(
+    Effect.timeoutOption(Duration.millis(CODEX_RESET_CREDITS_TIMEOUT_MS)),
+    Effect.map(Option.getOrNull),
+  );
+  if (response === null) {
+    return {
+      status: "error",
+      credits: null,
+      rateLimitTtlMs: null,
+    } satisfies CodexResetCreditsFetchResult;
   }
-  return parseCodexResetCredits(response.payload);
+  if (response.status === 429 || (response.status === 503 && response.retryAfterMs !== null)) {
+    const ttlMs = setCodexResetCreditsBackoff(key, now, response.retryAfterMs);
+    return {
+      status: "rate-limited",
+      credits: null,
+      rateLimitTtlMs: ttlMs,
+    } satisfies CodexResetCreditsFetchResult;
+  }
+  if (response.status < 200 || response.status >= 300) {
+    return {
+      status: "error",
+      credits: null,
+      rateLimitTtlMs: null,
+    } satisfies CodexResetCreditsFetchResult;
+  }
+  const credits = parseCodexResetCredits(response.payload);
+  codexResetCreditsBackoffUntil.delete(key);
+  return {
+    status: credits === null ? "error" : "ok",
+    credits,
+    rateLimitTtlMs: null,
+  } satisfies CodexResetCreditsFetchResult;
 });
 
 let consumeResetInFlight = false;
-let lastConsumeResetAt = 0;
+let consumeResetCooldownUntil = 0;
+
+function setConsumeResetCooldown(now: number, ttlMs: number): void {
+  consumeResetCooldownUntil = Math.max(consumeResetCooldownUntil, now + ttlMs);
+}
 
 const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit")(function* (
   settings: CodexSettings,
@@ -674,8 +899,25 @@ const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit
       message: "Codex CLI is not authenticated. Run `codex login` and try again.",
     } satisfies ServerConsumeCodexResetCreditResult;
   }
-  const available = yield* fetchCodexResetCredits(settings);
-  if (available === null || available.availableCount <= 0) {
+  const availableResult = yield* fetchCodexResetCreditsResult(settings);
+  if (availableResult.status === "rate-limited") {
+    setConsumeResetCooldown(
+      DateTime.toEpochMillis(yield* DateTime.now),
+      availableResult.rateLimitTtlMs ?? rateLimitTtlMs(null),
+    );
+    return {
+      ok: false,
+      message: "Codex reset-credit API is rate limited — wait a moment before trying again.",
+    } satisfies ServerConsumeCodexResetCreditResult;
+  }
+  if (availableResult.status === "error" || availableResult.credits === null) {
+    return {
+      ok: false,
+      message:
+        "Could not read Codex reset credits. Wait a moment and try again before spending a reset.",
+    } satisfies ServerConsumeCodexResetCreditResult;
+  }
+  if (availableResult.credits.availableCount <= 0) {
     return {
       ok: false,
       message: "No rate-limit reset credits are available on this account.",
@@ -693,12 +935,22 @@ const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit
     // Ambiguous outcome: the request may have been processed even though we
     // never saw the response. Engage the cooldown and invalidate the cached
     // usage anyway so an immediate retry can't burn a second real credit.
-    lastConsumeResetAt = DateTime.toEpochMillis(yield* DateTime.now);
-    invalidateProviderUsageCache();
+    setConsumeResetCooldown(DateTime.toEpochMillis(yield* DateTime.now), CONSUME_RESET_COOLDOWN_MS);
+    invalidateProviderUsageCache("codex");
     return {
       ok: false,
       message:
         "The reset request timed out — it may still have gone through. Usage will refresh shortly; wait a moment before retrying.",
+    } satisfies ServerConsumeCodexResetCreditResult;
+  }
+  if (response.status === 429 || (response.status === 503 && response.retryAfterMs !== null)) {
+    setConsumeResetCooldown(
+      DateTime.toEpochMillis(yield* DateTime.now),
+      rateLimitTtlMs(response.retryAfterMs),
+    );
+    return {
+      ok: false,
+      message: "Codex reset-credit API is rate limited — wait a moment before trying again.",
     } satisfies ServerConsumeCodexResetCreditResult;
   }
   if (response.status < 200 || response.status >= 300) {
@@ -707,8 +959,8 @@ const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit
       message: `Codex reset-credit API returned HTTP ${response.status}.`,
     } satisfies ServerConsumeCodexResetCreditResult;
   }
-  lastConsumeResetAt = DateTime.toEpochMillis(yield* DateTime.now);
-  invalidateProviderUsageCache();
+  setConsumeResetCooldown(DateTime.toEpochMillis(yield* DateTime.now), CONSUME_RESET_COOLDOWN_MS);
+  invalidateProviderUsageCache("codex");
   return { ok: true, message: null } satisfies ServerConsumeCodexResetCreditResult;
 });
 
@@ -735,7 +987,7 @@ export const consumeCodexResetCredit = Effect.fn("consumeCodexResetCredit")(func
       message: "A rate-limit reset is already in progress.",
     } satisfies ServerConsumeCodexResetCreditResult;
   }
-  if (now - lastConsumeResetAt < CONSUME_RESET_COOLDOWN_MS) {
+  if (now < consumeResetCooldownUntil) {
     return {
       ok: false,
       message: "A rate-limit reset was just performed — wait a moment before trying again.",
@@ -823,46 +1075,59 @@ const probeCodexUsage = Effect.fn("probeCodexUsage")(function* (settings: CodexS
   } satisfies ProviderUsageSnapshot;
 });
 
-export const fetchCodexUsage = Effect.fn("fetchCodexUsage")(function* (settings: CodexSettings) {
+const fetchCodexUsageResult = Effect.fn("fetchCodexUsageResult")(function* (
+  settings: CodexSettings,
+) {
   const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
   if (!settings.enabled) {
-    return usageSnapshot("codex", "unavailable", "Codex is disabled in Zrode settings.", startedAt);
+    return providerUsageFetchResult(
+      usageSnapshot("codex", "unavailable", "Codex is disabled in Zrode settings.", startedAt),
+    );
   }
-  const [probeResult, resetCredits] = yield* Effect.all(
-    [
-      probeCodexUsage(settings).pipe(
-        Effect.scoped,
-        Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
-        Effect.result,
-      ),
-      fetchCodexResetCredits(settings),
-    ],
-    { concurrency: "unbounded" },
+  const probeResult = yield* probeCodexUsage(settings).pipe(
+    Effect.scoped,
+    Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
+    Effect.result,
   );
   const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
   if (Result.isFailure(probeResult)) {
     if (isCodexAppServerSpawnError(probeResult.failure)) {
-      return usageSnapshot(
-        "codex",
-        "unavailable",
-        "Codex CLI (`codex`) is not installed or not on PATH.",
-        updatedAt,
+      return providerUsageFetchResult(
+        usageSnapshot(
+          "codex",
+          "unavailable",
+          "Codex CLI (`codex`) is not installed or not on PATH.",
+          updatedAt,
+        ),
       );
     }
-    return usageSnapshot(
-      "codex",
-      "error",
-      `Failed to fetch Codex usage: ${probeResult.failure.message}`,
-      updatedAt,
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "codex",
+        "error",
+        `Failed to fetch Codex usage: ${probeResult.failure.message}`,
+        updatedAt,
+      ),
     );
   }
   if (Option.isNone(probeResult.success)) {
-    return usageSnapshot("codex", "error", "Timed out while fetching Codex usage.", updatedAt);
+    return providerUsageFetchResult(
+      usageSnapshot("codex", "error", "Timed out while fetching Codex usage.", updatedAt),
+    );
   }
   const snapshot = probeResult.success.value;
-  return snapshot.status === "ok"
-    ? { ...snapshot, resetCredits, updatedAt }
-    : { ...snapshot, updatedAt };
+  if (snapshot.status !== "ok") {
+    return providerUsageFetchResult({ ...snapshot, updatedAt });
+  }
+  const resetCreditsResult = yield* fetchCodexResetCreditsResult(settings);
+  return providerUsageFetchResult(
+    { ...snapshot, resetCredits: resetCreditsResult.credits, updatedAt },
+    { auxiliaryBackoffTtlMs: resetCreditsResult.rateLimitTtlMs },
+  );
+});
+
+export const fetchCodexUsage = Effect.fn("fetchCodexUsage")(function* (settings: CodexSettings) {
+  return (yield* fetchCodexUsageResult(settings)).snapshot;
 });
 
 // ── Aggregation ──────────────────────────────────────────────────────
@@ -871,89 +1136,215 @@ export const fetchCodexUsage = Effect.fn("fetchCodexUsage")(function* (settings:
 const USAGE_CACHE_ERROR_TTL_MS = 10_000;
 
 /**
+ * If a provider asks us to slow down, keep showing that provider's last good
+ * snapshot while its cache backs off. This avoids converting a transient 429
+ * into user-visible churn, but still surfaces the rate-limit message on a cold
+ * cache where no good snapshot exists.
+ */
+export function selectProviderUsageSnapshotForCache(
+  fetched: ProviderUsageSnapshot,
+  cached: ProviderUsageSnapshot | null,
+  rateLimited: boolean,
+): ProviderUsageSnapshot {
+  if (!rateLimited || fetched.status === "ok" || cached?.status !== "ok") {
+    return fetched;
+  }
+  return cached;
+}
+
+function providerUsageCacheTtlMs(result: ProviderUsageFetchResult): number {
+  return (
+    result.mainBackoffTtlMs ??
+    (result.snapshot.status === "ok" ? USAGE_CACHE_TTL_MS : USAGE_CACHE_ERROR_TTL_MS)
+  );
+}
+
+function materializeProviderUsageSnapshot(
+  fetched: ProviderUsageFetchResult,
+  cachedOk: ProviderUsageSnapshot | null,
+): ProviderUsageSnapshot {
+  const selected = selectProviderUsageSnapshotForCache(
+    fetched.snapshot,
+    cachedOk,
+    fetched.mainBackoffTtlMs !== null,
+  );
+  if (
+    selected === fetched.snapshot &&
+    fetched.auxiliaryBackoffTtlMs !== null &&
+    fetched.snapshot.provider === "codex" &&
+    fetched.snapshot.status === "ok" &&
+    fetched.snapshot.resetCredits === null &&
+    cachedOk?.provider === "codex" &&
+    cachedOk.status === "ok" &&
+    cachedOk.resetCredits !== null
+  ) {
+    return { ...fetched.snapshot, resetCredits: cachedOk.resetCredits };
+  }
+  return selected;
+}
+
+function providerUsageSupersededSnapshot(
+  provider: ProviderUsageProviderKind,
+  updatedAt: number,
+): ProviderUsageSnapshot {
+  return usageSnapshot(
+    provider,
+    "error",
+    "Usage refresh was superseded by a newer request — reopen usage details to refresh.",
+    updatedAt,
+  );
+}
+
+function makeProviderUsageCacheState(input: {
+  readonly key: string;
+  readonly generation: number;
+  readonly completedAt: number;
+  readonly fetched: ProviderUsageFetchResult;
+  readonly cached: ProviderUsageCacheState | null;
+}): ProviderUsageCacheState {
+  const cachedOk = input.cached?.lastOkSnapshot ?? null;
+  const snapshot = materializeProviderUsageSnapshot(input.fetched, cachedOk);
+  return {
+    key: input.key,
+    generation: input.generation,
+    expiresAt: input.completedAt + providerUsageCacheTtlMs(input.fetched),
+    snapshot,
+    lastOkSnapshot: snapshot.status === "ok" ? snapshot : cachedOk,
+  };
+}
+
+/**
  * Fold defects (e.g. an unexpected vendor payload shape crashing a parser)
  * into an "error" snapshot so a single provider can never fail the RPC.
  */
 const foldProviderDefects = <R>(
   provider: ProviderUsageProviderKind,
-  fetchSnapshot: Effect.Effect<ProviderUsageSnapshot, never, R>,
-): Effect.Effect<ProviderUsageSnapshot, never, R> =>
+  fetchSnapshot: Effect.Effect<ProviderUsageFetchResult, never, R>,
+): Effect.Effect<ProviderUsageFetchResult, never, R> =>
   fetchSnapshot.pipe(
     Effect.catchDefect((defect) =>
       Effect.gen(function* () {
         yield* Effect.logWarning("Provider usage fetch crashed", { provider, defect });
         const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
-        return usageSnapshot(
-          provider,
-          "error",
-          "Usage data could not be read from the provider's response.",
-          updatedAt,
+        return providerUsageFetchResult(
+          usageSnapshot(
+            provider,
+            "error",
+            "Usage data could not be read from the provider's response.",
+            updatedAt,
+          ),
         );
       }),
     ),
   );
 
-export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
+const getProviderUsageSnapshot = Effect.fn("getProviderUsageSnapshot")(function* <R>(
+  provider: ProviderUsageProviderKind,
+  key: string,
+  fetchSnapshot: Effect.Effect<ProviderUsageFetchResult, never, R>,
+) {
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  const key = usageSettingsKey(settings);
-  const cached = usageCache;
-  if (cached !== null && cached.key === key && cached.expiresAt > now) {
-    return cached.result;
+  const generation = providerUsageGeneration(provider);
+  const cached = usageCache.get(provider) ?? null;
+  if (
+    cached !== null &&
+    cached.key === key &&
+    cached.generation === generation &&
+    cached.expiresAt > now
+  ) {
+    return cached.snapshot;
   }
 
-  // Coalesce with a same-key fetch already in flight: serve the stale cache
-  // entry when one exists, otherwise await the in-flight fetch's result.
-  const inFlight = usageInFlight;
-  if (inFlight !== null && inFlight.key === key) {
-    if (cached !== null && cached.key === key) {
-      return cached.result;
+  const inFlight = usageInFlight.get(provider) ?? null;
+  if (inFlight !== null && inFlight.key === key && inFlight.generation === generation) {
+    if (cached !== null && cached.key === key && cached.generation === generation) {
+      return cached.snapshot;
     }
     return yield* Deferred.await(inFlight.deferred);
   }
 
-  const deferred = yield* Deferred.make<ServerProviderUsageResult>();
-  // Re-check after the yield point above: another fiber may have claimed the
-  // fetch while this one was allocating its Deferred.
-  const claimed = usageInFlight;
-  if (claimed !== null && claimed.key === key) {
+  const deferred = yield* Deferred.make<ProviderUsageSnapshot>();
+  const claimed = usageInFlight.get(provider) ?? null;
+  if (claimed !== null && claimed.key === key && claimed.generation === generation) {
     return yield* Deferred.await(claimed.deferred);
   }
-  const ownRecord: ProviderUsageInFlightState = { key, deferred };
-  usageInFlight = ownRecord;
 
-  return yield* Effect.all(
+  const ownRecord: ProviderUsageInFlightState = { key, generation, deferred };
+  const cachedForFetch = cached?.key === key && cached.generation === generation ? cached : null;
+  const settleFetch = fetchSnapshot.pipe(
+    Effect.matchCauseEffect({
+      onFailure: (cause) =>
+        Effect.gen(function* () {
+          const isCurrentGeneration = providerUsageGeneration(provider) === ownRecord.generation;
+          const isOwner = usageInFlight.get(provider) === ownRecord && isCurrentGeneration;
+          if (isOwner) {
+            usageInFlight.delete(provider);
+          }
+          if (!isCurrentGeneration || !isOwner) {
+            const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+            yield* Deferred.succeed(deferred, providerUsageSupersededSnapshot(provider, updatedAt));
+            return;
+          }
+          yield* Deferred.failCause(deferred, cause);
+        }),
+      onSuccess: (fetched) =>
+        Effect.gen(function* () {
+          const isCurrentGeneration = providerUsageGeneration(provider) === ownRecord.generation;
+          const isOwner = usageInFlight.get(provider) === ownRecord && isCurrentGeneration;
+          if (isOwner) {
+            usageInFlight.delete(provider);
+          }
+          if (!isCurrentGeneration || !isOwner) {
+            const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+            yield* Deferred.succeed(deferred, providerUsageSupersededSnapshot(provider, updatedAt));
+            return;
+          }
+          const snapshot = makeProviderUsageCacheState({
+            key,
+            generation,
+            completedAt: DateTime.toEpochMillis(yield* DateTime.now),
+            fetched,
+            cached: cachedForFetch,
+          });
+          usageCache.set(provider, snapshot);
+          yield* Deferred.succeed(deferred, snapshot.snapshot);
+        }),
+    }),
+  );
+  yield* Effect.uninterruptible(
+    Effect.gen(function* () {
+      const replaced = usageInFlight.get(provider) ?? null;
+      if (replaced !== null && replaced.key !== key) {
+        const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+        yield* Deferred.succeed(
+          replaced.deferred,
+          providerUsageSupersededSnapshot(provider, updatedAt),
+        );
+      }
+      usageInFlight.set(provider, ownRecord);
+      yield* settleFetch.pipe(Effect.forkDetach({ startImmediately: true }));
+    }),
+  );
+  return yield* Deferred.await(deferred);
+});
+
+export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
+  const usage = yield* Effect.all(
     [
-      foldProviderDefects("claude", fetchClaudeUsage(settings.providers.claudeAgent)),
-      foldProviderDefects("codex", fetchCodexUsage(settings.providers.codex)),
+      getProviderUsageSnapshot(
+        "claude",
+        claudeUsageSettingsKey(settings.providers.claudeAgent),
+        foldProviderDefects("claude", fetchClaudeUsageResult(settings.providers.claudeAgent)),
+      ),
+      getProviderUsageSnapshot(
+        "codex",
+        codexUsageSettingsKey(settings.providers.codex),
+        foldProviderDefects("codex", fetchCodexUsageResult(settings.providers.codex)),
+      ),
     ],
     { concurrency: "unbounded" },
-  ).pipe(
-    Effect.map((usage) => ({ usage }) satisfies ServerProviderUsageResult),
-    // Settle waiters and release ownership even on interruption (finalizer),
-    // so a disconnecting client can never strand awaiting fibers. The cache
-    // is only written while this fiber still owns the in-flight slot, so a
-    // fetch started under old settings can never clobber a newer-key result.
-    Effect.onExit((exit) =>
-      Effect.gen(function* () {
-        const isOwner = usageInFlight === ownRecord;
-        if (isOwner) {
-          usageInFlight = null;
-        }
-        if (isOwner && Exit.isSuccess(exit)) {
-          const completedAt = DateTime.toEpochMillis(yield* DateTime.now);
-          const allOk = exit.value.usage.every((snapshot) => snapshot.status === "ok");
-          usageCache = {
-            key,
-            expiresAt: completedAt + (allOk ? USAGE_CACHE_TTL_MS : USAGE_CACHE_ERROR_TTL_MS),
-            result: exit.value,
-          };
-        }
-        yield* Exit.isSuccess(exit)
-          ? Deferred.succeed(deferred, exit.value)
-          : Deferred.failCause(deferred, exit.cause);
-      }),
-    ),
   );
+  return { usage } satisfies ServerProviderUsageResult;
 });
 
 /** Fallback result when server settings cannot be read at all. */
@@ -969,11 +1360,90 @@ export const providerUsageUnavailable = Effect.fn("providerUsageUnavailable")(fu
   } satisfies ServerProviderUsageResult;
 });
 
+interface ProviderUsageFetchResultForTests {
+  readonly snapshot: ProviderUsageSnapshot;
+  readonly mainBackoffTtlMs?: number | null | undefined;
+  readonly auxiliaryBackoffTtlMs?: number | null | undefined;
+}
+
+interface ProviderUsageCacheStateForTests {
+  readonly key: string;
+  readonly generation: number;
+  readonly expiresAt: number;
+  readonly snapshot: ProviderUsageSnapshot;
+  readonly lastOkSnapshot: ProviderUsageSnapshot | null;
+}
+
+function providerUsageFetchOptionsForTests(input: ProviderUsageFetchResultForTests): {
+  readonly mainBackoffTtlMs?: number | null;
+  readonly auxiliaryBackoffTtlMs?: number | null;
+} {
+  const options: {
+    mainBackoffTtlMs?: number | null;
+    auxiliaryBackoffTtlMs?: number | null;
+  } = {};
+  if (input.mainBackoffTtlMs !== undefined) {
+    options.mainBackoffTtlMs = input.mainBackoffTtlMs;
+  }
+  if (input.auxiliaryBackoffTtlMs !== undefined) {
+    options.auxiliaryBackoffTtlMs = input.auxiliaryBackoffTtlMs;
+  }
+  return options;
+}
+
+/** Exposed for tests. */
+export const __testing = {
+  getProviderUsageSnapshot: <R>(
+    provider: ProviderUsageProviderKind,
+    key: string,
+    fetchSnapshot: Effect.Effect<ProviderUsageFetchResultForTests, never, R>,
+  ): Effect.Effect<ProviderUsageSnapshot, never, R> =>
+    getProviderUsageSnapshot(
+      provider,
+      key,
+      fetchSnapshot.pipe(
+        Effect.map(({ snapshot, mainBackoffTtlMs, auxiliaryBackoffTtlMs }) =>
+          providerUsageFetchResult(
+            snapshot,
+            providerUsageFetchOptionsForTests({
+              snapshot,
+              mainBackoffTtlMs,
+              auxiliaryBackoffTtlMs,
+            }),
+          ),
+        ),
+      ),
+    ),
+  makeProviderUsageCacheState: (input: {
+    readonly key: string;
+    readonly generation: number;
+    readonly completedAt: number;
+    readonly fetched: ProviderUsageFetchResultForTests;
+    readonly cached: ProviderUsageCacheStateForTests | null;
+  }): ProviderUsageCacheStateForTests =>
+    makeProviderUsageCacheState({
+      key: input.key,
+      generation: input.generation,
+      completedAt: input.completedAt,
+      fetched: providerUsageFetchResult(
+        input.fetched.snapshot,
+        providerUsageFetchOptionsForTests(input.fetched),
+      ),
+      cached: input.cached,
+    }),
+  providerUsageCacheTtlMs: (input: ProviderUsageFetchResultForTests): number =>
+    providerUsageCacheTtlMs(
+      providerUsageFetchResult(input.snapshot, providerUsageFetchOptionsForTests(input)),
+    ),
+};
+
 /** Test-only: clear all module-level caches and cooldowns. */
 export function resetProviderUsageStateForTests(): void {
-  usageCache = null;
-  usageInFlight = null;
+  usageCache = new Map();
+  usageInFlight = new Map();
+  usageGeneration = new Map();
+  codexResetCreditsBackoffUntil = new Map();
   claudeTokenCache = null;
   consumeResetInFlight = false;
-  lastConsumeResetAt = 0;
+  consumeResetCooldownUntil = 0;
 }

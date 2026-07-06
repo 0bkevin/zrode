@@ -32,7 +32,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
-import type { ProviderTokenActivityKind, ProviderUsageSnapshot } from "@t3tools/contracts";
+import type { ProviderTokenActivityKind } from "@t3tools/contracts";
 
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
@@ -906,19 +906,6 @@ function LastScanLabel({ lastScanAt }: { lastScanAt: number | null }) {
   );
 }
 
-function providerStatusLabel(snapshot: ProviderUsageSnapshot): string {
-  switch (snapshot.status) {
-    case "unauthenticated":
-      return "Not signed in — live usage unavailable, history still shown.";
-    case "unavailable":
-      return "Provider not available on this environment.";
-    case "error":
-      return snapshot.message ?? "Live usage could not be read.";
-    case "ok":
-      return "";
-  }
-}
-
 export function UsageSettingsPanel() {
   const primaryEnvironment = usePrimaryEnvironment();
   const environmentId = primaryEnvironment?.environmentId ?? null;
@@ -942,10 +929,6 @@ export function UsageSettingsPanel() {
             : { days: HISTORY_FETCH_DAYS },
         }),
   );
-  const { data: liveData } = useEnvironmentQuery(
-    environmentId === null ? null : serverEnvironment.providerUsage({ environmentId, input: {} }),
-  );
-
   const isBackfilling = historyData?.isBackfilling ?? false;
   const lastScanAt = historyData?.lastScanAt ?? null;
 
@@ -1047,22 +1030,13 @@ export function UsageSettingsPanel() {
     [visibleByDay],
   );
 
-  /** Live snapshots keyed by provider, for the per-subscription headers. */
-  const liveByProvider = useMemo(() => {
-    const map = new Map<ProviderTokenActivityKind, ProviderUsageSnapshot>();
-    for (const snapshot of liveData?.usage ?? []) {
-      map.set(snapshot.provider, snapshot);
-    }
-    return map;
-  }, [liveData]);
-
   const hasAnyActivity = useMemo(
     () => [...visibleByDay.values()].some((usages) => usages.some(isActiveUsage)),
     [visibleByDay],
   );
 
-  // Enabled Cursor/Grok subscriptions — shown with a dashboard link since
-  // they expose no local usage to chart.
+  // Enabled + authenticated Cursor/Grok subscriptions — shown with a dashboard
+  // link since they expose no local usage to chart.
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const unmeteredSubs = useMemo(() => {
     const seen = new Set<UnmeteredKind>();
@@ -1070,7 +1044,15 @@ export function UsageSettingsPanel() {
       [];
     for (const provider of serverProviders) {
       const kind = UNMETERED_DRIVER_TO_KIND[provider.driver];
-      if (kind === undefined || seen.has(kind) || !provider.enabled) continue;
+      if (
+        kind === undefined ||
+        seen.has(kind) ||
+        !provider.enabled ||
+        !provider.installed ||
+        provider.auth.status !== "authenticated"
+      ) {
+        continue;
+      }
       seen.add(kind);
       result.push({
         kind,
@@ -1388,7 +1370,7 @@ export function UsageSettingsPanel() {
               {!hasAnyActivity && !isBackfilling ? (
                 <p className="text-xs text-muted-foreground/70">
                   No usage activity found in this range. zrode reads past activity from your local
-                  Claude Code and Codex session logs and records live usage while the app runs.
+                  Claude Code and Codex session logs and samples live usage from the footer meter.
                 </p>
               ) : (
                 <RecentActivityTable byDay={visibleByDay} />
@@ -1435,43 +1417,13 @@ export function UsageSettingsPanel() {
           pressureSeries,
           sampledDayCount,
         } = section;
-        const live = liveByProvider.get(provider);
-        const liveOk = live !== undefined && live.status === "ok";
-        const statusLabel = live !== undefined && !liveOk ? providerStatusLabel(live) : "";
         return (
           <SettingsSection
             key={provider}
             title={PROVIDER_LABEL[provider]}
             icon={<ProviderIcon provider={provider} className="size-3" />}
-            headerAction={
-              liveOk && live.planLabel ? (
-                <span className="text-[10px] text-muted-foreground/60">{live.planLabel}</span>
-              ) : undefined
-            }
           >
             <div className="flex flex-col gap-4 px-4 py-4 sm:px-5">
-              {liveOk ? (
-                <div className="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-muted-foreground">
-                  {live.session ? (
-                    <span>
-                      Session now{" "}
-                      <span className="tabular-nums text-foreground">
-                        {Math.round(live.session.usedPercent)}%
-                      </span>
-                    </span>
-                  ) : null}
-                  {live.weekly ? (
-                    <span>
-                      Weekly now{" "}
-                      <span className="tabular-nums text-foreground">
-                        {Math.round(live.weekly.usedPercent)}%
-                      </span>
-                    </span>
-                  ) : null}
-                </div>
-              ) : statusLabel ? (
-                <p className="text-[11px] text-muted-foreground/70">{statusLabel}</p>
-              ) : null}
               {historyData === null ? (
                 <Skeleton className="h-24 w-full" />
               ) : stats.activeDays === 0 ? (

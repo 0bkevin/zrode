@@ -2,8 +2,13 @@ import { ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ProviderUsageSnapshot, ProviderUsageWindow } from "@t3tools/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ProviderUsageSnapshot,
+  ProviderUsageWindow,
+  ServerProvider,
+  ServerProviderUsageResult,
+} from "@t3tools/contracts";
 
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "../localApi";
@@ -11,7 +16,11 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { usePrimaryEnvironment } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
-import { primaryServerProvidersAtom, serverEnvironment } from "../state/server";
+import {
+  primaryServerProvidersAtom,
+  primaryServerSettingsAtom,
+  serverEnvironment,
+} from "../state/server";
 import { useEnvironmentThread } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon } from "./Icons";
@@ -35,6 +44,16 @@ interface UnmeteredProvider {
   readonly email: string | null;
 }
 
+interface MeteredProviderContext {
+  readonly providers: ReadonlyArray<UsageProviderKind>;
+  readonly key: string;
+}
+
+interface LiveUsageRequest {
+  readonly environmentId: string;
+  readonly contextKey: string;
+}
+
 /** Provider usage/limits dashboard opened by the popover's "View details" link. */
 const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   claude: "https://claude.ai/settings/usage",
@@ -44,6 +63,11 @@ const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   opencode: "https://opencode.ai",
 };
 
+const LIVE_USAGE_CLIENT_STALE_MS = 60_000;
+const LIVE_USAGE_PASSIVE_LOAD_DELAY_MS = 3 * 60_000;
+
+const startupLiveUsageLoadKeys = new Set<string>();
+
 /** Driver slug → usage-provider kind for every driver zrode ships. */
 const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
   claudeAgent: "claude",
@@ -52,6 +76,10 @@ const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
   grok: "grok",
   opencode: "opencode",
 };
+
+function isDefaultProviderInstance(provider: ServerProvider): boolean {
+  return String(provider.instanceId) === String(provider.driver);
+}
 
 function openProviderUsagePage(url: string): void {
   const api = readLocalApi();
@@ -66,6 +94,14 @@ function openProviderUsagePage(url: string): void {
       description: error instanceof Error ? error.message : "An error occurred.",
     });
   });
+}
+
+function liveUsageIsFresh(data: ServerProviderUsageResult | null, nowMs: number): boolean {
+  return (
+    data !== null &&
+    data.usage.length > 0 &&
+    data.usage.every((snapshot) => nowMs - snapshot.updatedAt < LIVE_USAGE_CLIENT_STALE_MS)
+  );
 }
 
 function percentUsed(window: ProviderUsageWindow): number {
@@ -427,6 +463,63 @@ function ProviderUsagePopoverContent({
   );
 }
 
+function ProviderUsagePendingPopoverContent({
+  provider,
+  error,
+  isPending,
+  refresh,
+}: {
+  provider: UsageProviderKind;
+  error: string | null;
+  isPending: boolean;
+  refresh: () => void;
+}) {
+  const displayName = providerDisplayName(provider);
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      <div className="flex items-center gap-2">
+        <ProviderUsageIcon provider={provider} className="size-4 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-sm">{displayName}</div>
+          <div className="text-[10px] text-muted-foreground/60">
+            {isPending ? "Updating usage…" : "Usage not loaded"}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="size-5 rounded-sm p-0 text-muted-foreground/60 hover:text-foreground"
+            disabled={isPending}
+            onClick={refresh}
+            aria-label="Refresh usage data"
+          >
+            <RefreshCwIcon className={cn("size-3", isPending && "animate-spin")} />
+          </Button>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="size-5 rounded-sm p-0 text-muted-foreground/60 hover:text-foreground"
+            onClick={() => openProviderUsagePage(PROVIDER_USAGE_URL[provider])}
+            aria-label={`View ${displayName} usage details`}
+          >
+            <ExternalLinkIcon className="size-3" />
+          </Button>
+        </div>
+      </div>
+      {error ? (
+        <div className="text-pretty text-[11px] text-muted-foreground/70">{error}</div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-10/12" />
+          <Skeleton className="h-4 w-8/12" />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Enabled + authenticated providers that have no usage API: they still get a
  * footer tile (icon-only) whose popover shows the signed-in account and links
@@ -458,6 +551,45 @@ function useUnmeteredProviders(): ReadonlyArray<UnmeteredProvider> {
     }
     return Array.from(byKind.values());
   }, [providers]);
+}
+
+function useMeteredProviderContext(): MeteredProviderContext {
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const settings = useAtomValue(primaryServerSettingsAtom);
+  return useMemo(() => {
+    const seen = new Set<UsageProviderKind>();
+    const result: Array<UsageProviderKind> = [];
+    const keyParts: Array<unknown> = [];
+    for (const provider of providers) {
+      const kind = DRIVER_TO_USAGE_KIND[provider.driver];
+      if (kind !== "claude" && kind !== "codex") {
+        continue;
+      }
+      if (!isDefaultProviderInstance(provider) || seen.has(kind)) {
+        continue;
+      }
+      const providerSettings =
+        kind === "claude" ? settings.providers.claudeAgent : settings.providers.codex;
+      keyParts.push([
+        kind,
+        provider.instanceId,
+        provider.enabled,
+        provider.installed,
+        provider.availability ?? "available",
+        provider.auth.status,
+        provider.auth.label ?? "",
+        provider.auth.email ?? "",
+        providerSettings,
+      ]);
+      if (!provider.enabled || !provider.installed) {
+        continue;
+      }
+      seen.add(kind);
+      result.push(kind);
+    }
+    keyParts.sort((left, right) => String(left).localeCompare(String(right)));
+    return { providers: result, key: JSON.stringify(keyParts) };
+  }, [providers, settings.providers.claudeAgent, settings.providers.codex]);
 }
 
 function UnmeteredProviderPill({ provider }: { provider: UnmeteredProvider }) {
@@ -520,6 +652,59 @@ function UnmeteredProviderPill({ provider }: { provider: UnmeteredProvider }) {
   );
 }
 
+function PendingProviderUsagePill({
+  provider,
+  showLabel,
+  error,
+  isPending,
+  refresh,
+  onOpenChange,
+}: {
+  provider: UsageProviderKind;
+  showLabel: boolean;
+  error: string | null;
+  isPending: boolean;
+  refresh: () => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const displayName = providerDisplayName(provider);
+  return (
+    <Popover onOpenChange={onOpenChange}>
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            className={cn(
+              "group inline-flex h-6 min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 outline-none transition-colors",
+              "hover:bg-accent data-[pressed]:bg-accent",
+              "focus-visible:ring-2 focus-visible:ring-ring",
+            )}
+            aria-label={`${displayName} subscription usage`}
+          >
+            <ProviderUsageIcon
+              provider={provider}
+              className="size-3 shrink-0 opacity-50 transition-opacity group-hover:opacity-90"
+            />
+            {showLabel ? (
+              <span className="truncate text-[10px] text-muted-foreground/50 transition-colors group-hover:text-muted-foreground">
+                {isPending ? "…" : "Usage"}
+              </span>
+            ) : null}
+          </button>
+        }
+      />
+      <PopoverPopup side="top" align="end" className="w-72 max-w-none p-0">
+        <ProviderUsagePendingPopoverContent
+          provider={provider}
+          error={error}
+          isPending={isPending}
+          refresh={refresh}
+        />
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 interface ActiveThreadUsageTarget {
   /** Usage-provider kind the open thread runs on, when resolvable. */
   readonly provider: AnyUsageProviderKind | null;
@@ -561,9 +746,17 @@ function useActiveThreadUsageProvider(
     // Resolve the instance's driver; default instance ids equal their driver
     // slug, so fall back to that invariant only for the known defaults
     // instead of guessing from arbitrary custom instance ids.
-    const driver =
-      providers.find((provider) => provider.instanceId === instanceId)?.driver ??
-      (instanceId in DRIVER_TO_USAGE_KIND ? instanceId : null);
+    const provider = providers.find((entry) => entry.instanceId === instanceId);
+    if (provider !== undefined) {
+      if (!isDefaultProviderInstance(provider)) {
+        return { provider: null, threadKey };
+      }
+      return {
+        provider: DRIVER_TO_USAGE_KIND[provider.driver] ?? null,
+        threadKey,
+      };
+    }
+    const driver = instanceId in DRIVER_TO_USAGE_KIND ? instanceId : null;
     return {
       provider: driver === null ? null : (DRIVER_TO_USAGE_KIND[driver] ?? null),
       threadKey,
@@ -579,6 +772,7 @@ function ProviderUsagePill({
   nowMs,
   isPending,
   refresh,
+  onOpenChange,
 }: {
   snapshot: ProviderUsageSnapshot;
   availableProviders: ReadonlyArray<UsageProviderKind>;
@@ -588,11 +782,12 @@ function ProviderUsagePill({
   nowMs: number;
   isPending: boolean;
   refresh: () => void;
+  onOpenChange: (open: boolean) => void;
 }) {
   const displayName = providerDisplayName(snapshot.provider);
   const used = snapshot.status === "ok" ? maxPercentUsed(snapshot) : null;
   return (
-    <Popover>
+    <Popover onOpenChange={onOpenChange}>
       <PopoverTrigger
         render={
           <button
@@ -660,14 +855,99 @@ function ProviderUsagePill({
 export function ProviderUsageStatus() {
   const primaryEnvironment = usePrimaryEnvironment();
   const environmentId = primaryEnvironment?.environmentId ?? null;
+  const [liveUsageRequest, setLiveUsageRequest] = useState<LiveUsageRequest | null>(null);
+  const meteredContext = useMeteredProviderContext();
+  const meteredProviders = meteredContext.providers;
+  const liveUsageRequested =
+    environmentId !== null &&
+    liveUsageRequest?.environmentId === environmentId &&
+    liveUsageRequest.contextKey === meteredContext.key;
   const { data, error, isPending, refresh } = useEnvironmentQuery(
-    environmentId === null ? null : serverEnvironment.providerUsage({ environmentId, input: {} }),
+    environmentId === null || !liveUsageRequested
+      ? null
+      : serverEnvironment.providerUsage({
+          environmentId,
+          input: { contextKey: liveUsageRequest?.contextKey ?? meteredContext.key },
+        }),
   );
   const nowMs = useRelativeTimeTick(30_000);
   const threadTarget = useActiveThreadUsageProvider(environmentId);
   const threadProvider = threadTarget.provider;
   const unmeteredProviders = useUnmeteredProviders();
   const [manualProvider, setManualProvider] = useState<UsageProviderKind | null>(null);
+  const refreshInFlightRef = useRef(false);
+
+  const requestLiveUsage = useCallback(() => {
+    if (environmentId === null) return;
+    setLiveUsageRequest({ environmentId, contextKey: meteredContext.key });
+  }, [environmentId, meteredContext.key]);
+
+  const requestRefresh = useCallback(() => {
+    if (isPending || refreshInFlightRef.current) {
+      return;
+    }
+    refreshInFlightRef.current = true;
+    refresh();
+    window.setTimeout(() => {
+      refreshInFlightRef.current = false;
+    }, 1_000);
+  }, [isPending, refresh]);
+
+  const handleLiveUsageOpenChange = useCallback(
+    (open: boolean) => {
+      if (!open || environmentId === null) return;
+      if (!liveUsageRequested) {
+        requestLiveUsage();
+        return;
+      }
+      if (isPending || liveUsageIsFresh(data, nowMs)) {
+        return;
+      }
+      requestRefresh();
+    },
+    [data, environmentId, isPending, liveUsageRequested, nowMs, requestLiveUsage, requestRefresh],
+  );
+
+  useEffect(() => {
+    setLiveUsageRequest(null);
+  }, [environmentId, meteredContext.key]);
+
+  useEffect(() => {
+    if (!isPending) {
+      refreshInFlightRef.current = false;
+    }
+  }, [isPending, data, error]);
+
+  useEffect(() => {
+    const startupKey = environmentId === null ? null : `${environmentId}:${meteredContext.key}`;
+    if (
+      startupKey === null ||
+      startupLiveUsageLoadKeys.has(startupKey) ||
+      environmentId === null ||
+      liveUsageRequested ||
+      meteredProviders.length === 0
+    ) {
+      return;
+    }
+    startupLiveUsageLoadKeys.add(startupKey);
+    requestLiveUsage();
+  }, [
+    environmentId,
+    liveUsageRequested,
+    meteredContext.key,
+    meteredProviders.length,
+    requestLiveUsage,
+  ]);
+
+  useEffect(() => {
+    if (environmentId === null || liveUsageRequested || meteredProviders.length === 0) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      requestLiveUsage();
+    }, LIVE_USAGE_PASSIVE_LOAD_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [environmentId, liveUsageRequested, meteredProviders.length, requestLiveUsage]);
 
   // Entering a thread — including another thread on the same provider —
   // re-pins the meter to that thread's provider until the user explicitly
@@ -680,26 +960,63 @@ export function ProviderUsageStatus() {
     return null;
   }
 
-  // First load (or reconnect) before any usage data has arrived: hold the
-  // pill's footprint with a skeleton so the footer row doesn't jump.
   if (data === null) {
-    if (error !== null && !isPending) {
+    const pinnedMetered =
+      threadProvider === "claude" || threadProvider === "codex"
+        ? meteredProviders.includes(threadProvider)
+          ? threadProvider
+          : undefined
+        : undefined;
+
+    if (pinnedMetered !== undefined) {
+      return (
+        <PendingProviderUsagePill
+          provider={pinnedMetered}
+          showLabel
+          error={error}
+          isPending={isPending}
+          refresh={requestRefresh}
+          onOpenChange={handleLiveUsageOpenChange}
+        />
+      );
+    }
+
+    const pinnedUnmetered =
+      threadProvider === null
+        ? undefined
+        : unmeteredProviders.find((provider) => provider.kind === threadProvider);
+
+    if (pinnedUnmetered !== undefined) {
+      return <UnmeteredProviderPill provider={pinnedUnmetered} />;
+    }
+
+    if (meteredProviders.length === 0 && unmeteredProviders.length === 0) {
       return null;
     }
     return (
-      <div
-        className="flex h-6 shrink-0 items-center gap-1.5 px-1.5"
-        aria-label="Loading subscription usage"
-        aria-busy="true"
-      >
-        <Skeleton className="size-3 rounded-full" />
-        <Skeleton className="h-[3px] w-8 rounded-full" />
-        <Skeleton className="h-2 w-5" />
+      <div className="flex shrink-0 items-center gap-0.5">
+        {meteredProviders.map((provider) => (
+          <PendingProviderUsagePill
+            key={provider}
+            provider={provider}
+            showLabel={meteredProviders.length === 1}
+            error={error}
+            isPending={isPending}
+            refresh={requestRefresh}
+            onOpenChange={handleLiveUsageOpenChange}
+          />
+        ))}
+        {unmeteredProviders.map((provider) => (
+          <UnmeteredProviderPill key={provider.kind} provider={provider} />
+        ))}
       </div>
     );
   }
 
-  const snapshots = data.usage.filter((snapshot) => snapshot.status !== "unavailable");
+  const meteredProviderSet = new Set<UsageProviderKind>(meteredProviders);
+  const snapshots = data.usage.filter(
+    (snapshot) => snapshot.status !== "unavailable" && meteredProviderSet.has(snapshot.provider),
+  );
 
   if (snapshots.length === 0 && unmeteredProviders.length === 0) {
     return null;
@@ -727,7 +1044,8 @@ export function ProviderUsageStatus() {
         showBar
         nowMs={nowMs}
         isPending={isPending}
-        refresh={refresh}
+        refresh={requestRefresh}
+        onOpenChange={handleLiveUsageOpenChange}
       />
     );
   }
@@ -754,7 +1072,8 @@ export function ProviderUsageStatus() {
           showBar={snapshots.length === 1}
           nowMs={nowMs}
           isPending={isPending}
-          refresh={refresh}
+          refresh={requestRefresh}
+          onOpenChange={handleLiveUsageOpenChange}
         />
       ))}
       {unmeteredProviders.map((provider) => (
