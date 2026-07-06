@@ -1,7 +1,8 @@
+import type { FileTreeDirectoryHandle, FileTreeItemHandle } from "@pierre/trees";
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { RefreshCw, Search } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { FolderMinus, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
@@ -32,6 +33,27 @@ function treePath(entry: ProjectEntry): string {
   return entry.kind === "directory" ? `${entry.path}/` : entry.path;
 }
 
+function directoryPathsForEntries(entries: ReadonlyArray<ProjectEntry>): string[] {
+  const directoryPaths = new Set<string>();
+
+  for (const entry of entries) {
+    const segments = entry.path.split("/").filter(Boolean);
+    const directoryDepth = entry.kind === "directory" ? segments.length : segments.length - 1;
+
+    for (let index = 1; index <= directoryDepth; index += 1) {
+      directoryPaths.add(segments.slice(0, index).join("/"));
+    }
+  }
+
+  return [...directoryPaths];
+}
+
+function isFileTreeDirectoryHandle(
+  item: FileTreeItemHandle | null,
+): item is FileTreeDirectoryHandle {
+  return item?.isDirectory() === true;
+}
+
 export default function FileBrowserPanel({
   environmentId,
   cwd,
@@ -47,13 +69,14 @@ export default function FileBrowserPanel({
   );
   const entryKindsRef = useRef<ReadonlyMap<string, ProjectEntry["kind"]>>(entryKinds);
   const treePaths = useMemo(() => entries.map(treePath), [entries]);
+  const directoryPaths = useMemo(() => directoryPathsForEntries(entries), [entries]);
   const previousTreePathsRef = useRef<readonly string[]>([]);
 
   const { model } = useFileTree({
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
-    initialExpansion: 1,
+    initialExpansion: "closed",
     icons: ZRODE_PIERRE_ICONS,
     onSelectionChange: (selectedPaths) => {
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
@@ -72,6 +95,15 @@ export default function FileBrowserPanel({
     previousTreePathsRef.current = treePaths;
     model.resetPaths(treePaths);
   }, [entryKinds, model, treePaths]);
+
+  const collapseAllFiles = useCallback(() => {
+    for (const directoryPath of directoryPaths) {
+      const item = model.getItem(directoryPath);
+      if (isFileTreeDirectoryHandle(item)) {
+        item.collapse();
+      }
+    }
+  }, [directoryPaths, model]);
 
   const fileCount = useMemo(
     () => entries.reduce((count, entry) => count + (entry.kind === "file" ? 1 : 0), 0),
@@ -93,6 +125,15 @@ export default function FileBrowserPanel({
             {entriesQuery.data?.truncated ? " · partial" : ""}
           </div>
         </div>
+        <button
+          type="button"
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+          aria-label="Collapse all files"
+          disabled={directoryPaths.length === 0}
+          onClick={collapseAllFiles}
+        >
+          <FolderMinus className="size-3.5" />
+        </button>
         <button
           type="button"
           className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
