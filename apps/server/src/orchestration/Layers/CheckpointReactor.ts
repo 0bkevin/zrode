@@ -3,6 +3,7 @@ import {
   type CheckpointRef,
   EventId,
   MessageId,
+  type OrchestrationThread,
   type ProjectId,
   ThreadId,
   TurnId,
@@ -35,8 +36,10 @@ import type { OrchestrationDispatchError } from "../Errors.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
+import { truncate } from "@t3tools/shared/String";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const DEFAULT_THREAD_TITLE = "New thread";
 
 type ReactorInput =
   | {
@@ -57,6 +60,26 @@ function sameId(left: string | null | undefined, right: string | null | undefine
     return false;
   }
   return left === right;
+}
+
+function currentCheckpointTurnCount(thread: Pick<OrchestrationThread, "checkpoints">): number {
+  return thread.checkpoints.reduce(
+    (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+    0,
+  );
+}
+
+function autoTitleCandidatesForMessageText(text: string): ReadonlySet<string> {
+  const candidates = new Set<string>();
+  const trimmed = text.trim();
+  if (trimmed.length > 0) {
+    candidates.add(truncate(trimmed));
+  }
+  const withoutPromptEffortPrefix = trimmed.replace(/^Ultrathink:\s*/i, "").trim();
+  if (withoutPromptEffortPrefix.length > 0) {
+    candidates.add(truncate(withoutPromptEffortPrefix));
+  }
+  return candidates;
 }
 
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
@@ -108,6 +131,40 @@ const make = Effect.gen(function* () {
             summary: "Checkpoint revert failed",
             payload: {
               turnCount: input.turnCount,
+              detail: input.detail,
+            },
+            turnId: null,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendEditFailureActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly targetTurnCount: number;
+    readonly detail: string;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("message-edit-failure"),
+      activityId: serverEventId,
+    }).pipe(
+      Effect.flatMap(({ commandId, activityId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: activityId,
+            tone: "error",
+            kind: "message.edit.failed",
+            summary: "Message edit failed",
+            payload: {
+              messageId: input.messageId,
+              targetTurnCount: input.targetTurnCount,
               detail: input.detail,
             },
             turnId: null,
@@ -393,10 +450,7 @@ const make = Effect.gen(function* () {
       const existingPlaceholder = thread.checkpoints.find(
         (checkpoint) => checkpoint.turnId === turnId && checkpoint.status === "missing",
       );
-      const currentTurnCount = thread.checkpoints.reduce(
-        (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-        0,
-      );
+      const currentTurnCount = currentCheckpointTurnCount(thread);
       const nextTurnCount = existingPlaceholder
         ? existingPlaceholder.checkpointTurnCount
         : currentTurnCount + 1;
@@ -499,10 +553,7 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const currentTurnCount = thread.checkpoints.reduce(
-        (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-        0,
-      );
+      const currentTurnCount = currentCheckpointTurnCount(thread);
       const baselineCheckpointRef = checkpointRefForThreadTurn(thread.id, currentTurnCount);
       const baselineExists = yield* checkpointStore.hasCheckpointRef({
         cwd: checkpointCwd,
@@ -581,10 +632,7 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const currentTurnCount = thread.checkpoints.reduce(
-      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-      0,
-    );
+    const currentTurnCount = currentCheckpointTurnCount(thread);
     const baselineCheckpointRef = checkpointRefForThreadTurn(threadId, currentTurnCount);
     const baselineExists = yield* checkpointStore.hasCheckpointRef({
       cwd: checkpointCwd,
@@ -607,94 +655,89 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
-    event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
-  ) {
-    const now = DateTime.formatIso(yield* DateTime.now);
-
-    const thread = yield* resolveThreadDetail(event.payload.threadId);
+  const restoreThreadToTurnCount = Effect.fn("restoreThreadToTurnCount")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnCount: number;
+    readonly appendFailure: (detail: string) => Effect.Effect<unknown>;
+  }) {
+    const thread = yield* resolveThreadDetail(input.threadId);
     if (!thread) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "Thread was not found in read model.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+      yield* input.appendFailure("Thread was not found in read model.");
+      return Option.none<{
+        readonly thread: NonNullable<typeof thread>;
+        readonly currentTurnCount: number;
+      }>();
     }
 
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.payload.threadId);
+    const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
     if (Option.isNone(sessionRuntime)) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "No active provider session with workspace cwd is bound to this thread.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+      yield* input.appendFailure(
+        "No active provider session with workspace cwd is bound to this thread.",
+      );
+      return Option.none<{
+        readonly thread: typeof thread;
+        readonly currentTurnCount: number;
+      }>();
     }
     if (!isGitWorkspace(sessionRuntime.value.cwd)) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "Checkpoints are unavailable because this project is not a git repository.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+      yield* input.appendFailure(
+        "Checkpoints are unavailable because this project is not a git repository.",
+      );
+      return Option.none<{
+        readonly thread: typeof thread;
+        readonly currentTurnCount: number;
+      }>();
     }
 
-    const currentTurnCount = thread.checkpoints.reduce(
-      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-      0,
-    );
+    const currentTurnCount = currentCheckpointTurnCount(thread);
 
-    if (event.payload.turnCount > currentTurnCount) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Checkpoint turn count ${event.payload.turnCount} exceeds current turn count ${currentTurnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+    if (input.turnCount > currentTurnCount) {
+      yield* input.appendFailure(
+        `Checkpoint turn count ${input.turnCount} exceeds current turn count ${currentTurnCount}.`,
+      );
+      return Option.none<{
+        readonly thread: typeof thread;
+        readonly currentTurnCount: number;
+      }>();
     }
 
     const targetCheckpointRef =
-      event.payload.turnCount === 0
-        ? checkpointRefForThreadTurn(event.payload.threadId, 0)
+      input.turnCount === 0
+        ? checkpointRefForThreadTurn(input.threadId, 0)
         : thread.checkpoints.find(
-            (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
+            (checkpoint) => checkpoint.checkpointTurnCount === input.turnCount,
           )?.checkpointRef;
 
     if (!targetCheckpointRef) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Checkpoint ref for turn ${event.payload.turnCount} is unavailable in read model.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+      yield* input.appendFailure(
+        `Checkpoint ref for turn ${input.turnCount} is unavailable in read model.`,
+      );
+      return Option.none<{
+        readonly thread: typeof thread;
+        readonly currentTurnCount: number;
+      }>();
     }
 
     const restored = yield* checkpointStore.restoreCheckpoint({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
+      fallbackToHead: input.turnCount === 0,
     });
     if (!restored) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+      yield* input.appendFailure(
+        `Filesystem checkpoint is unavailable for turn ${input.turnCount}.`,
+      );
+      return Option.none<{
+        readonly thread: typeof thread;
+        readonly currentTurnCount: number;
+      }>();
     }
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
     yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
-    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
+    const rolledBackTurns = Math.max(0, currentTurnCount - input.turnCount);
     if (rolledBackTurns > 0) {
       yield* providerService.rollbackConversation({
         threadId: sessionRuntime.value.threadId,
@@ -704,7 +747,7 @@ const make = Effect.gen(function* () {
 
     const staleCheckpointRefs: Array<CheckpointRef> = [];
     for (const checkpoint of thread.checkpoints) {
-      if (checkpoint.checkpointTurnCount > event.payload.turnCount) {
+      if (checkpoint.checkpointTurnCount > input.turnCount) {
         staleCheckpointRefs.push(checkpoint.checkpointRef);
       }
     }
@@ -714,6 +757,29 @@ const make = Effect.gen(function* () {
         cwd: sessionRuntime.value.cwd,
         checkpointRefs: staleCheckpointRefs,
       });
+    }
+
+    return Option.some({ thread, currentTurnCount });
+  });
+
+  const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+  ) {
+    const now = DateTime.formatIso(yield* DateTime.now);
+
+    const restored = yield* restoreThreadToTurnCount({
+      threadId: event.payload.threadId,
+      turnCount: event.payload.turnCount,
+      appendFailure: (detail) =>
+        appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void)),
+    });
+    if (Option.isNone(restored)) {
+      return;
     }
 
     yield* orchestrationEngine
@@ -737,6 +803,141 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const resolveLastUserMessageEditStaleReason = Effect.fn("resolveLastUserMessageEditStaleReason")(
+    function* (
+      event: Extract<OrchestrationEvent, { type: "thread.last-user-message-edit-requested" }>,
+    ) {
+      const thread = yield* resolveThreadDetail(event.payload.threadId);
+      if (!thread) {
+        return "Thread was not found in read model.";
+      }
+
+      if (thread.session?.status === "starting" || thread.session?.status === "running") {
+        return "Thread has an active turn.";
+      }
+
+      const liveCurrentTurnCount = currentCheckpointTurnCount(thread);
+      if (liveCurrentTurnCount !== event.payload.expectedCurrentTurnCount) {
+        return `Thread changed after the edit was requested; expected current turn count ${event.payload.expectedCurrentTurnCount} but found ${liveCurrentTurnCount}.`;
+      }
+
+      const messageIndex = thread.messages.findIndex(
+        (message) => message.id === event.payload.messageId,
+      );
+      const message = messageIndex >= 0 ? thread.messages[messageIndex] : undefined;
+      if (!message || message.role !== "user") {
+        return `User message '${event.payload.messageId}' is no longer present.`;
+      }
+
+      const latestUserMessage = thread.messages.findLast((entry) => entry.role === "user");
+      if (latestUserMessage?.id !== event.payload.messageId) {
+        return "A newer user message exists.";
+      }
+
+      if ((message.attachments?.length ?? 0) > 0) {
+        return `User message '${event.payload.messageId}' now has attachments.`;
+      }
+
+      const checkpoint = thread.checkpoints.find(
+        (entry) =>
+          entry.turnId === event.payload.checkpointTurnId &&
+          entry.checkpointTurnCount === event.payload.checkpointTurnCount,
+      );
+      if (!checkpoint) {
+        return "The checkpointed assistant turn is no longer available.";
+      }
+
+      const liveTargetTurnCount = Math.max(0, checkpoint.checkpointTurnCount - 1);
+      if (liveTargetTurnCount !== event.payload.targetTurnCount) {
+        return `Edit target turn count changed from ${event.payload.targetTurnCount} to ${liveTargetTurnCount}.`;
+      }
+
+      return null;
+    },
+  );
+
+  const handleLastUserMessageEditRequested = Effect.fn("handleLastUserMessageEditRequested")(
+    function* (
+      event: Extract<OrchestrationEvent, { type: "thread.last-user-message-edit-requested" }>,
+    ) {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const staleReason = yield* resolveLastUserMessageEditStaleReason(event);
+      if (staleReason !== null) {
+        yield* appendEditFailureActivity({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          targetTurnCount: event.payload.targetTurnCount,
+          detail: staleReason,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+
+      const restored = yield* restoreThreadToTurnCount({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.targetTurnCount,
+        appendFailure: (detail) =>
+          appendEditFailureActivity({
+            threadId: event.payload.threadId,
+            messageId: event.payload.messageId,
+            targetTurnCount: event.payload.targetTurnCount,
+            detail,
+            createdAt: now,
+          }).pipe(Effect.catch(() => Effect.void)),
+      });
+      if (Option.isNone(restored)) {
+        return;
+      }
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.revert.complete",
+        commandId: yield* serverCommandId("message-edit-revert-complete"),
+        threadId: event.payload.threadId,
+        turnCount: event.payload.targetTurnCount,
+        createdAt: now,
+      });
+
+      if (event.payload.targetTurnCount === 0 && event.payload.titleSeed !== undefined) {
+        const previousMessage = restored.value.thread.messages.find(
+          (message) => message.id === event.payload.messageId && message.role === "user",
+        );
+        const previousTitleCandidates = previousMessage
+          ? autoTitleCandidatesForMessageText(previousMessage.text)
+          : new Set<string>();
+        const currentTitle = restored.value.thread.title.trim();
+        const canReplaceTitle =
+          currentTitle === DEFAULT_THREAD_TITLE || previousTitleCandidates.has(currentTitle);
+        if (canReplaceTitle) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.meta.update",
+            commandId: yield* serverCommandId("message-edit-title-update"),
+            threadId: event.payload.threadId,
+            title: truncate(event.payload.titleSeed),
+          });
+        }
+      }
+
+      yield* orchestrationEngine.dispatch({
+        type: "thread.turn.start",
+        commandId: yield* serverCommandId("message-edit-turn-start"),
+        threadId: event.payload.threadId,
+        message: {
+          messageId: event.payload.messageId,
+          role: "user",
+          text: event.payload.text,
+          attachments: [],
+        },
+        ...(event.payload.modelSelection !== undefined
+          ? { modelSelection: event.payload.modelSelection }
+          : {}),
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        runtimeMode: restored.value.thread.runtimeMode,
+        interactionMode: restored.value.thread.interactionMode,
+        createdAt: now,
+      });
+    },
+  );
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
@@ -750,6 +951,23 @@ const make = Effect.gen(function* () {
             appendRevertFailureActivity({
               threadId: event.payload.threadId,
               turnCount: event.payload.turnCount,
+              detail: error.message,
+              createdAt,
+            }),
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (event.type === "thread.last-user-message-edit-requested") {
+      yield* handleLastUserMessageEditRequested(event).pipe(
+        Effect.catch((error) =>
+          Effect.flatMap(nowIso, (createdAt) =>
+            appendEditFailureActivity({
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              targetTurnCount: event.payload.targetTurnCount,
               detail: error.message,
               createdAt,
             }),
@@ -839,6 +1057,7 @@ const make = Effect.gen(function* () {
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
           event.type !== "thread.checkpoint-revert-requested" &&
+          event.type !== "thread.last-user-message-edit-requested" &&
           event.type !== "thread.turn-diff-completed"
         ) {
           return Effect.void;

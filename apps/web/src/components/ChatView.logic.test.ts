@@ -1,4 +1,13 @@
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  EnvironmentId,
+  EventId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Thread } from "../types";
@@ -9,11 +18,13 @@ import {
   buildThreadTurnInterruptInput,
   canHandOffThread,
   createLocalDispatchSnapshot,
+  deriveRetryableFailedTurnMessageIds,
   deriveComposerSendState,
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
+  resolveEditableLastUserMessage,
   resolveSendEnvMode,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
@@ -22,6 +33,9 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+const userMessageId = MessageId.make("message-user-1");
+const assistantMessageId = MessageId.make("message-assistant-1");
+const turnId = TurnId.make("turn-1");
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {
@@ -71,6 +85,192 @@ const readySession = {
   lastError: null,
   updatedAt: "2026-03-29T00:00:10.000Z",
 };
+
+function makeUserMessage(
+  overrides: Partial<Thread["messages"][number]> = {},
+): Thread["messages"][number] {
+  return {
+    id: userMessageId,
+    role: "user",
+    text: "hello",
+    attachments: [],
+    turnId: null,
+    streaming: false,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function makeAssistantMessage(
+  overrides: Partial<Thread["messages"][number]> = {},
+): Thread["messages"][number] {
+  return {
+    id: assistantMessageId,
+    role: "assistant",
+    text: "assistant output",
+    turnId: null,
+    streaming: false,
+    createdAt: "2026-03-29T00:00:02.000Z",
+    updatedAt: "2026-03-29T00:00:02.000Z",
+    ...overrides,
+  };
+}
+
+function makeCheckpoint(
+  overrides: Partial<Thread["checkpoints"][number]> = {},
+): Thread["checkpoints"][number] {
+  return {
+    turnId,
+    checkpointTurnCount: 1,
+    checkpointRef: CheckpointRef.make("refs/checkpoints/thread-1/1"),
+    status: "ready",
+    files: [],
+    assistantMessageId,
+    completedAt: "2026-03-29T00:00:10.000Z",
+    ...overrides,
+  };
+}
+
+function makeTurnStartFailureActivity(
+  overrides: Partial<Thread["activities"][number]> = {},
+): Thread["activities"][number] {
+  return {
+    id: EventId.make("activity-provider-failure"),
+    tone: "error",
+    kind: "provider.turn.start.failed",
+    summary: "Provider failed to start turn",
+    payload: {
+      detail: "Rate limit exceeded.",
+      messageId: userMessageId,
+      retryable: true,
+    },
+    turnId: null,
+    sequence: 1,
+    createdAt: now,
+    ...overrides,
+  };
+}
+
+describe("resolveEditableLastUserMessage", () => {
+  const editableThread = () =>
+    makeThread({
+      session: readySession,
+      messages: [
+        makeUserMessage(),
+        makeAssistantMessage({
+          turnId,
+        }),
+      ],
+      checkpoints: [makeCheckpoint()],
+    });
+
+  const resolve = (thread: Thread, overrides = {}) =>
+    resolveEditableLastUserMessage({
+      thread,
+      isServerThread: true,
+      isSendBusy: false,
+      isConnecting: false,
+      isRevertingCheckpoint: false,
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      ...overrides,
+    });
+
+  it("allows editing the latest checkpointed text-only user message", () => {
+    expect(resolve(editableThread())).toEqual({
+      editable: true,
+      messageId: userMessageId,
+      targetTurnCount: 0,
+    });
+  });
+
+  it("rejects older user messages by returning the latest editable candidate only", () => {
+    const secondUserMessageId = MessageId.make("message-user-2");
+    expect(
+      resolve(
+        makeThread({
+          session: readySession,
+          messages: [
+            makeUserMessage(),
+            makeAssistantMessage({ turnId }),
+            makeUserMessage({
+              id: secondUserMessageId,
+              text: "follow up",
+              createdAt: "2026-03-29T00:01:00.000Z",
+              updatedAt: "2026-03-29T00:01:00.000Z",
+            }),
+          ],
+          checkpoints: [makeCheckpoint()],
+        }),
+      ),
+    ).toEqual({
+      editable: false,
+      reason: "missing-checkpoint",
+      messageId: secondUserMessageId,
+    });
+  });
+
+  it("rejects image messages", () => {
+    expect(
+      resolve(
+        makeThread({
+          session: readySession,
+          messages: [
+            makeUserMessage({
+              attachments: [
+                {
+                  type: "image",
+                  id: "image-1",
+                  name: "image.png",
+                  mimeType: "image/png",
+                  sizeBytes: 100,
+                },
+              ],
+            }),
+            makeAssistantMessage({ turnId }),
+          ],
+          checkpoints: [makeCheckpoint()],
+        }),
+      ),
+    ).toMatchObject({ editable: false, reason: "message-has-attachments" });
+  });
+
+  it("rejects running, sending, and reverting states", () => {
+    expect(resolve(editableThread(), { isSendBusy: true })).toMatchObject({
+      editable: false,
+      reason: "thread-busy",
+    });
+    expect(resolve(editableThread(), { isRevertingCheckpoint: true })).toMatchObject({
+      editable: false,
+      reason: "thread-busy",
+    });
+    expect(
+      resolve(
+        makeThread({
+          ...editableThread(),
+          session: { ...readySession, status: "running", activeTurnId: turnId },
+        }),
+      ),
+    ).toMatchObject({ editable: false, reason: "thread-busy" });
+  });
+
+  it("rejects messages without a following checkpointed assistant turn", () => {
+    expect(
+      resolve(
+        makeThread({
+          session: readySession,
+          messages: [makeUserMessage(), makeAssistantMessage({ turnId })],
+          checkpoints: [],
+        }),
+      ),
+    ).toEqual({
+      editable: false,
+      reason: "missing-checkpoint",
+      messageId: userMessageId,
+    });
+  });
+});
 
 describe("canHandOffThread", () => {
   it("rejects threads that have not started", () => {
@@ -138,6 +338,60 @@ describe("buildThreadTurnInterruptInput", () => {
     expect(buildThreadTurnInterruptInput(makeThread({ session: readySession }))).toEqual({
       threadId,
     });
+  });
+});
+
+describe("deriveRetryableFailedTurnMessageIds", () => {
+  it("returns the latest user message id when its latest turn-start failure is retryable", () => {
+    expect(
+      Array.from(
+        deriveRetryableFailedTurnMessageIds(
+          makeThread({
+            session: readySession,
+            messages: [makeUserMessage()],
+            activities: [makeTurnStartFailureActivity()],
+          }),
+        ),
+      ),
+    ).toEqual([userMessageId]);
+  });
+
+  it("ignores non-retryable failures and active sessions", () => {
+    expect(
+      deriveRetryableFailedTurnMessageIds(
+        makeThread({
+          session: readySession,
+          messages: [makeUserMessage()],
+          activities: [
+            makeTurnStartFailureActivity({
+              payload: { detail: "Provider rejected the request.", messageId: userMessageId },
+            }),
+          ],
+        }),
+      ).size,
+    ).toBe(0);
+
+    expect(
+      deriveRetryableFailedTurnMessageIds(
+        makeThread({
+          session: { ...readySession, status: "running", activeTurnId: TurnId.make("turn-1") },
+          messages: [makeUserMessage()],
+          activities: [makeTurnStartFailureActivity()],
+        }),
+      ).size,
+    ).toBe(0);
+  });
+
+  it("does not allow retry after assistant output exists for the message", () => {
+    expect(
+      deriveRetryableFailedTurnMessageIds(
+        makeThread({
+          session: readySession,
+          messages: [makeUserMessage(), makeAssistantMessage()],
+          activities: [makeTurnStartFailureActivity()],
+        }),
+      ).size,
+    ).toBe(0);
   });
 });
 

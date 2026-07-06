@@ -59,6 +59,56 @@ type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function hasRetryableTurnStartFailureForMessage(
+  thread: OrchestrationReadModel["threads"][number],
+  messageId: string,
+): boolean {
+  for (let index = thread.activities.length - 1; index >= 0; index -= 1) {
+    const activity = thread.activities[index];
+    if (!activity || activity.kind !== "provider.turn.start.failed") {
+      continue;
+    }
+    const payload = isRecord(activity.payload) ? activity.payload : null;
+    if (payload?.messageId === messageId) {
+      return payload.retryable === true;
+    }
+  }
+  return false;
+}
+
+function findCheckpointAfterUserMessageForEdit(
+  thread: OrchestrationReadModel["threads"][number],
+  userMessageIndex: number,
+): OrchestrationReadModel["threads"][number]["checkpoints"][number] | null {
+  const assistantTurnIds = new Set<string>();
+  for (let index = userMessageIndex + 1; index < thread.messages.length; index += 1) {
+    const message = thread.messages[index];
+    if (!message) {
+      continue;
+    }
+    if (message.role === "user") {
+      break;
+    }
+    if (message.role === "assistant" && message.turnId !== null) {
+      assistantTurnIds.add(message.turnId);
+    }
+  }
+
+  return (
+    thread.checkpoints
+      .filter((checkpoint) => assistantTurnIds.has(checkpoint.turnId))
+      .toSorted(
+        (left, right) =>
+          left.checkpointTurnCount - right.checkpointTurnCount ||
+          left.completedAt.localeCompare(right.completedAt),
+      )[0] ?? null
+  );
+}
+
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -511,6 +561,167 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [userMessageEvent, turnStartRequestedEvent];
+    }
+
+    case "thread.turn.retry": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+
+      if (
+        targetThread.session?.status === "starting" ||
+        targetThread.session?.status === "running"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already has an active turn.`,
+        });
+      }
+
+      const messageIndex = targetThread.messages.findIndex(
+        (message) => message.id === command.messageId,
+      );
+      const message = messageIndex >= 0 ? targetThread.messages[messageIndex] : undefined;
+      if (!message || message.role !== "user") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' does not exist on thread '${command.threadId}'.`,
+        });
+      }
+
+      const latestUserMessage = targetThread.messages.findLast((entry) => entry.role === "user");
+      if (latestUserMessage?.id !== command.messageId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Only the latest user message on thread '${command.threadId}' can be retried.`,
+        });
+      }
+
+      const hasLaterAssistantOutput = targetThread.messages
+        .slice(messageIndex + 1)
+        .some((entry) => entry.role === "assistant");
+      if (hasLaterAssistantOutput) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' already has assistant output and cannot be retried.`,
+        });
+      }
+
+      if (!hasRetryableTurnStartFailureForMessage(targetThread, command.messageId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' does not have a retryable turn-start failure.`,
+        });
+      }
+
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          modelSelection: targetThread.modelSelection,
+          runtimeMode: targetThread.runtimeMode,
+          interactionMode: targetThread.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.last-user-message.edit": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+
+      if (
+        targetThread.session?.status === "starting" ||
+        targetThread.session?.status === "running"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already has an active turn.`,
+        });
+      }
+
+      const editedText = command.text.trim();
+      if (editedText.length === 0) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Edited message text cannot be empty.",
+        });
+      }
+
+      const messageIndex = targetThread.messages.findIndex(
+        (message) => message.id === command.messageId,
+      );
+      const message = messageIndex >= 0 ? targetThread.messages[messageIndex] : undefined;
+      if (!message || message.role !== "user") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' does not exist on thread '${command.threadId}'.`,
+        });
+      }
+
+      const latestUserMessage = targetThread.messages.findLast((entry) => entry.role === "user");
+      if (latestUserMessage?.id !== command.messageId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Only the latest user message on thread '${command.threadId}' can be edited.`,
+        });
+      }
+
+      if ((message.attachments?.length ?? 0) > 0) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' has attachments and cannot be edited.`,
+        });
+      }
+
+      const checkpoint = findCheckpointAfterUserMessageForEdit(targetThread, messageIndex);
+      if (!checkpoint) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `User message '${command.messageId}' does not have a checkpointed assistant turn to replace.`,
+        });
+      }
+      const targetTurnCount = Math.max(0, checkpoint.checkpointTurnCount - 1);
+      const expectedCurrentTurnCount = targetThread.checkpoints.reduce(
+        (maxTurnCount, entry) => Math.max(maxTurnCount, entry.checkpointTurnCount),
+        0,
+      );
+
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.last-user-message-edit-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          text: editedText,
+          targetTurnCount,
+          checkpointTurnId: checkpoint.turnId,
+          checkpointTurnCount: checkpoint.checkpointTurnCount,
+          expectedCurrentTurnCount,
+          ...(command.modelSelection !== undefined
+            ? { modelSelection: command.modelSelection }
+            : {}),
+          ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
+          createdAt: command.createdAt,
+        },
+      };
     }
 
     case "thread.turn.interrupt": {

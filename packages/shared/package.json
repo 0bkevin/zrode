@@ -87,6 +87,10 @@
       "types": "./src/orchestrationTiming.ts",
       "import": "./src/orchestrationTiming.ts"
     },
+    "./orchestrationRevert": {
+      "types": "./src/orchestrationRevert.ts",
+      "import": "./src/orchestrationRevert.ts"
+    },
     "./remote": {
       "types": "./src/remote.ts",
       "import": "./src/remote.ts"

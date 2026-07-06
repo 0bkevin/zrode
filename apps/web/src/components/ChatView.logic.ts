@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   isProviderDriverKind,
+  type MessageId,
   ProjectId,
   type ModelSelection,
   type ProviderDriverKind,
@@ -84,6 +85,157 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
     threadId: thread.id,
     ...(runningTurnId !== null ? { turnId: runningTurnId } : {}),
   };
+}
+
+export type EditableLastUserMessageReason =
+  | "no-thread"
+  | "not-server-thread"
+  | "no-user-message"
+  | "thread-busy"
+  | "message-has-attachments"
+  | "missing-checkpoint";
+
+export type EditableLastUserMessageResolution =
+  | {
+      readonly editable: true;
+      readonly messageId: MessageId;
+      readonly targetTurnCount: number;
+    }
+  | {
+      readonly editable: false;
+      readonly reason: EditableLastUserMessageReason;
+      readonly messageId?: MessageId;
+    };
+
+export function resolveEditableLastUserMessage(input: {
+  readonly thread: Pick<Thread, "messages" | "checkpoints" | "session"> | null | undefined;
+  readonly isServerThread: boolean;
+  readonly isSendBusy: boolean;
+  readonly isConnecting: boolean;
+  readonly isRevertingCheckpoint: boolean;
+  readonly hasPendingApproval: boolean;
+  readonly hasPendingUserInput: boolean;
+  readonly environmentUnavailable?: boolean | undefined;
+}): EditableLastUserMessageResolution {
+  if (!input.thread) {
+    return { editable: false, reason: "no-thread" };
+  }
+  if (!input.isServerThread) {
+    return { editable: false, reason: "not-server-thread" };
+  }
+
+  const latestUserMessageIndex = input.thread.messages.findLastIndex(
+    (message) => message.role === "user",
+  );
+  const latestUserMessage = input.thread.messages[latestUserMessageIndex];
+  if (!latestUserMessage || latestUserMessage.role !== "user") {
+    return { editable: false, reason: "no-user-message" };
+  }
+
+  if (
+    input.isSendBusy ||
+    input.isConnecting ||
+    input.isRevertingCheckpoint ||
+    input.hasPendingApproval ||
+    input.hasPendingUserInput ||
+    input.environmentUnavailable === true ||
+    input.thread.session?.status === "starting" ||
+    input.thread.session?.status === "running"
+  ) {
+    return {
+      editable: false,
+      reason: "thread-busy",
+      messageId: latestUserMessage.id,
+    };
+  }
+
+  if ((latestUserMessage.attachments?.length ?? 0) > 0) {
+    return {
+      editable: false,
+      reason: "message-has-attachments",
+      messageId: latestUserMessage.id,
+    };
+  }
+
+  const assistantTurnIds = new Set<TurnId>();
+  for (let index = latestUserMessageIndex + 1; index < input.thread.messages.length; index += 1) {
+    const message = input.thread.messages[index];
+    if (!message) continue;
+    if (message.role === "user") break;
+    if (message.role === "assistant" && message.turnId !== null) {
+      assistantTurnIds.add(message.turnId);
+    }
+  }
+
+  const checkpoint = input.thread.checkpoints
+    .filter((candidate) => assistantTurnIds.has(candidate.turnId))
+    .toSorted(
+      (left, right) =>
+        left.checkpointTurnCount - right.checkpointTurnCount ||
+        left.completedAt.localeCompare(right.completedAt),
+    )[0];
+  if (!checkpoint) {
+    return {
+      editable: false,
+      reason: "missing-checkpoint",
+      messageId: latestUserMessage.id,
+    };
+  }
+
+  return {
+    editable: true,
+    messageId: latestUserMessage.id,
+    targetTurnCount: Math.max(0, checkpoint.checkpointTurnCount - 1),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+export function deriveRetryableFailedTurnMessageIds(
+  thread: Pick<Thread, "messages" | "activities" | "session"> | null | undefined,
+): Set<MessageId> {
+  const result = new Set<MessageId>();
+  if (!thread) {
+    return result;
+  }
+  if (thread.session?.status === "starting" || thread.session?.status === "running") {
+    return result;
+  }
+
+  const latestUserMessage = thread.messages.findLast((message) => message.role === "user");
+  if (!latestUserMessage) {
+    return result;
+  }
+  const latestUserMessageIndex = thread.messages.findIndex(
+    (message) => message.id === latestUserMessage.id,
+  );
+  if (
+    latestUserMessageIndex >= 0 &&
+    thread.messages
+      .slice(latestUserMessageIndex + 1)
+      .some((message) => message.role === "assistant")
+  ) {
+    return result;
+  }
+
+  for (let index = thread.activities.length - 1; index >= 0; index -= 1) {
+    const activity = thread.activities[index];
+    if (!activity || activity.kind !== "provider.turn.start.failed") {
+      continue;
+    }
+    const payload = isRecord(activity.payload) ? activity.payload : null;
+    if (payload?.messageId !== latestUserMessage.id) {
+      continue;
+    }
+    if (payload.retryable === true) {
+      result.add(latestUserMessage.id);
+    }
+    return result;
+  }
+
+  return result;
 }
 
 export function reconcileMountedTerminalThreadIds(input: {
