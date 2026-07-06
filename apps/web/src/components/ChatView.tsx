@@ -1140,6 +1140,11 @@ function ChatViewContent(props: ChatViewProps) {
   const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
     Record<string, string | null>
   >({});
+  // Session `lastError` messages the user dismissed; without this, clearing the local
+  // error falls back to `session.lastError` and the banner can never be closed.
+  const [dismissedSessionErrorsByThreadKey, setDismissedSessionErrorsByThreadKey] = useState<
+    Record<string, string>
+  >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -1271,9 +1276,35 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const isServerThread = routeKind === "server" && serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
-  const threadError = isServerThread
-    ? (localServerError ?? serverThread?.session?.lastError ?? null)
-    : localDraftError;
+  const sessionLastError = serverThread?.session?.lastError ?? null;
+  // A fresh failure always arrives with a non-running status and a bumped `updatedAt`, so
+  // `updatedAt::message` uniquely identifies one error occurrence — even when two
+  // consecutive turns fail with identical text. Keying dismissal on the message alone would
+  // permanently hide the second failure; keying on this signature re-surfaces it.
+  const sessionErrorSignature =
+    serverThread?.session && sessionLastError !== null
+      ? `${serverThread.session.updatedAt}::${sessionLastError}`
+      : null;
+  // While a new turn is running, `lastError` is only the stale, preserved value from a prior
+  // turn (fresh errors always land with a settled status). Hide it so the old error neither
+  // lingers over an in-progress turn nor spuriously reappears after being dismissed.
+  const isSessionRunning = serverThread?.session?.status === "running";
+  const visibleSessionError =
+    sessionLastError !== null &&
+    !isSessionRunning &&
+    sessionErrorSignature !== dismissedSessionErrorsByThreadKey[routeThreadKey]
+      ? sessionLastError
+      : null;
+  const threadError = isServerThread ? (localServerError ?? visibleSessionError) : localDraftError;
+  useEffect(() => {
+    if (sessionLastError !== null) return;
+    // Error cleared (turn succeeded): drop any dismissal record so it can't linger.
+    setDismissedSessionErrorsByThreadKey((existing) => {
+      if (!(routeThreadKey in existing)) return existing;
+      const { [routeThreadKey]: _dismissed, ...rest } = existing;
+      return rest;
+    });
+  }, [routeThreadKey, sessionLastError]);
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
@@ -2273,6 +2304,26 @@ function ChatViewContent(props: ChatViewProps) {
             [routeThreadKey]: nextError,
           };
         });
+        // Dismissing must also suppress `session.lastError`, or the banner reappears through
+        // the fallback and can never be closed. Only do so when the session error was the
+        // *visible* banner (no local error layered on top) — otherwise dismissing a
+        // client-side error would silently swallow a session error the user never saw.
+        if (nextError === null && localServerError === null) {
+          const session = serverThread.session;
+          const sessionError = session?.lastError ?? null;
+          if (session && sessionError !== null) {
+            const signature = `${session.updatedAt}::${sessionError}`;
+            setDismissedSessionErrorsByThreadKey((existing) => {
+              if (existing[routeThreadKey] === signature) {
+                return existing;
+              }
+              return {
+                ...existing,
+                [routeThreadKey]: signature,
+              };
+            });
+          }
+        }
         return;
       }
       const localDraftErrorKey = draftId ?? targetThreadId;
@@ -2286,7 +2337,7 @@ function ChatViewContent(props: ChatViewProps) {
         };
       });
     },
-    [draftId, routeThreadKey, routeThreadRef, serverThread],
+    [draftId, localServerError, routeThreadKey, routeThreadRef, serverThread],
   );
 
   const focusComposer = useCallback(() => {
@@ -5631,16 +5682,18 @@ function ChatViewContent(props: ChatViewProps) {
             ? null
             : createPortal(topBarElement, topBarSlot)}
 
-        {/* Error banner */}
-        <ProviderStatusBanner status={activeProviderStatus} />
-        <ThreadErrorBanner
-          error={threadError}
-          onDismiss={() => setThreadError(activeThread.id, null)}
-        />
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">
           {/* Chat column */}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* Notification banners float over the chat instead of pushing it down */}
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex flex-col items-center gap-2 px-4 pt-3">
+              <ProviderStatusBanner status={activeProviderStatus} />
+              <ThreadErrorBanner
+                error={threadError}
+                onDismiss={() => setThreadError(activeThread.id, null)}
+              />
+            </div>
             {/* Messages Wrapper */}
             <div className="relative flex min-h-0 flex-1 flex-col">
               {/* Messages — LegendList handles virtualization and scrolling internally */}

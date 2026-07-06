@@ -1,8 +1,9 @@
 import { type ServerProvider } from "@t3tools/contracts";
-import { memo } from "react";
-import { InfoIcon } from "lucide-react";
+import { memo, useEffect, useState } from "react";
+import { InfoIcon, XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { formatProviderDriverKindLabel } from "../../providerModels";
+import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export const ProviderStatusBanner = memo(function ProviderStatusBanner({
@@ -10,7 +11,16 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
 }: {
   status: ServerProvider | null;
 }) {
-  if (!status || status.status === "ready" || status.status === "disabled") {
+  // Dismissal is keyed on the banner content so a new status/message shows again.
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+  const isHidden = !status || status.status === "ready" || status.status === "disabled";
+  // Reset the dismissal once the provider recovers, so a later recurrence with identical
+  // content isn't permanently suppressed by a stale content key.
+  useEffect(() => {
+    if (isHidden) setDismissedKey(null);
+  }, [isHidden]);
+
+  if (isHidden) {
     return null;
   }
 
@@ -26,14 +36,19 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         ? `${providerName} provider is unavailable.`
         : `${providerName} provider has limited availability.`));
 
+  const bannerKey = `${status.driver}:${status.status}:${title}:${message}`;
+  if (bannerKey === dismissedKey) {
+    return null;
+  }
+
   return (
-    <div className="mx-auto w-fit max-w-[calc(100%-2rem)] pt-3">
+    <div className="pointer-events-auto w-fit max-w-full">
       <div
         className={cn(
-          "inline-flex items-center gap-3 rounded-xl border px-3.5 py-3 text-card-foreground text-sm",
+          "flex items-center gap-3 rounded-xl border bg-background/70 px-3.5 py-3 text-card-foreground text-sm shadow-lg/5 backdrop-blur-md",
           status.status === "warning"
-            ? "border-warning/32 bg-warning/4 [&_svg]:text-warning"
-            : "border-destructive/32 bg-destructive/4 text-destructive-foreground [&_svg]:text-destructive",
+            ? "border-warning/32 [&>svg]:text-warning"
+            : "border-destructive/32 text-destructive-foreground [&>svg]:text-destructive",
         )}
         role="alert"
       >
@@ -49,6 +64,15 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
             </TooltipPopup>
           </Tooltip>
         </div>
+        <Button
+          aria-label="Dismiss notification"
+          className="shrink-0 self-center"
+          onClick={() => setDismissedKey(bannerKey)}
+          size="icon-xs"
+          variant="ghost"
+        >
+          <XIcon />
+        </Button>
       </div>
     </div>
   );
