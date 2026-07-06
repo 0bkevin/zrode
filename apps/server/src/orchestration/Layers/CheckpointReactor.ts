@@ -59,6 +59,10 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
+function isHistoryImportDomainEvent(event: OrchestrationEvent): boolean {
+  return event.metadata.adapterKey?.startsWith("history-import:") ?? false;
+}
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -554,6 +558,10 @@ const make = Effect.gen(function* () {
       { type: "thread.turn-start-requested" | "thread.message-sent" }
     >,
   ) {
+    if (isHistoryImportDomainEvent(event)) {
+      return;
+    }
+
     if (event.type === "thread.message-sent") {
       if (
         event.payload.role !== "user" ||

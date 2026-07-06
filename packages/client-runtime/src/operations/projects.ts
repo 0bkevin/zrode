@@ -215,6 +215,7 @@ export function buildProjectCreateCommand(input: {
     title: inferProjectTitleFromPath(input.workspaceRoot),
     workspaceRoot: input.workspaceRoot,
     createWorkspaceRootIfMissing: true,
+    importSessionHistory: false,
     defaultModelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: DEFAULT_MODEL,

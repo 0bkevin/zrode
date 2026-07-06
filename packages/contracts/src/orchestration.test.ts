@@ -22,14 +22,18 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  ProjectSessionHistoryImportRequestedPayload,
 } from "./orchestration.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
 const decodeThreadTurnDiff = Schema.decodeUnknownEffect(ThreadTurnDiff);
 const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateCommand);
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
+const decodeProjectSessionHistoryImportRequestedPayload = Schema.decodeUnknownEffect(
+  ProjectSessionHistoryImportRequestedPayload,
+);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
 const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartCommand);
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
@@ -38,6 +42,7 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
+const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
 const encodeThreadCreatedPayload = Schema.encodeEffect(ThreadCreatedPayload);
 
 function getOptionValue(
@@ -152,6 +157,120 @@ it.effect("decodes project.create with createWorkspaceRootIfMissing enabled", ()
     });
 
     assert.strictEqual(parsed.createWorkspaceRootIfMissing, true);
+  }),
+);
+
+it.effect("decodes project.create with session history import enabled", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProjectCreateCommand({
+      type: "project.create",
+      commandId: "cmd-1",
+      projectId: "project-1",
+      title: "Project Title",
+      workspaceRoot: "/tmp/workspace",
+      importSessionHistory: true,
+      sessionHistoryImportProviders: ["codex", "claudeAgent"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.importSessionHistory, true);
+    assert.deepStrictEqual(parsed.sessionHistoryImportProviders, [
+      ProviderDriverKind.make("codex"),
+      ProviderDriverKind.make("claudeAgent"),
+    ]);
+  }),
+);
+
+it.effect("decodes project session history import request payloads", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProjectSessionHistoryImportRequestedPayload({
+      projectId: "project-1",
+      workspaceRoot: "/tmp/workspace",
+      providers: ["codex", "opencode"],
+      requestedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.projectId, "project-1");
+    assert.strictEqual(parsed.workspaceRoot, "/tmp/workspace");
+    assert.deepStrictEqual(parsed.providers, [
+      ProviderDriverKind.make("codex"),
+      ProviderDriverKind.make("opencode"),
+    ]);
+    assert.strictEqual(parsed.requestedAt, "2026-01-01T00:00:00.000Z");
+  }),
+);
+
+it.effect(
+  "decodes legacy project session history import request payloads with empty providers",
+  () =>
+    Effect.gen(function* () {
+      const parsed = yield* decodeProjectSessionHistoryImportRequestedPayload({
+        projectId: "project-1",
+        workspaceRoot: "/tmp/workspace",
+        requestedAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      assert.deepStrictEqual(parsed.providers, []);
+    }),
+);
+
+it.effect("decodes project session history import request events", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "evt-project-import-history",
+      aggregateKind: "project",
+      aggregateId: "project-1",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "cmd-1",
+      causationEventId: null,
+      correlationId: "cmd-1",
+      metadata: {},
+      type: "project.session-history-import-requested",
+      payload: {
+        projectId: "project-1",
+        workspaceRoot: "/tmp/workspace",
+        providers: ["codex"],
+        requestedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+    assert.strictEqual(parsed.type, "project.session-history-import-requested");
+    if (parsed.type !== "project.session-history-import-requested") return;
+    assert.strictEqual(parsed.payload.projectId, "project-1");
+    assert.deepStrictEqual(parsed.payload.providers, [ProviderDriverKind.make("codex")]);
+  }),
+);
+
+it.effect("decodes internal thread history import commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.history.import",
+      commandId: "cmd-history-import",
+      threadId: "thread-history-import",
+      projectId: "project-1",
+      title: "Imported Session",
+      modelSelection: {
+        instanceId: "codex",
+        model: "gpt-5.4",
+      },
+      provider: "codex",
+      providerThreadId: "codex-thread-1",
+      messages: [
+        {
+          messageId: "message-1",
+          role: "user",
+          text: "Hello",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.history.import");
+    if (parsed.type !== "thread.history.import") return;
+    assert.strictEqual(parsed.provider, ProviderDriverKind.make("codex"));
+    assert.strictEqual(parsed.messages[0]?.role, "user");
   }),
 );
 
@@ -800,7 +919,7 @@ it.effect("decodes thread.created payloads carrying a handoffSource", () =>
 
 it.effect("decodes legacy thread snapshots without handoffSource to null", () =>
   Effect.gen(function* () {
-    const parsed = yield* Schema.decodeUnknownEffect(OrchestrationThread)({
+    const parsed = yield* decodeOrchestrationThread({
       id: "thread-1",
       projectId: "project-1",
       title: "Thread title",
