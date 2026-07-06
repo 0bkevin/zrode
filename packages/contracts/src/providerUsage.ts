@@ -100,3 +100,76 @@ export const ServerConsumeCodexResetCreditResult = Schema.Struct({
   message: Schema.NullOr(Schema.String),
 });
 export type ServerConsumeCodexResetCreditResult = typeof ServerConsumeCodexResetCreditResult.Type;
+
+// ── Provider usage history (persisted samples, day aggregates) ───────
+//
+// The server records a row per "ok" usage snapshot as they are fetched and
+// serves them back aggregated per provider per local calendar day, powering
+// the usage-heatmap settings page. Days without samples are simply absent.
+
+export const ProviderUsageHistoryDay = Schema.Struct({
+  /** Local calendar day the samples fall on, formatted YYYY-MM-DD. */
+  day: Schema.String,
+  provider: ProviderUsageProviderKind,
+  /** Highest session-window (~5h) utilization observed that day, 0–100. */
+  peakSessionPercent: Schema.NullOr(Schema.Number),
+  /** Mean session-window utilization across the day's samples, 0–100. */
+  avgSessionPercent: Schema.NullOr(Schema.Number),
+  /** Highest weekly-window (~7d) utilization observed that day, 0–100. */
+  peakWeeklyPercent: Schema.NullOr(Schema.Number),
+  sampleCount: Schema.Number,
+});
+export type ProviderUsageHistoryDay = typeof ProviderUsageHistoryDay.Type;
+
+/**
+ * Providers whose per-message token usage zrode can backfill from local
+ * session logs on disk. A superset of the metered (live-usage) providers:
+ * Claude Code transcripts, Codex rollouts, and OpenCode's message store all
+ * record per-message token counts, so their history reaches back before zrode
+ * started sampling. (Cursor and Grok keep no local token usage — only code
+ * stats / a system-prompt size — so they are absent here by design.)
+ */
+export const ProviderTokenActivityKind = Schema.Literals(["claude", "codex", "opencode"]);
+export type ProviderTokenActivityKind = typeof ProviderTokenActivityKind.Type;
+
+/**
+ * Total tokens a subscription processed on one local calendar day, backfilled
+ * from the provider's own local session logs, so history reaches back before
+ * zrode started sampling.
+ */
+export const ProviderTokenActivityDay = Schema.Struct({
+  /** Local calendar day, formatted YYYY-MM-DD. */
+  day: Schema.String,
+  provider: ProviderTokenActivityKind,
+  /** Total tokens processed that day (input + cache + output). */
+  tokens: Schema.Number,
+});
+export type ProviderTokenActivityDay = typeof ProviderTokenActivityDay.Type;
+
+export const ServerProviderUsageHistoryInput = Schema.Struct({
+  /** How many days back from today to include (1–400, clamped server-side). */
+  days: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 400 })),
+  /** Skip the scan throttle and re-scan the local session logs now. */
+  rescan: Schema.optional(Schema.Boolean),
+});
+export type ServerProviderUsageHistoryInput = typeof ServerProviderUsageHistoryInput.Type;
+
+export const ServerProviderUsageHistoryResult = Schema.Struct({
+  days: Schema.Array(ProviderUsageHistoryDay),
+  /** Daily token totals derived from local provider session logs. */
+  tokenActivity: Schema.Array(ProviderTokenActivityDay),
+  /** True while a background scan of the local session logs is running. */
+  isBackfilling: Schema.Boolean,
+  /**
+   * The server's current local calendar day (YYYY-MM-DD). Day buckets are
+   * computed in the server's timezone, so clients anchor their calendars to
+   * this instead of the browser's clock — the two can disagree for remote
+   * environments.
+   */
+  today: Schema.String,
+  /** Epoch ms when the last log scan completed (null before the first). */
+  lastScanAt: Schema.NullOr(Schema.Number),
+  /** How long samples are retained before being pruned, in days. */
+  retentionDays: Schema.Number,
+});
+export type ServerProviderUsageHistoryResult = typeof ServerProviderUsageHistoryResult.Type;
