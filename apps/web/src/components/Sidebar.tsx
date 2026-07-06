@@ -6,6 +6,7 @@ import {
   ContainerIcon,
   FolderPlusIcon,
   Globe2Icon,
+  ListCollapseIcon,
   LoaderIcon,
   SearchIcon,
   SettingsIcon,
@@ -154,6 +155,7 @@ import { Input } from "./ui/input";
 import {
   Menu,
   MenuGroup,
+  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -277,6 +279,12 @@ function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string
     ...project.memberProjects.map((member) => member.physicalProjectKey),
     ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
   ];
+}
+
+function sidebarProjectExpansionPreferenceKeys(
+  projects: readonly SidebarProjectSnapshot[],
+): string[] {
+  return [...new Set(projects.flatMap(projectExpansionPreferenceKeys))];
 }
 
 function projectGroupingModeDescription(mode: SidebarProjectGroupingMode): string {
@@ -2579,6 +2587,8 @@ function ProjectSortMenu({
   onThreadSortOrderChange,
   onProjectGroupingModeChange,
   onThreadPreviewCountChange,
+  onCollapseAllThreads,
+  collapseAllThreadsDisabled,
 }: {
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
@@ -2588,6 +2598,8 @@ function ProjectSortMenu({
   onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
   onProjectGroupingModeChange: (mode: SidebarProjectGroupingMode) => void;
   onThreadPreviewCountChange: (count: SidebarThreadPreviewCount) => void;
+  onCollapseAllThreads: () => void;
+  collapseAllThreadsDisabled: boolean;
 }) {
   const handleThreadPreviewCountChange = useCallback(
     (nextValue: number | null) => {
@@ -2689,6 +2701,17 @@ function ProjectSortMenu({
               </NumberFieldGroup>
             </NumberField>
           </div>
+        </MenuGroup>
+        <MenuSeparator />
+        <MenuGroup>
+          <MenuItem
+            className="min-h-7 py-1 sm:text-xs"
+            disabled={collapseAllThreadsDisabled}
+            onClick={onCollapseAllThreads}
+          >
+            <ListCollapseIcon className="size-4" />
+            Collapse all threads
+          </MenuItem>
         </MenuGroup>
         <MenuSeparator />
         <MenuGroup>
@@ -2879,6 +2902,7 @@ interface SidebarProjectsContentProps {
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
+  collapseAllThreads: () => void;
   dragInProgressRef: React.RefObject<boolean>;
   suppressProjectClickAfterDragRef: React.RefObject<boolean>;
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
@@ -2920,6 +2944,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
+    collapseAllThreads,
     dragInProgressRef,
     suppressProjectClickAfterDragRef,
     suppressProjectClickForContextMenuRef,
@@ -3017,6 +3042,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               onThreadSortOrderChange={handleThreadSortOrderChange}
               onProjectGroupingModeChange={handleProjectGroupingModeChange}
               onThreadPreviewCountChange={handleThreadPreviewCountChange}
+              onCollapseAllThreads={collapseAllThreads}
+              collapseAllThreadsDisabled={projectsLength === 0}
             />
             <Tooltip>
               <TooltipTrigger
@@ -3126,6 +3153,7 @@ export default function Sidebar() {
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
+  const setProjectExpanded = useUiStateStore((store) => store.setProjectExpanded);
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
   const isOnSettings = pathname.startsWith("/settings");
@@ -3418,6 +3446,21 @@ export default function Sidebar() {
     sidebarProjects,
     visibleThreads,
   ]);
+  const sortedProjectExpansionKeys = useMemo(
+    () => sidebarProjectExpansionPreferenceKeys(sortedProjects),
+    [sortedProjects],
+  );
+  const collapseAllThreads = useCallback(() => {
+    if (useThreadSelectionStore.getState().hasSelection()) {
+      clearSelection();
+    }
+    if (sortedProjectExpansionKeys.length > 0) {
+      setProjectExpanded(sortedProjectExpansionKeys, false);
+    }
+    setExpandedThreadListsByProject((current) =>
+      current.size === 0 ? current : new Set<string>(),
+    );
+  }, [clearSelection, setProjectExpanded, sortedProjectExpansionKeys]);
   const isManualProjectSorting = sidebarProjectSortOrder === "manual";
   const visibleSidebarThreadKeys = useMemo(
     () =>
@@ -3753,6 +3796,7 @@ export default function Sidebar() {
             attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
             expandThreadListForProject={expandThreadListForProject}
             collapseThreadListForProject={collapseThreadListForProject}
+            collapseAllThreads={collapseAllThreads}
             dragInProgressRef={dragInProgressRef}
             suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
             suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
