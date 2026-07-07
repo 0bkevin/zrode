@@ -2,11 +2,12 @@ import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
+  ChevronsDownUpIcon,
+  ChevronsUpDownIcon,
   CloudIcon,
   ContainerIcon,
   FolderPlusIcon,
   Globe2Icon,
-  ListCollapseIcon,
   LoaderIcon,
   SearchIcon,
   SettingsIcon,
@@ -2587,8 +2588,6 @@ function ProjectSortMenu({
   onThreadSortOrderChange,
   onProjectGroupingModeChange,
   onThreadPreviewCountChange,
-  onCollapseAllThreads,
-  collapseAllThreadsDisabled,
 }: {
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
@@ -2598,8 +2597,6 @@ function ProjectSortMenu({
   onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
   onProjectGroupingModeChange: (mode: SidebarProjectGroupingMode) => void;
   onThreadPreviewCountChange: (count: SidebarThreadPreviewCount) => void;
-  onCollapseAllThreads: () => void;
-  collapseAllThreadsDisabled: boolean;
 }) {
   const handleThreadPreviewCountChange = useCallback(
     (nextValue: number | null) => {
@@ -2701,17 +2698,6 @@ function ProjectSortMenu({
               </NumberFieldGroup>
             </NumberField>
           </div>
-        </MenuGroup>
-        <MenuSeparator />
-        <MenuGroup>
-          <MenuItem
-            className="min-h-7 py-1 sm:text-xs"
-            disabled={collapseAllThreadsDisabled}
-            onClick={onCollapseAllThreads}
-          >
-            <ListCollapseIcon className="size-4" />
-            Collapse all threads
-          </MenuItem>
         </MenuGroup>
         <MenuSeparator />
         <MenuGroup>
@@ -2903,6 +2889,8 @@ interface SidebarProjectsContentProps {
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
   collapseAllThreads: () => void;
+  expandAllThreads: () => void;
+  allProjectsCollapsed: boolean;
   dragInProgressRef: React.RefObject<boolean>;
   suppressProjectClickAfterDragRef: React.RefObject<boolean>;
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
@@ -2945,6 +2933,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     expandThreadListForProject,
     collapseThreadListForProject,
     collapseAllThreads,
+    expandAllThreads,
+    allProjectsCollapsed,
     dragInProgressRef,
     suppressProjectClickAfterDragRef,
     suppressProjectClickForContextMenuRef,
@@ -3033,6 +3023,31 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             Projects
           </span>
           <div className="flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label={
+                      allProjectsCollapsed ? "Expand all threads" : "Collapse all threads"
+                    }
+                    data-testid="sidebar-toggle-all-threads-trigger"
+                    disabled={projectsLength === 0}
+                    className="inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-md px-[calc(--spacing(1)-1px)] text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                    onClick={allProjectsCollapsed ? expandAllThreads : collapseAllThreads}
+                  />
+                }
+              >
+                {allProjectsCollapsed ? (
+                  <ChevronsUpDownIcon className="size-3.5" />
+                ) : (
+                  <ChevronsDownUpIcon className="size-3.5" />
+                )}
+              </TooltipTrigger>
+              <TooltipPopup side="right">
+                {allProjectsCollapsed ? "Expand all threads" : "Collapse all threads"}
+              </TooltipPopup>
+            </Tooltip>
             <ProjectSortMenu
               projectSortOrder={projectSortOrder}
               threadSortOrder={threadSortOrder}
@@ -3042,8 +3057,6 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               onThreadSortOrderChange={handleThreadSortOrderChange}
               onProjectGroupingModeChange={handleProjectGroupingModeChange}
               onThreadPreviewCountChange={handleThreadPreviewCountChange}
-              onCollapseAllThreads={collapseAllThreads}
-              collapseAllThreadsDisabled={projectsLength === 0}
             />
             <Tooltip>
               <TooltipTrigger
@@ -3461,6 +3474,20 @@ export default function Sidebar() {
       current.size === 0 ? current : new Set<string>(),
     );
   }, [clearSelection, setProjectExpanded, sortedProjectExpansionKeys]);
+  const expandAllThreads = useCallback(() => {
+    if (sortedProjectExpansionKeys.length > 0) {
+      setProjectExpanded(sortedProjectExpansionKeys, true);
+    }
+  }, [setProjectExpanded, sortedProjectExpansionKeys]);
+  const allProjectsCollapsed = useMemo(
+    () =>
+      sortedProjects.length > 0 &&
+      sortedProjects.every(
+        (project) =>
+          !resolveProjectExpanded(projectExpandedById, projectExpansionPreferenceKeys(project)),
+      ),
+    [projectExpandedById, sortedProjects],
+  );
   const isManualProjectSorting = sidebarProjectSortOrder === "manual";
   const visibleSidebarThreadKeys = useMemo(
     () =>
@@ -3797,6 +3824,8 @@ export default function Sidebar() {
             expandThreadListForProject={expandThreadListForProject}
             collapseThreadListForProject={collapseThreadListForProject}
             collapseAllThreads={collapseAllThreads}
+            expandAllThreads={expandAllThreads}
+            allProjectsCollapsed={allProjectsCollapsed}
             dragInProgressRef={dragInProgressRef}
             suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
             suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}

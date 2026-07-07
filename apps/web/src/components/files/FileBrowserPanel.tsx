@@ -1,7 +1,7 @@
 import type { FileTreeDirectoryHandle, FileTreeItemHandle } from "@pierre/trees";
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { FolderMinus, RefreshCw, Search } from "lucide-react";
+import { ChevronsDownUp, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
@@ -132,7 +132,7 @@ export default function FileBrowserPanel({
           disabled={directoryPaths.length === 0}
           onClick={collapseAllFiles}
         >
-          <FolderMinus className="size-3.5" />
+          <ChevronsDownUp className="size-3.5" />
         </button>
         <button
           type="button"
