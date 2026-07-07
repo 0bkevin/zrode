@@ -390,6 +390,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [threadCreatedEvent, ...messageEvents];
     }
 
+    case "project.session-history-import.complete": {
+      // Bookkeeping event recorded even when the project was deleted
+      // mid-import so the request is never replayed again.
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.session-history-import-completed",
+        payload: {
+          projectId: command.projectId,
+          requestEventId: command.requestEventId,
+          completedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.delete": {
       yield* requireThread({
         readModel,

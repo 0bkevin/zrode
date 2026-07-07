@@ -161,6 +161,10 @@ function extractTextContent(value: unknown, depth = 0): string {
   if (typeof value !== "object") return "";
 
   const record = value as Record<string, unknown>;
+  // Typed content blocks other than plain text (tool_use, tool_result,
+  // thinking, image, ...) are not conversation prose and must not be
+  // imported as user/assistant messages.
+  if (typeof record.type === "string" && record.type !== "text") return "";
   if (typeof record.text === "string") return record.text;
   if (typeof record.content === "string") return record.content;
   if (Array.isArray(record.content)) return extractTextContent(record.content, depth + 1);
@@ -180,6 +184,8 @@ function parseClaudeTranscriptMessage(
     readonly session_id?: unknown;
     readonly sessionId?: unknown;
     readonly cwd?: unknown;
+    readonly isSidechain?: unknown;
+    readonly isMeta?: unknown;
     readonly message?: {
       readonly role?: unknown;
       readonly content?: unknown;
@@ -190,6 +196,10 @@ function parseClaudeTranscriptMessage(
   } catch {
     return null;
   }
+
+  // Sidechain lines belong to subagent conversations and meta lines are
+  // injected notices; neither is part of the main conversation.
+  if (record.isSidechain === true || record.isMeta === true) return null;
 
   const role =
     record.type === "user" || record.message?.role === "user"
@@ -227,8 +237,11 @@ function parseClaudeTranscriptMessage(
   };
 }
 
-function encodeClaudeProjectDirectoryName(workspaceRoot: string): string {
-  return workspaceRoot.replace(/[\\/]/g, "-");
+// Claude Code stores each project's transcripts under a directory named after
+// the workspace path with every non-alphanumeric character replaced by "-"
+// (e.g. "/Users/me/.t3/repo" -> "-Users-me--t3-repo").
+export function encodeClaudeProjectDirectoryName(workspaceRoot: string): string {
+  return workspaceRoot.replace(/[^a-zA-Z0-9]/g, "-");
 }
 
 type CodexThread = CodexSchema.V2ThreadReadResponse["thread"];
@@ -318,7 +331,9 @@ const make = Effect.gen(function* () {
     session: ImportedHistorySession,
   ) =>
     Effect.gen(function* () {
-      const messages = session.messages.slice(0, MAX_IMPORTED_MESSAGES_PER_SESSION);
+      // Keep the newest messages when capping, matching the projector's
+      // thread cap policy — recent context is the useful part.
+      const messages = session.messages.slice(-MAX_IMPORTED_MESSAGES_PER_SESSION);
       if (messages.length === 0) return;
       if (session.messages.length > messages.length) {
         yield* Effect.logWarning("provider session history import truncated messages", {
@@ -432,7 +447,7 @@ const make = Effect.gen(function* () {
         const listed = new Map<string, CodexSchema.V2ThreadListResponse["data"][number]>();
         for (const archived of [false, true]) {
           let cursor: string | null | undefined = undefined;
-          do {
+          for (;;) {
             const response: CodexSchema.V2ThreadListResponse = yield* client.request(
               "thread/list",
               {
@@ -452,8 +467,19 @@ const make = Effect.gen(function* () {
                 listed.set(thread.id, thread);
               }
             }
-            cursor = response.nextCursor;
-          } while (cursor);
+            // Guard against a server that keeps returning the same cursor or
+            // a cursor alongside an empty page — this loop must terminate.
+            const nextCursor = response.nextCursor;
+            if (
+              nextCursor === null ||
+              nextCursor === undefined ||
+              nextCursor === cursor ||
+              response.data.length === 0
+            ) {
+              break;
+            }
+            cursor = nextCursor;
+          }
         }
 
         const imported: ReadonlyArray<ImportedHistorySession> = yield* Effect.forEach(
@@ -496,7 +522,8 @@ const make = Effect.gen(function* () {
         .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
       const files = entries
         .filter((entry) => entry.endsWith(".jsonl"))
-        .map((entry) => path.join(projectDirectory, entry));
+        .map((entry) => path.join(projectDirectory, entry))
+        .toSorted();
 
       const messagesBySession = new Map<string, ImportedHistoryMessage[]>();
       yield* Effect.forEach(
@@ -512,15 +539,16 @@ const make = Effect.gen(function* () {
                   const message = parseClaudeTranscriptMessage(line, normalizedWorkspaceRoot, path);
                   if (message === null) return;
                   const sessionId = message.sessionId ?? fallbackSessionId;
-                  const existing = messagesBySession.get(sessionId) ?? [];
-                  messagesBySession.set(sessionId, [
-                    ...existing,
-                    {
-                      role: message.role,
-                      text: message.text,
-                      createdAt: message.createdAt,
-                    },
-                  ]);
+                  const existing = messagesBySession.get(sessionId);
+                  const bucket = existing ?? [];
+                  if (existing === undefined) {
+                    messagesBySession.set(sessionId, bucket);
+                  }
+                  bucket.push({
+                    role: message.role,
+                    text: message.text,
+                    createdAt: message.createdAt,
+                  });
                 }),
               ),
             );
@@ -535,14 +563,16 @@ const make = Effect.gen(function* () {
               });
             }),
           ),
-        { concurrency: 2, discard: true },
+        // Sequential so messages sharing a session id across files accumulate
+        // in a deterministic order before the stable timestamp sort.
+        { concurrency: 1, discard: true },
       );
 
       const imported: ReadonlyArray<ImportedHistorySession> = [...messagesBySession.entries()]
         .map(([sessionId, messages]) => {
-          const sortedMessages = messages.toSorted(
-            (left, right) =>
-              left.createdAt.localeCompare(right.createdAt) || left.text.localeCompare(right.text),
+          // toSorted is stable, so same-timestamp messages keep file order.
+          const sortedMessages = messages.toSorted((left, right) =>
+            left.createdAt.localeCompare(right.createdAt),
           );
           return {
             provider: CLAUDE_PROVIDER,
@@ -584,6 +614,7 @@ const make = Effect.gen(function* () {
         readonly info: OpenCodeMessage;
         readonly parts: ReadonlyArray<Part>;
       }> = [];
+      const seenMessageIds = new Set<string>();
       let before: string | undefined = undefined;
       for (;;) {
         const response = yield* runOpenCodeSdk("session.messages", () =>
@@ -595,9 +626,17 @@ const make = Effect.gen(function* () {
           }),
         );
         const page = response.data ?? [];
-        if (page.length === 0) break;
-        records.push(...page);
-        const nextBefore = page.at(-1)?.info.id;
+        // Pages are ascending (oldest -> newest) and `before` walks backwards
+        // in time, so the cursor is the oldest message of the page and each
+        // page is prepended. Deduping by message id keeps overlapping pages
+        // from producing duplicated messages.
+        const fresh = page.filter((record) => !seenMessageIds.has(record.info.id));
+        if (fresh.length === 0) break;
+        for (const record of fresh) {
+          seenMessageIds.add(record.info.id);
+        }
+        records.unshift(...fresh);
+        const nextBefore = page[0]?.info.id;
         if (
           page.length < OPENCODE_PAGE_LIMIT ||
           nextBefore === undefined ||
@@ -646,11 +685,9 @@ const make = Effect.gen(function* () {
                   )
                   .map((record) => importedMessageFromOpenCodeRecord(record, input.requestedAt))
                   .filter((message): message is ImportedHistoryMessage => message !== null)
-                  .toSorted(
-                    (left, right) =>
-                      left.createdAt.localeCompare(right.createdAt) ||
-                      left.text.localeCompare(right.text),
-                  );
+                  // toSorted is stable, so same-timestamp messages keep the
+                  // provider's chronological order.
+                  .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt));
                 return {
                   provider: OPENCODE_PROVIDER,
                   providerThreadId: session.id,

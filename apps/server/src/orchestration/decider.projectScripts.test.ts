@@ -198,6 +198,35 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
     }),
   );
 
+  it.effect("emits a completion event from project.session-history-import.complete", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const readModel = createEmptyReadModel(now);
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "project.session-history-import.complete",
+          commandId: CommandId.make("cmd-history-import-complete"),
+          projectId: asProjectId("project-history-import"),
+          requestEventId: asEventId("evt-history-import-request"),
+          createdAt: now,
+        },
+        // The read model has no such project on purpose: completion must be
+        // recordable even after the project was deleted mid-import.
+        readModel,
+      });
+
+      const event = Array.isArray(result) ? result[0] : result;
+      expect(event?.type).toBe("project.session-history-import-completed");
+      if (event?.type !== "project.session-history-import-completed") return;
+      expect(event.payload).toEqual({
+        projectId: asProjectId("project-history-import"),
+        requestEventId: asEventId("evt-history-import-request"),
+        completedAt: now,
+      });
+    }),
+  );
+
   it.effect("propagates scripts in project.meta.update payload", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";

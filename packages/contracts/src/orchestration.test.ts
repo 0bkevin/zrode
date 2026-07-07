@@ -274,6 +274,50 @@ it.effect("decodes internal thread history import commands", () =>
   }),
 );
 
+it.effect("decodes project session history import completed events", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 2,
+      eventId: "evt-project-import-history-completed",
+      aggregateKind: "project",
+      aggregateId: "project-1",
+      occurredAt: "2026-01-01T00:00:05.000Z",
+      commandId: "cmd-2",
+      causationEventId: null,
+      correlationId: "cmd-2",
+      metadata: {},
+      type: "project.session-history-import-completed",
+      payload: {
+        projectId: "project-1",
+        requestEventId: "evt-project-import-history",
+        completedAt: "2026-01-01T00:00:05.000Z",
+      },
+    });
+
+    assert.strictEqual(parsed.type, "project.session-history-import-completed");
+    if (parsed.type !== "project.session-history-import-completed") return;
+    assert.strictEqual(parsed.payload.projectId, "project-1");
+    assert.strictEqual(parsed.payload.requestEventId, "evt-project-import-history");
+  }),
+);
+
+it.effect("decodes internal project session history import complete commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "project.session-history-import.complete",
+      commandId: "cmd-history-import-complete",
+      projectId: "project-1",
+      requestEventId: "evt-project-import-history",
+      createdAt: "2026-01-01T00:00:05.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "project.session-history-import.complete");
+    if (parsed.type !== "project.session-history-import.complete") return;
+    assert.strictEqual(parsed.projectId, "project-1");
+    assert.strictEqual(parsed.requestEventId, "evt-project-import-history");
+  }),
+);
+
 it.effect("decodes historical project.created payloads with a default provider", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeProjectCreatedPayload({

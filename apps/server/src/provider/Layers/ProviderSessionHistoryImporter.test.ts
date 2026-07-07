@@ -18,19 +18,29 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { OpenCodeRuntime } from "../opencodeRuntime.ts";
 import { ProviderSessionHistoryImporter } from "../Services/ProviderSessionHistoryImporter.ts";
-import { ProviderSessionHistoryImporterLive } from "./ProviderSessionHistoryImporter.ts";
-
-function encodeClaudeProjectDirectoryName(workspaceRoot: string): string {
-  return workspaceRoot.replace(/[\\/]/g, "-");
-}
+import {
+  ProviderSessionHistoryImporterLive,
+  encodeClaudeProjectDirectoryName,
+} from "./ProviderSessionHistoryImporter.ts";
 
 it.layer(NodeServices.layer)("ProviderSessionHistoryImporter", (it) => {
+  it.effect("encodes Claude project directories the way Claude Code does", () =>
+    Effect.sync(() => {
+      // Fixture verified against a real ~/.claude/projects directory: every
+      // non-alphanumeric character (including "." and "_") becomes "-".
+      expect(encodeClaudeProjectDirectoryName("/Users/me/.t3/worktrees/repo_a 1")).toBe(
+        "-Users-me--t3-worktrees-repo-a-1",
+      );
+    }),
+  );
+
   it.effect("imports only the requested Claude project transcript", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "zrode-history-import-" });
-      const workspaceRoot = path.join(root, "repo");
+      // The dotted segment exercises the non-alphanumeric directory encoding.
+      const workspaceRoot = path.join(root, "repo.one");
       const projectDirectory = path.join(
         root,
         ".claude",
@@ -49,7 +59,11 @@ it.layer(NodeServices.layer)("ProviderSessionHistoryImporter", (it) => {
         path.join(projectDirectory, "session.jsonl"),
         [
           `{"type":"user","session_id":"claude-session-1","timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Hello Claude"}]}}`,
-          `{"type":"assistant","session_id":"claude-session-1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi there"}]}}`,
+          `{"type":"user","session_id":"claude-session-1","isMeta":true,"timestamp":"2026-01-01T00:00:00.100Z","message":{"role":"user","content":"Caveat: injected meta notice"}}`,
+          `{"type":"assistant","session_id":"claude-session-1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering"},{"type":"text","text":"Hi there"}]}}`,
+          `{"type":"user","session_id":"claude-session-1","timestamp":"2026-01-01T00:00:01.200Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"raw tool output"}]}}`,
+          `{"type":"user","session_id":"claude-session-1","isSidechain":true,"timestamp":"2026-01-01T00:00:01.400Z","message":{"role":"user","content":[{"type":"text","text":"subagent prompt"}]}}`,
+          "not-json",
           `{"type":"user","session_id":"claude-session-1","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"user","content":[{"type":"text","text":"Too late"}]}}`,
         ].join("\n"),
       );

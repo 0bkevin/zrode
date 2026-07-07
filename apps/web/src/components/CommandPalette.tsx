@@ -1249,7 +1249,12 @@ function OpenCommandPaletteDialog(props: {
             ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS.some(
               (option) =>
                 option.provider === provider &&
-                historyImportProviderDisabledReason(environmentSettings, option) === null,
+                option.supported &&
+                // With settings still loading we can't tell what's disabled;
+                // keep the user's selection — the server skips disabled
+                // providers anyway.
+                (environmentSettings === null ||
+                  historyImportProviderDisabledReason(environmentSettings, option) === null),
             ),
           )
         : [];
@@ -2050,26 +2055,24 @@ function OpenCommandPaletteDialog(props: {
                               disabled={!row.selectable}
                               onCheckedChange={(checked) => {
                                 const nextChecked = Boolean(checked);
-                                setAddProjectHistoryImportProviders((previousProviders) => {
-                                  const nextProviders = nextChecked
-                                    ? previousProviders.includes(row.provider)
-                                      ? previousProviders
-                                      : [...previousProviders, row.provider]
-                                    : previousProviders.filter(
-                                        (provider) => provider !== row.provider,
-                                      );
-                                  const hasAnySelectedProvider =
-                                    addProjectHistoryImportProviderRows
-                                      .filter(
-                                        (providerRow) => providerRow.provider !== row.provider,
-                                      )
-                                      .some((providerRow) => providerRow.checked) || nextChecked;
-                                  if (!hasAnySelectedProvider) {
-                                    setAddProjectImportSessionHistory(false);
-                                    setAddProjectImportAdvancedOpen(false);
-                                  }
-                                  return nextProviders;
-                                });
+                                const nextProviders = nextChecked
+                                  ? addProjectHistoryImportProviders.includes(row.provider)
+                                    ? addProjectHistoryImportProviders
+                                    : [...addProjectHistoryImportProviders, row.provider]
+                                  : addProjectHistoryImportProviders.filter(
+                                      (provider) => provider !== row.provider,
+                                    );
+                                const hasAnySelectedProvider =
+                                  addProjectHistoryImportProviderRows.some(
+                                    (providerRow) =>
+                                      providerRow.selectable &&
+                                      nextProviders.includes(providerRow.provider),
+                                  );
+                                setAddProjectHistoryImportProviders(nextProviders);
+                                if (!hasAnySelectedProvider) {
+                                  setAddProjectImportSessionHistory(false);
+                                  setAddProjectImportAdvancedOpen(false);
+                                }
                               }}
                               aria-label={`Import ${row.label} session history`}
                             />

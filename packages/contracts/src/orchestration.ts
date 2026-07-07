@@ -808,6 +808,14 @@ const ThreadHistoryImportCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ProjectSessionHistoryImportCompleteCommand = Schema.Struct({
+  type: Schema.Literal("project.session-history-import.complete"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  requestEventId: EventId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -817,6 +825,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadHistoryImportCommand,
+  ProjectSessionHistoryImportCompleteCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -829,6 +838,7 @@ export type OrchestrationCommand = typeof OrchestrationCommand.Type;
 export const OrchestrationEventType = Schema.Literals([
   "project.created",
   "project.session-history-import-requested",
+  "project.session-history-import-completed",
   "project.meta-updated",
   "project.deleted",
   "thread.created",
@@ -873,6 +883,12 @@ export const ProjectSessionHistoryImportRequestedPayload = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   providers: Schema.Array(ProviderDriverKind).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   requestedAt: IsoDateTime,
+});
+
+export const ProjectSessionHistoryImportCompletedPayload = Schema.Struct({
+  projectId: ProjectId,
+  requestEventId: EventId,
+  completedAt: IsoDateTime,
 });
 
 export const ProjectMetaUpdatedPayload = Schema.Struct({
@@ -1063,6 +1079,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.session-history-import-requested"),
     payload: ProjectSessionHistoryImportRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.session-history-import-completed"),
+    payload: ProjectSessionHistoryImportCompletedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
