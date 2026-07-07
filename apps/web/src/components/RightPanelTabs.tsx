@@ -35,6 +35,7 @@ interface RightPanelTabsProps {
   previewSessions: Readonly<Record<string, PreviewSessionSnapshot>>;
   terminalLabelsById: ReadonlyMap<string, string>;
   onActivate: (surface: RightPanelSurface) => void;
+  onMoveSurfaceToNewWindow: (surface: RightPanelSurface) => void;
   onCloseSurface: (surface: RightPanelSurface) => void;
   onCloseOtherSurfaces: (surface: RightPanelSurface) => void;
   onCloseSurfacesToRight: (surface: RightPanelSurface) => void;
@@ -56,7 +57,19 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
 } as const;
 
-type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
+type TabContextMenuAction =
+  | "copy-path"
+  | "move-to-window"
+  | "close"
+  | "close-others"
+  | "close-to-right"
+  | "close-all";
+
+// Surfaces whose content is fully server-backed and can therefore be hosted
+// by a dedicated pane window. Preview/diff/plan remain main-window only.
+function canMoveSurfaceToNewWindow(surface: RightPanelSurface): boolean {
+  return surface.kind === "terminal" || surface.kind === "files" || surface.kind === "file";
+}
 
 function DisabledReasonTooltip(props: { reason: string; trigger: ReactElement }) {
   return (
@@ -289,6 +302,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       if (surface.kind === "file") {
         items.push({ id: "copy-path", label: "Copy path" });
       }
+      if (canMoveSurfaceToNewWindow(surface)) {
+        items.push({ id: "move-to-window", label: "Move to new window" });
+      }
       items.push(
         { id: "close", label: "Close" },
         {
@@ -312,6 +328,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       switch (action) {
         case "copy-path":
           if (surface.kind === "file") props.onCopyFilePath(surface.relativePath);
+          break;
+        case "move-to-window":
+          props.onMoveSurfaceToNewWindow(surface);
           break;
         case "close":
           props.onCloseSurface(surface);

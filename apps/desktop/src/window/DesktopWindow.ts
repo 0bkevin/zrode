@@ -1,3 +1,4 @@
+import type { DesktopPaneWindowInput } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -76,6 +77,13 @@ export class DesktopWindow extends Context.Service<
     // produce a stranded window pointing at nothing.
     readonly handleBackendNotReady: Effect.Effect<void>;
     readonly dispatchMenuAction: (action: string) => Effect.Effect<void, DesktopWindowError>;
+    // Open a dedicated OS window rendering a single pane of the web app at a
+    // /popout/ route. Pane windows use the native OS frame, are never treated
+    // as the main window, and don't participate in the preview subsystem.
+    // Returns false when the requested path is outside the popout namespace.
+    readonly createPane: (
+      input: DesktopPaneWindowInput,
+    ) => Effect.Effect<boolean, DesktopWindowError>;
     readonly syncAppearance: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
@@ -163,6 +171,7 @@ function syncWindowAppearance(
   window: Electron.BrowserWindow,
   shouldUseDarkColors: boolean,
   platform: NodeJS.Platform,
+  hasTitleBarOverlay: boolean,
 ): Effect.Effect<void> {
   return Effect.sync(() => {
     if (window.isDestroyed()) {
@@ -171,10 +180,18 @@ function syncWindowAppearance(
 
     window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
-    if (typeof titleBarOverlay === "object") {
+    // setTitleBarOverlay throws on windows created without an overlay
+    // (native-frame pane windows, the frameless splash).
+    if (typeof titleBarOverlay === "object" && hasTitleBarOverlay) {
       window.setTitleBarOverlay(titleBarOverlay);
     }
   });
+}
+
+export const PANE_WINDOW_PATH_PREFIX = "/popout/";
+
+export function isAllowedPaneWindowPath(path: string): boolean {
+  return path.startsWith(PANE_WINDOW_PATH_PREFIX);
 }
 
 type RevealSubscription = (listener: () => void) => void;
@@ -211,6 +228,10 @@ export const make = Effect.gen(function* () {
   // The transient "Connecting to WSL" splash window, tracked separately so it
   // is never mistaken for the real main window.
   const splashWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  // Ids of live pane windows (popout terminal/files/...). Tracked so
+  // main-window resolution and menu dispatch never latch onto a pane, and so
+  // appearance sync knows these windows have no title-bar overlay.
+  const paneWindowIdsRef = yield* Ref.make<ReadonlySet<number>>(new Set<number>());
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
@@ -238,8 +259,106 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(Effect.flatMap(withoutSplash));
-  const focusedMainWindow = electronWindow.focusedMainOrFirst.pipe(Effect.flatMap(withoutSplash));
+  // Pane windows must never be treated as the main window: menu actions are
+  // handled by the app shell, which pane routes don't render, and ensureMain
+  // must recreate a real main even while panes are still open.
+  const withoutPanes = (window: Option.Option<Electron.BrowserWindow>) =>
+    Ref.get(paneWindowIdsRef).pipe(
+      Effect.map((paneIds) =>
+        Option.isSome(window) && paneIds.has(window.value.id)
+          ? Option.none<Electron.BrowserWindow>()
+          : window,
+      ),
+    );
+
+  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(
+    Effect.flatMap(withoutSplash),
+    Effect.flatMap(withoutPanes),
+  );
+  const focusedMainWindow = electronWindow.focusedMainOrFirst.pipe(
+    Effect.flatMap(withoutSplash),
+    Effect.flatMap(withoutPanes),
+  );
+
+  // Shared renderer wiring used by both the main window and pane windows:
+  // spellcheck/edit context menu, and routing external links to the OS
+  // browser instead of in-app navigation or new Electron windows.
+  const attachRendererContextMenu = (window: Electron.BrowserWindow) => {
+    window.webContents.on("context-menu", (event, params) => {
+      event.preventDefault();
+
+      const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
+
+      if (params.misspelledWord) {
+        for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+          menuTemplate.push({
+            label: suggestion,
+            click: () => window.webContents.replaceMisspelling(suggestion),
+          });
+        }
+        if (params.dictionarySuggestions.length === 0) {
+          menuTemplate.push({ label: "No suggestions", enabled: false });
+        }
+        menuTemplate.push({ type: "separator" });
+      }
+
+      if (Option.isSome(ElectronShell.parseSafeExternalUrl(params.linkURL))) {
+        menuTemplate.push(
+          {
+            label: "Copy Link",
+            click: () => {
+              void runPromise(electronShell.copyText(params.linkURL));
+            },
+          },
+          { type: "separator" },
+        );
+      }
+
+      if (params.mediaType === "image") {
+        menuTemplate.push({
+          label: "Copy Image",
+          click: () => window.webContents.copyImageAt(params.x, params.y),
+        });
+        menuTemplate.push({ type: "separator" });
+      }
+
+      menuTemplate.push(
+        { role: "cut", enabled: params.editFlags.canCut },
+        { role: "copy", enabled: params.editFlags.canCopy },
+        { role: "paste", enabled: params.editFlags.canPaste },
+        { role: "selectAll", enabled: params.editFlags.canSelectAll },
+      );
+
+      void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
+    });
+  };
+
+  const attachExternalNavigationGuards = (
+    window: Electron.BrowserWindow,
+    applicationUrl: string,
+  ) => {
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+        void runPromise(electronShell.openExternal(url));
+      }
+      return { action: "deny" };
+    });
+    window.webContents.on("will-navigate", (event, url) => {
+      if (
+        isSameOriginRendererNavigation({
+          applicationUrl,
+          navigationUrl: url,
+        })
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+        void runPromise(electronShell.openExternal(url));
+      }
+    });
+  };
 
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
     Electron.BrowserWindow,
@@ -290,75 +409,8 @@ export const make = Effect.gen(function* () {
       webPreferences.contextIsolation = false;
     });
 
-    window.webContents.on("context-menu", (event, params) => {
-      event.preventDefault();
-
-      const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
-
-      if (params.misspelledWord) {
-        for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
-          menuTemplate.push({
-            label: suggestion,
-            click: () => window.webContents.replaceMisspelling(suggestion),
-          });
-        }
-        if (params.dictionarySuggestions.length === 0) {
-          menuTemplate.push({ label: "No suggestions", enabled: false });
-        }
-        menuTemplate.push({ type: "separator" });
-      }
-
-      if (Option.isSome(ElectronShell.parseSafeExternalUrl(params.linkURL))) {
-        menuTemplate.push(
-          {
-            label: "Copy Link",
-            click: () => {
-              void runPromise(electronShell.copyText(params.linkURL));
-            },
-          },
-          { type: "separator" },
-        );
-      }
-
-      if (params.mediaType === "image") {
-        menuTemplate.push({
-          label: "Copy Image",
-          click: () => window.webContents.copyImageAt(params.x, params.y),
-        });
-        menuTemplate.push({ type: "separator" });
-      }
-
-      menuTemplate.push(
-        { role: "cut", enabled: params.editFlags.canCut },
-        { role: "copy", enabled: params.editFlags.canCopy },
-        { role: "paste", enabled: params.editFlags.canPaste },
-        { role: "selectAll", enabled: params.editFlags.canSelectAll },
-      );
-
-      void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
-    });
-
-    window.webContents.setWindowOpenHandler(({ url }) => {
-      if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
-        void runPromise(electronShell.openExternal(url));
-      }
-      return { action: "deny" };
-    });
-    window.webContents.on("will-navigate", (event, url) => {
-      if (
-        isSameOriginRendererNavigation({
-          applicationUrl,
-          navigationUrl: url,
-        })
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
-        void runPromise(electronShell.openExternal(url));
-      }
-    });
+    attachRendererContextMenu(window);
+    attachExternalNavigationGuards(window, applicationUrl);
 
     window.on("page-title-updated", (event) => {
       event.preventDefault();
@@ -486,6 +538,86 @@ export const make = Effect.gen(function* () {
     return window;
   }).pipe(Effect.withSpan("desktop.window.createMain"));
 
+  const createPane = Effect.fn("desktop.window.createPane")(function* (
+    input: DesktopPaneWindowInput,
+  ): Effect.fn.Return<boolean, DesktopWindowError> {
+    if (!isAllowedPaneWindowPath(input.path)) {
+      yield* logWindowWarning("rejected pane window request outside popout namespace", {
+        path: input.path,
+      });
+      return false;
+    }
+
+    const applicationUrl = getDesktopUrl(environment.isDevelopment);
+    const iconPaths = yield* assets.iconPaths;
+    const iconOption = getIconOption(iconPaths, environment.platform);
+    const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    const window = yield* electronWindow.create({
+      width: input.width ?? 1000,
+      height: input.height ?? 700,
+      minWidth: 480,
+      minHeight: 320,
+      show: false,
+      autoHideMenuBar: true,
+      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...iconOption,
+      title: input.title ?? environment.displayName,
+      // Native OS frame: pane windows carry no custom titlebar chrome, so the
+      // renderer needs no drag regions and the OS handles move/resize.
+      webPreferences: {
+        preload: environment.preloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    if (environment.platform === "darwin") {
+      window.setAutoHideCursor(false);
+    }
+
+    yield* Ref.update(paneWindowIdsRef, (paneIds) => new Set(paneIds).add(window.id));
+    window.on("closed", () => {
+      void runPromise(
+        Ref.update(paneWindowIdsRef, (paneIds) => {
+          const next = new Set(paneIds);
+          next.delete(window.id);
+          return next;
+        }),
+      );
+    });
+
+    attachRendererContextMenu(window);
+    attachExternalNavigationGuards(window, applicationUrl);
+
+    window.webContents.on(
+      "did-fail-load",
+      (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        if (!isMainFrame) {
+          return;
+        }
+        void runPromise(
+          logWindowWarning("pane window failed to load", {
+            errorCode,
+            errorDescription,
+            url: validatedURL,
+          }),
+        );
+      },
+    );
+    window.once("ready-to-show", () => {
+      void runPromise(electronWindow.reveal(window));
+    });
+
+    // The pane route rides in the URL fragment: the renderer uses hash
+    // history in Electron and the desktop protocol proxy never sees the
+    // fragment, so every window loads the same proxied app URL.
+    void window.loadURL(`${applicationUrl}#${input.path}`).catch(() => undefined);
+    yield* logWindowInfo("pane window created", { path: input.path });
+    return true;
+  });
+
   const ensureMain = Effect.gen(function* () {
     const existingWindow = yield* currentMainWindow;
     if (Option.isSome(existingWindow)) {
@@ -610,10 +742,18 @@ export const make = Effect.gen(function* () {
 
       send();
     }),
+    createPane,
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+      const paneWindowIds = yield* Ref.get(paneWindowIdsRef);
+      const splash = yield* Ref.get(splashWindowRef);
       yield* electronWindow.syncAllAppearance((window) =>
-        syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
+        syncWindowAppearance(
+          window,
+          shouldUseDarkColors,
+          environment.platform,
+          !paneWindowIds.has(window.id) && !(Option.isSome(splash) && splash.value === window),
+        ),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
   });

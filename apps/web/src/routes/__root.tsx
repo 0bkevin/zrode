@@ -106,6 +106,18 @@ function RootRouteView() {
     );
   }
 
+  // Popped-out pane windows (terminal, files) render a single pane without
+  // the app shell. They own their document title, so no DocumentTitleSync.
+  if (pathname.startsWith("/popout/")) {
+    return (
+      <ToastProvider>
+        <AnchoredToastProvider>
+          <Outlet />
+        </AnchoredToastProvider>
+      </ToastProvider>
+    );
+  }
+
   if (authGateState.status !== "authenticated" && authGateState.status !== "hosted-static") {
     return (
       <>

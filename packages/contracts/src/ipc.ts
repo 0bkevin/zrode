@@ -440,6 +440,24 @@ export const PickFolderOptionsSchema = Schema.Struct({
   targetEnvironmentId: Schema.optionalKey(Schema.String),
 });
 
+export interface DesktopPaneWindowInput {
+  // App-relative route path for the pane window's renderer, e.g.
+  // "/popout/env/thread?kind=terminal". Constrained to the /popout/
+  // route namespace so this IPC surface can only open pane views, never
+  // arbitrary app locations.
+  path: string;
+  title?: string;
+  width?: number;
+  height?: number;
+}
+
+export const DesktopPaneWindowInputSchema = Schema.Struct({
+  path: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
+  title: Schema.optionalKey(Schema.String),
+  width: Schema.optionalKey(Schema.Number),
+  height: Schema.optionalKey(Schema.Number),
+});
+
 export interface DesktopWslDistro {
   name: string;
   isDefault: boolean;
@@ -993,6 +1011,12 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /**
+   * Open a dedicated OS window rendering a single pane (terminal, files, …)
+   * at a /popout/ route. Resolves false when the main process rejects the
+   * request (e.g. a path outside the popout namespace).
+   */
+  openPaneWindow: (input: DesktopPaneWindowInput) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
