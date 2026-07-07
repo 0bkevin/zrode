@@ -183,7 +183,13 @@ function syncWindowAppearance(
     // setTitleBarOverlay throws on windows created without an overlay
     // (native-frame pane windows, the frameless splash).
     if (typeof titleBarOverlay === "object" && hasTitleBarOverlay) {
-      window.setTitleBarOverlay(titleBarOverlay);
+      try {
+        window.setTitleBarOverlay(titleBarOverlay);
+      } catch {
+        // A window created without an overlay can slip through the membership
+        // check (e.g. a pane window between creation and registration); a
+        // missed overlay recolor must not kill the appearance sync.
+      }
     }
   });
 }
@@ -192,6 +198,15 @@ export const PANE_WINDOW_PATH_PREFIX = "/popout/";
 
 export function isAllowedPaneWindowPath(path: string): boolean {
   return path.startsWith(PANE_WINDOW_PATH_PREFIX);
+}
+
+// Belt-and-braces bounds for renderer-supplied pane geometry; the IPC schema
+// already validates, but the window must stay usable whatever arrives here.
+function clampPaneWindowDimension(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(8000, Math.max(200, Math.round(value)));
 }
 
 type RevealSubscription = (listener: () => void) => void;
@@ -360,6 +375,105 @@ export const make = Effect.gen(function* () {
     });
   };
 
+  // Renderer loading shared by the main window and pane windows: initial
+  // load, failure/crash logging, and the development retry/backoff that
+  // covers Vite/backend restarts.
+  const attachRendererLoadLifecycle = (input: {
+    window: Electron.BrowserWindow;
+    applicationUrl: string;
+    targetUrl: string;
+    logLabel: string;
+    onLoaded?: () => void;
+  }) => {
+    const { window, applicationUrl, targetUrl, logLabel, onLoaded } = input;
+    let retryIndex = 0;
+    let retryFiber: Fiber.Fiber<void, never> | undefined;
+    const clearRetry = () => {
+      if (retryFiber === undefined) {
+        return;
+      }
+      const fiber = retryFiber;
+      retryFiber = undefined;
+      runFork(Fiber.interrupt(fiber));
+    };
+    const load = () => {
+      if (window.isDestroyed()) {
+        return;
+      }
+      void window.loadURL(targetUrl).catch(() => undefined);
+    };
+    const scheduleRetry = () => {
+      if (retryFiber !== undefined || window.isDestroyed()) {
+        return undefined;
+      }
+      const delayIndex = Math.min(retryIndex, DEVELOPMENT_LOAD_RETRY_DELAYS_MS.length - 1);
+      const retryInMs = DEVELOPMENT_LOAD_RETRY_DELAYS_MS[delayIndex] ?? 2_000;
+      retryIndex += 1;
+      retryFiber = runFork(
+        Effect.sleep(retryInMs).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              retryFiber = undefined;
+              load();
+            }),
+          ),
+        ),
+      );
+      return retryInMs;
+    };
+
+    window.webContents.on("did-finish-load", () => {
+      if (
+        environment.isDevelopment &&
+        !isSameOriginRendererNavigation({
+          applicationUrl,
+          navigationUrl: window.webContents.getURL(),
+        })
+      ) {
+        return;
+      }
+      clearRetry();
+      retryIndex = 0;
+      onLoaded?.();
+    });
+    window.webContents.on(
+      "did-fail-load",
+      (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        if (!isMainFrame) {
+          return;
+        }
+        const retryInMs =
+          environment.isDevelopment &&
+          isRetryableDevelopmentRendererLoadFailure({
+            applicationUrl,
+            errorCode,
+            isMainFrame,
+            validatedUrl: validatedURL,
+          })
+            ? scheduleRetry()
+            : undefined;
+        void runPromise(
+          logWindowWarning(`${logLabel} failed to load`, {
+            errorCode,
+            errorDescription,
+            url: validatedURL,
+            ...(retryInMs === undefined ? {} : { retryInMs }),
+          }),
+        );
+      },
+    );
+    window.webContents.on("render-process-gone", (_event, details) => {
+      void runPromise(
+        logWindowWarning(`${logLabel} render process gone`, {
+          reason: details.reason,
+          exitCode: details.exitCode,
+        }),
+      );
+    });
+
+    return { load, clearRetry };
+  };
+
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
     Electron.BrowserWindow,
     DesktopWindowError
@@ -417,95 +531,12 @@ export const make = Effect.gen(function* () {
       window.setTitle(environment.displayName);
     });
 
-    let developmentLoadRetryIndex = 0;
-    let developmentLoadRetryFiber: Fiber.Fiber<void, never> | undefined;
-    const clearDevelopmentLoadRetry = () => {
-      if (developmentLoadRetryFiber === undefined) {
-        return;
-      }
-      const retryFiber = developmentLoadRetryFiber;
-      developmentLoadRetryFiber = undefined;
-      runFork(Fiber.interrupt(retryFiber));
-    };
-    const loadApplication = () => {
-      if (window.isDestroyed()) {
-        return;
-      }
-      void window.loadURL(applicationUrl).catch(() => undefined);
-    };
-    const scheduleDevelopmentLoadRetry = () => {
-      if (developmentLoadRetryFiber !== undefined || window.isDestroyed()) {
-        return undefined;
-      }
-
-      const retryIndex = Math.min(
-        developmentLoadRetryIndex,
-        DEVELOPMENT_LOAD_RETRY_DELAYS_MS.length - 1,
-      );
-      const retryInMs = DEVELOPMENT_LOAD_RETRY_DELAYS_MS[retryIndex] ?? 2_000;
-      developmentLoadRetryIndex += 1;
-      developmentLoadRetryFiber = runFork(
-        Effect.sleep(retryInMs).pipe(
-          Effect.andThen(
-            Effect.sync(() => {
-              developmentLoadRetryFiber = undefined;
-              if (!window.isDestroyed()) {
-                loadApplication();
-              }
-            }),
-          ),
-        ),
-      );
-      return retryInMs;
-    };
-
-    window.webContents.on("did-finish-load", () => {
-      if (
-        environment.isDevelopment &&
-        !isSameOriginRendererNavigation({
-          applicationUrl,
-          navigationUrl: window.webContents.getURL(),
-        })
-      ) {
-        return;
-      }
-      clearDevelopmentLoadRetry();
-      developmentLoadRetryIndex = 0;
-      window.setTitle(environment.displayName);
-    });
-    window.webContents.on(
-      "did-fail-load",
-      (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-        if (!isMainFrame) {
-          return;
-        }
-        const retryInMs =
-          environment.isDevelopment &&
-          isRetryableDevelopmentRendererLoadFailure({
-            applicationUrl,
-            errorCode,
-            isMainFrame,
-            validatedUrl: validatedURL,
-          })
-            ? scheduleDevelopmentLoadRetry()
-            : undefined;
-        void runPromise(
-          logWindowWarning("main window failed to load", {
-            errorCode,
-            errorDescription,
-            url: validatedURL,
-            ...(retryInMs === undefined ? {} : { retryInMs }),
-          }),
-        );
-      },
-    );
-    window.webContents.on("render-process-gone", (_event, details) => {
-      void runPromise(
-        logWindowWarning("main window render process gone", {
-          reason: details.reason,
-          exitCode: details.exitCode,
-        }),
-      );
+    const rendererLoad = attachRendererLoadLifecycle({
+      window,
+      applicationUrl,
+      targetUrl: applicationUrl,
+      logLabel: "main window",
+      onLoaded: () => window.setTitle(environment.displayName),
     });
 
     const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
@@ -518,13 +549,13 @@ export const make = Effect.gen(function* () {
       void runPromise(Effect.andThen(electronWindow.reveal(window), dismissConnectingSplash));
     });
 
-    loadApplication();
+    rendererLoad.load();
     if (environment.isDevelopment) {
       window.webContents.openDevTools({ mode: "detach" });
     }
 
     window.on("closed", () => {
-      clearDevelopmentLoadRetry();
+      rendererLoad.clearRetry();
       void runPromise(electronWindow.clearMain(Option.some(window)));
     });
 
@@ -553,8 +584,8 @@ export const make = Effect.gen(function* () {
     const iconOption = getIconOption(iconPaths, environment.platform);
     const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
     const window = yield* electronWindow.create({
-      width: input.width ?? 1000,
-      height: input.height ?? 700,
+      width: clampPaneWindowDimension(input.width, 1000),
+      height: clampPaneWindowDimension(input.height, 700),
       minWidth: 480,
       minHeight: 320,
       show: false,
@@ -562,7 +593,7 @@ export const make = Effect.gen(function* () {
       ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
       backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
       ...iconOption,
-      title: input.title ?? environment.displayName,
+      title: input.title?.slice(0, 200) ?? environment.displayName,
       // Native OS frame: pane windows carry no custom titlebar chrome, so the
       // renderer needs no drag regions and the OS handles move/resize.
       webPreferences: {
@@ -578,7 +609,21 @@ export const make = Effect.gen(function* () {
     }
 
     yield* Ref.update(paneWindowIdsRef, (paneIds) => new Set(paneIds).add(window.id));
+
+    attachRendererContextMenu(window);
+    attachExternalNavigationGuards(window, applicationUrl);
+
+    // The pane route rides in the URL fragment: the renderer uses hash
+    // history in Electron and the desktop protocol proxy never sees the
+    // fragment, so every window loads the same proxied app URL.
+    const rendererLoad = attachRendererLoadLifecycle({
+      window,
+      applicationUrl,
+      targetUrl: `${applicationUrl}#${input.path}`,
+      logLabel: "pane window",
+    });
     window.on("closed", () => {
+      rendererLoad.clearRetry();
       void runPromise(
         Ref.update(paneWindowIdsRef, (paneIds) => {
           const next = new Set(paneIds);
@@ -587,33 +632,11 @@ export const make = Effect.gen(function* () {
         }),
       );
     });
-
-    attachRendererContextMenu(window);
-    attachExternalNavigationGuards(window, applicationUrl);
-
-    window.webContents.on(
-      "did-fail-load",
-      (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-        if (!isMainFrame) {
-          return;
-        }
-        void runPromise(
-          logWindowWarning("pane window failed to load", {
-            errorCode,
-            errorDescription,
-            url: validatedURL,
-          }),
-        );
-      },
-    );
     window.once("ready-to-show", () => {
       void runPromise(electronWindow.reveal(window));
     });
 
-    // The pane route rides in the URL fragment: the renderer uses hash
-    // history in Electron and the desktop protocol proxy never sees the
-    // fragment, so every window loads the same proxied app URL.
-    void window.loadURL(`${applicationUrl}#${input.path}`).catch(() => undefined);
+    rendererLoad.load();
     yield* logWindowInfo("pane window created", { path: input.path });
     return true;
   });

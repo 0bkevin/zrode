@@ -83,6 +83,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(IpcChannels.SSH_PASSWORD_PROMPT_CHANNEL, wrappedListener);
     };
   },
+  getPendingSshPasswordPrompts: async () => {
+    const result = await ipcRenderer.invoke(IpcChannels.GET_PENDING_SSH_PROMPTS_CHANNEL);
+    return Array.isArray(result) ? result : [];
+  },
   resolveSshPasswordPrompt: (requestId, password) =>
     ipcRenderer.invoke(IpcChannels.RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL, { requestId, password }),
   getServerExposureState: () => ipcRenderer.invoke(IpcChannels.GET_SERVER_EXPOSURE_STATE_CHANNEL),

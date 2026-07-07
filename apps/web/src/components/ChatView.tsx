@@ -213,6 +213,8 @@ import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { ThreadTerminalPanel, type TerminalPanelLaunchContext } from "./ThreadTerminalPanel";
 import { openPaneWindow, type PaneWindowTarget } from "../paneWindow";
+import { isPopoutWindow } from "../lib/windowScope";
+import { useClaimedTerminalIds, usePaneTerminalClaimPublisher } from "../lib/paneTerminalClaims";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
@@ -595,10 +597,18 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
       ),
     [panelSurfaces],
   );
+  // Exclude sessions hosted by another window (popouts) alongside this
+  // window's own panel terminals, so the drawer never adopts a PTY that is
+  // already rendered elsewhere.
+  const claimedTerminalIds = useClaimedTerminalIds(threadRef);
   const drawerTerminalSessions = useMemo(
     () =>
-      knownTerminalSessions.filter((session) => !panelTerminalIds.has(session.target.terminalId)),
-    [knownTerminalSessions, panelTerminalIds],
+      knownTerminalSessions.filter(
+        (session) =>
+          !panelTerminalIds.has(session.target.terminalId) &&
+          !claimedTerminalIds.has(session.target.terminalId),
+      ),
+    [claimedTerminalIds, knownTerminalSessions, panelTerminalIds],
   );
   const terminalLabelsById = useMemo(() => {
     const next = new Map<string, string>();
@@ -1286,6 +1296,13 @@ function ChatViewContent(props: ChatViewProps) {
       ),
     [rightPanelState.surfaces],
   );
+  // Claim the terminals this window hosts (right-panel surfaces + drawer) so
+  // other windows' drawer reconciliation doesn't adopt the same sessions.
+  const hostedTerminalIds = useMemo(
+    () => [...new Set([...panelTerminalIds, ...terminalUiState.terminalIds])],
+    [panelTerminalIds, terminalUiState.terminalIds],
+  );
+  usePaneTerminalClaimPublisher(activeThreadRef, hostedTerminalIds);
   const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
   const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
@@ -3204,6 +3221,26 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
   );
+  const openChatInNewWindow = useCallback(() => {
+    if (!activeThreadRef) return;
+    void openPaneWindow({
+      kind: "chat",
+      environmentId: activeThreadRef.environmentId,
+      threadId: activeThreadRef.threadId,
+    })
+      .catch(() => false)
+      .then((opened) => {
+        if (!opened) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to open window",
+              description: "The chat window could not be opened.",
+            }),
+          );
+        }
+      });
+  }, [activeThreadRef]);
   const moveRightPanelSurfaceToNewWindow = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
@@ -3225,22 +3262,24 @@ function ChatViewContent(props: ChatViewProps) {
               }
             : null;
       if (!target) return;
-      void openPaneWindow(target).then((opened) => {
-        if (!opened) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Unable to open window",
-              description: "The pane window could not be opened.",
-            }),
-          );
-          return;
-        }
-        // Close the tab here without terminating anything server-side — the
-        // new window reattaches to the same terminal sessions / workspace.
-        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-        syncActivePreviewSurface();
-      });
+      void openPaneWindow(target)
+        .catch(() => false)
+        .then((opened) => {
+          if (!opened) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Unable to open window",
+                description: "The pane window could not be opened.",
+              }),
+            );
+            return;
+          }
+          // Close the tab here without terminating anything server-side — the
+          // new window reattaches to the same terminal sessions / workspace.
+          useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+          syncActivePreviewSurface();
+        });
     },
     [activeThreadRef, syncActivePreviewSurface],
   );
@@ -5918,6 +5957,7 @@ function ChatViewContent(props: ChatViewProps) {
         availableEditors={availableEditors}
         rightPanelOpen={rightPanelOpen}
         gitCwd={gitCwd}
+        onOpenInNewWindow={isServerThread && !isPopoutWindow() ? openChatInNewWindow : undefined}
         onRunProjectScript={runProjectScript}
         onAddProjectScript={saveProjectScript}
         onUpdateProjectScript={updateProjectScript}
@@ -6307,7 +6347,7 @@ function ChatViewContent(props: ChatViewProps) {
           previewSessions={activePreviewState.sessions}
           terminalLabelsById={activeTerminalLabelsById}
           onActivate={activateRightPanelSurface}
-          onMoveSurfaceToNewWindow={moveRightPanelSurfaceToNewWindow}
+          onMoveSurfaceToNewWindow={isServerThread ? moveRightPanelSurfaceToNewWindow : undefined}
           onCloseSurface={closeRightPanelSurface}
           onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
           onCloseSurfacesToRight={closeRightPanelSurfacesToRight}
@@ -6335,7 +6375,7 @@ function ChatViewContent(props: ChatViewProps) {
             previewSessions={activePreviewState.sessions}
             terminalLabelsById={activeTerminalLabelsById}
             onActivate={activateRightPanelSurface}
-            onMoveSurfaceToNewWindow={moveRightPanelSurfaceToNewWindow}
+            onMoveSurfaceToNewWindow={isServerThread ? moveRightPanelSurfaceToNewWindow : undefined}
             onCloseSurface={closeRightPanelSurface}
             onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
             onCloseSurfacesToRight={closeRightPanelSurfacesToRight}

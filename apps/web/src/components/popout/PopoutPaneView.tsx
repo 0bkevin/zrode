@@ -5,9 +5,13 @@ import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/proje
 import { nextTerminalId } from "@t3tools/shared/terminalLabels";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
+import ChatView from "~/components/ChatView";
 import { ThreadTerminalPanel, type TerminalPanelSurface } from "~/components/ThreadTerminalPanel";
 import { toastManager } from "~/components/ui/toast";
+import { usePaneTerminalClaimPublisher } from "~/lib/paneTerminalClaims";
 import { useProject, useThread } from "~/state/entities";
+import { useEnvironmentQuery } from "~/state/query";
+import { environmentShell } from "~/state/shell";
 import { primaryServerAvailableEditorsAtom, primaryServerKeybindingsAtom } from "~/state/server";
 import { terminalEnvironment } from "~/state/terminal";
 import { useKnownTerminalSessions } from "~/state/terminalSessions";
@@ -17,7 +21,9 @@ import { MAX_TERMINALS_PER_GROUP, type Project } from "~/types";
 const FilePreviewPanel = lazy(() => import("~/components/files/FilePreviewPanel"));
 
 export interface PopoutPaneSearch {
-  kind: "terminal" | "files";
+  // null = unrecognized kind; the view renders an error instead of guessing
+  // (a mistyped popout URL must not, say, spawn a terminal session).
+  kind: "terminal" | "files" | "chat" | null;
   // Comma-separated terminal ids for kind=terminal.
   terminalIds?: string;
   activeTerminalId?: string;
@@ -47,24 +53,66 @@ export function PopoutPaneView({
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
   const worktreePath = serverThread?.worktreePath ?? null;
   const workspaceRoot = worktreePath ?? project?.workspaceRoot ?? null;
+  const environmentShellState = useEnvironmentQuery(
+    environmentShell.stateAtom(threadRef.environmentId),
+  );
+  // Once the environment has bootstrapped, a missing thread is gone for good
+  // (deleted or never existed) — not still loading.
+  const environmentReady = environmentShellState.data?.snapshot._tag === "Some";
+  const threadMissing = environmentReady && !serverThread;
 
-  if (!project || !workspaceRoot) {
+  if (search.kind === null) {
+    return <PopoutErrorFrame title="Zrode" message="This pane link is not recognized." />;
+  }
+
+  if (threadMissing) {
     return (
-      <PopoutPaneFrame title={search.kind === "terminal" ? "Terminal" : "Files"}>
-        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-          Connecting…
-        </div>
+      <PopoutErrorFrame
+        title="Zrode"
+        message="This thread is no longer available. You can close this window."
+      />
+    );
+  }
+
+  // Chat derives everything from the thread itself; it must not wait on the
+  // project gate below (ChatView handles a missing project gracefully).
+  if (search.kind === "chat") {
+    if (!serverThread) {
+      return <PopoutConnectingFrame title="Chat" />;
+    }
+    return (
+      <PopoutPaneFrame
+        title={project ? `${serverThread.title} — ${project.title}` : serverThread.title}
+      >
+        <ChatView
+          environmentId={threadRef.environmentId}
+          threadId={threadRef.threadId}
+          routeKind="server"
+          reserveTitleBarControlInset={false}
+        />
       </PopoutPaneFrame>
     );
   }
 
+  if (!project || !workspaceRoot) {
+    return <PopoutConnectingFrame title={search.kind === "terminal" ? "Terminal" : "Files"} />;
+  }
+
   if (search.kind === "terminal") {
+    const terminalIds = parseTerminalIds(search.terminalIds);
+    // Never conjure a session from a bare URL: terminal popouts must carry
+    // the ids of the live sessions they were opened for.
+    if (terminalIds.length === 0) {
+      return (
+        <PopoutErrorFrame title="Terminal" message="This pane link is missing its terminal." />
+      );
+    }
     return (
       <PopoutTerminalPane
         threadRef={threadRef}
         project={project}
         worktreePath={worktreePath}
-        initialTerminalIds={parseTerminalIds(search.terminalIds)}
+        initialTerminalIds={terminalIds}
         initialActiveTerminalId={search.activeTerminalId ?? null}
         keybindings={keybindings}
       />
@@ -107,6 +155,26 @@ function PopoutPaneFrame({ title, children }: { title: string; children: React.R
   );
 }
 
+function PopoutConnectingFrame({ title }: { title: string }) {
+  return (
+    <PopoutPaneFrame title={title}>
+      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+        Connecting…
+      </div>
+    </PopoutPaneFrame>
+  );
+}
+
+function PopoutErrorFrame({ title, message }: { title: string; message: string }) {
+  return (
+    <PopoutPaneFrame title={title}>
+      <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+        {message}
+      </div>
+    </PopoutPaneFrame>
+  );
+}
+
 function PopoutTerminalPane({
   threadRef,
   project,
@@ -135,20 +203,21 @@ function PopoutTerminalPane({
   const cwd = projectScriptCwd({ project: { cwd: project.workspaceRoot }, worktreePath });
 
   const [surface, setSurface] = useState<TerminalPanelSurface>(() => {
-    const primaryId = initialTerminalIds[0] ?? nextTerminalId([]);
-    const terminalIds = initialTerminalIds.length > 0 ? initialTerminalIds : [primaryId];
+    const primaryId = initialTerminalIds[0]!;
     return {
       id: `terminal:${primaryId}`,
       kind: "terminal",
       resourceId: primaryId,
-      terminalIds,
+      terminalIds: initialTerminalIds,
       activeTerminalId:
-        initialActiveTerminalId !== null && terminalIds.includes(initialActiveTerminalId)
+        initialActiveTerminalId !== null && initialTerminalIds.includes(initialActiveTerminalId)
           ? initialActiveTerminalId
           : primaryId,
     };
   });
   const [focusRequestId, setFocusRequestId] = useState(1);
+  // Claim these terminals so the main window's drawer doesn't re-adopt them.
+  usePaneTerminalClaimPublisher(threadRef, surface.terminalIds);
 
   const launchTerminal = useCallback(
     (terminalId: string) => {
@@ -168,16 +237,6 @@ function PopoutTerminalPane({
     },
     [cwd, openTerminal, project.workspaceRoot, threadRef, worktreePath],
   );
-
-  // When the window was opened without existing terminals (a fresh standalone
-  // terminal), start the seeded session once. Moved surfaces arrive with live
-  // server-side sessions and reattach without an open call.
-  const [openedFreshTerminal, setOpenedFreshTerminal] = useState(false);
-  useEffect(() => {
-    if (openedFreshTerminal || initialTerminalIds.length > 0) return;
-    setOpenedFreshTerminal(true);
-    launchTerminal(surface.activeTerminalId);
-  }, [initialTerminalIds.length, launchTerminal, openedFreshTerminal, surface.activeTerminalId]);
 
   const addTerminal = useCallback(
     (direction?: "horizontal" | "vertical") => {
@@ -210,28 +269,29 @@ function PopoutTerminalPane({
 
   const handleCloseTerminal = useCallback(
     (terminalId: string) => {
-      void closeTerminal({
+      const closeCommand = closeTerminal({
         environmentId: threadRef.environmentId,
         input: { threadId: threadRef.threadId, terminalId, deleteHistory: true },
       });
-      setSurface((current) => {
-        const terminalIds = current.terminalIds.filter((id) => id !== terminalId);
-        if (terminalIds.length === 0) {
-          window.close();
-          return current;
-        }
-        return {
-          ...current,
-          terminalIds,
-          activeTerminalId:
-            current.activeTerminalId === terminalId
-              ? (terminalIds.at(-1) ?? terminalIds[0]!)
-              : current.activeTerminalId,
-        };
-      });
+      const remaining = surface.terminalIds.filter((id) => id !== terminalId);
+      if (remaining.length === 0) {
+        // Closing the last terminal closes the window — but only after the
+        // close command settles, otherwise tearing down this window's socket
+        // races the send and the PTY survives on the server.
+        void closeCommand.finally(() => window.close());
+        return;
+      }
+      setSurface((current) => ({
+        ...current,
+        terminalIds: remaining,
+        activeTerminalId:
+          current.activeTerminalId === terminalId
+            ? (remaining.at(-1) ?? remaining[0]!)
+            : current.activeTerminalId,
+      }));
       setFocusRequestId((value) => value + 1);
     },
-    [closeTerminal, threadRef],
+    [closeTerminal, surface.terminalIds, threadRef],
   );
 
   const handleAddTerminalContext = useCallback(() => {

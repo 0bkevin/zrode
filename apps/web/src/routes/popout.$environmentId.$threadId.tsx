@@ -18,7 +18,10 @@ function PopoutRouteView() {
 
 export const Route = createFileRoute("/popout/$environmentId/$threadId")({
   validateSearch: (search: Record<string, unknown>): PopoutPaneSearch => ({
-    kind: search.kind === "files" ? "files" : "terminal",
+    kind:
+      search.kind === "files" || search.kind === "chat" || search.kind === "terminal"
+        ? search.kind
+        : null,
     ...(typeof search.terminalIds === "string" && search.terminalIds.length > 0
       ? { terminalIds: search.terminalIds }
       : {}),

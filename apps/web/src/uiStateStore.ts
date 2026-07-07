@@ -1,6 +1,7 @@
 import { Debouncer } from "@tanstack/react-pacer";
 import { create } from "zustand";
 import { normalizeProjectPathForComparison } from "./lib/projectPaths";
+import { isPopoutWindow } from "./lib/windowScope";
 
 export const PERSISTED_STATE_KEY = "zrode:ui-state:v1";
 const LEGACY_PERSISTED_STATE_KEYS = [
@@ -187,6 +188,13 @@ function sanitizePersistedThreadChangedFilesExpanded(
 
 export function persistState(state: UiState): void {
   if (typeof window === "undefined") {
+    return;
+  }
+  // Popout pane windows must never write this shared snapshot back: they
+  // would persist their boot-time copy (project order, expansions, visited
+  // threads) over anything the main window changed since. Reading is fine —
+  // popouts inherit the state they booted with.
+  if (isPopoutWindow()) {
     return;
   }
   try {

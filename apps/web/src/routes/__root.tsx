@@ -1,9 +1,10 @@
-import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
+import type { EnvironmentId, ServerLifecycleWelcomePayload, ThreadId } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   Outlet,
   createRootRoute,
+  redirect,
   type ErrorComponentProps,
   useLocation,
   useNavigate,
@@ -38,6 +39,7 @@ import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
 import { resolveInitialServerAuthGateState } from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
+import { describeCurrentPopoutLocation, isPopoutWindow } from "../lib/windowScope";
 import { shellEnvironment } from "../state/shell";
 import { useAtomValue } from "@effect/atom-react";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -53,8 +55,57 @@ import {
   type KeybindingsUpdateToastController,
 } from "../components/KeybindingsUpdateToast.logic";
 
+// Route path segments that can never be an environmentId in a thread route.
+const NON_THREAD_FIRST_SEGMENTS = new Set(["settings", "draft", "popout", "pair"]);
+
+function parseThreadRoutePath(
+  pathname: string,
+): { environmentId: EnvironmentId; threadId: ThreadId } | null {
+  const match = pathname.match(/^\/([^/]+)\/([^/]+)\/?$/);
+  if (!match) return null;
+  const environmentId = decodeURIComponent(match[1]!);
+  if (NON_THREAD_FIRST_SEGMENTS.has(environmentId)) return null;
+  return {
+    environmentId: environmentId as EnvironmentId,
+    threadId: decodeURIComponent(match[2]!) as ThreadId,
+  };
+}
+
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
+    // Popout pane windows are pinned to /popout routes: their persisted UI
+    // state is window-local and they carry no app shell, so the full app must
+    // never render there. Thread navigations (handoff, "implement plan")
+    // reopen as a popout chat; anything else stays on the current pane.
+    if (isPopoutWindow() && !location.pathname.startsWith("/popout/")) {
+      const threadTarget = parseThreadRoutePath(location.pathname);
+      if (threadTarget) {
+        throw redirect({
+          to: "/popout/$environmentId/$threadId",
+          params: threadTarget,
+          search: { kind: "chat" },
+        });
+      }
+      const current = describeCurrentPopoutLocation();
+      if (current) {
+        const { kind, terminalIds, activeTerminalId, path } = current.search;
+        throw redirect({
+          to: "/popout/$environmentId/$threadId",
+          params: {
+            environmentId: current.environmentId as EnvironmentId,
+            threadId: current.threadId as ThreadId,
+          },
+          search: {
+            kind: kind === "terminal" || kind === "files" || kind === "chat" ? kind : null,
+            ...(terminalIds ? { terminalIds } : {}),
+            ...(activeTerminalId ? { activeTerminalId } : {}),
+            ...(path ? { path } : {}),
+          },
+          replace: true,
+        });
+      }
+    }
+
     if (location.pathname === "/pair" && hasHostedPairingRequest(new URL(window.location.href))) {
       return {
         authGateState: {
@@ -106,9 +157,18 @@ function RootRouteView() {
     );
   }
 
-  // Popped-out pane windows (terminal, files) render a single pane without
-  // the app shell. They own their document title, so no DocumentTitleSync.
+  // Popped-out pane windows (terminal, files, chat) render a single pane
+  // without the app shell. They own their document title, so no
+  // DocumentTitleSync. Authentication happens in the main window; an
+  // unauthenticated popout has no login flow of its own.
   if (pathname.startsWith("/popout/")) {
+    if (authGateState.status !== "authenticated" && authGateState.status !== "hosted-static") {
+      return (
+        <div className="flex h-dvh items-center justify-center bg-background px-6 text-center text-sm text-muted-foreground">
+          Sign in from the main {APP_DISPLAY_NAME} window, then reopen this pane.
+        </div>
+      );
+    }
     return (
       <ToastProvider>
         <AnchoredToastProvider>

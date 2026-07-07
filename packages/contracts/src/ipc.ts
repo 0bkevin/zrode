@@ -451,11 +451,15 @@ export interface DesktopPaneWindowInput {
   height?: number;
 }
 
+const PaneWindowDimensionSchema = Schema.Int.check(
+  Schema.isBetween({ minimum: 200, maximum: 8000 }),
+);
+
 export const DesktopPaneWindowInputSchema = Schema.Struct({
   path: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
-  title: Schema.optionalKey(Schema.String),
-  width: Schema.optionalKey(Schema.Number),
-  height: Schema.optionalKey(Schema.Number),
+  title: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
+  width: Schema.optionalKey(PaneWindowDimensionSchema),
+  height: Schema.optionalKey(PaneWindowDimensionSchema),
 });
 
 export interface DesktopWslDistro {
@@ -991,6 +995,11 @@ export interface DesktopBridge {
     bearerToken: string,
   ) => Promise<AuthWebSocketTicketResult>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
+  /**
+   * Prompts still awaiting an answer. Fetched by the prompt dialog on mount
+   * so a prompt pushed while this window was loading is not lost.
+   */
+  getPendingSshPasswordPrompts: () => Promise<readonly DesktopSshPasswordPromptRequest[]>;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;

@@ -10,6 +10,7 @@ import type * as Electron from "electron";
 
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SSH_PASSWORD_PROMPT_CHANNEL } from "../ipc/channels.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
 
 interface SentMessage {
@@ -105,9 +106,24 @@ function makeElectronWindowLayer(window: ReturnType<typeof makeTestWindow>["wind
   );
 }
 
+const desktopWindowStubLayer = Layer.succeed(DesktopWindow.DesktopWindow, {
+  createMain: Effect.die("unexpected createMain"),
+  ensureMain: Effect.die("unexpected ensureMain"),
+  revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
+  activate: Effect.void,
+  createMainIfBackendReady: Effect.void,
+  showConnectingSplash: Effect.void,
+  handleBackendReady: () => Effect.void,
+  handleBackendNotReady: Effect.void,
+  dispatchMenuAction: () => Effect.void,
+  createPane: () => Effect.die("unexpected pane window create"),
+  syncAppearance: Effect.void,
+} satisfies DesktopWindow.DesktopWindow["Service"]);
+
 function makeLayer(window: ReturnType<typeof makeTestWindow>["window"]) {
   return DesktopSshPasswordPrompts.layer({ passwordPromptTimeoutMs: 1_000 }).pipe(
     Layer.provide(makeElectronWindowLayer(window)),
+    Layer.provide(desktopWindowStubLayer),
     Layer.provide(NodeServices.layer),
     Layer.provideMerge(TestClock.layer()),
   );

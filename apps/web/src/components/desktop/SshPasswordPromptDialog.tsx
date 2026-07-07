@@ -38,9 +38,26 @@ export function SshPasswordPromptDialog() {
       return;
     }
 
-    return bridge.onSshPasswordPrompt((request) => {
-      setQueue((currentQueue) => [...currentQueue, request]);
-    });
+    const enqueue = (request: DesktopSshPasswordPromptRequest) => {
+      setQueue((currentQueue) =>
+        currentQueue.some((entry) => entry.requestId === request.requestId)
+          ? currentQueue
+          : [...currentQueue, request],
+      );
+    };
+    const unsubscribe = bridge.onSshPasswordPrompt(enqueue);
+    // A prompt raised while this window was still loading (e.g. a main window
+    // created on demand to host it) was pushed before this listener existed —
+    // pull anything still pending.
+    void bridge
+      .getPendingSshPasswordPrompts?.()
+      .then((pending) => {
+        for (const request of pending) {
+          enqueue(request);
+        }
+      })
+      .catch(() => undefined);
+    return unsubscribe;
   }, []);
 
   if (!currentRequest) {

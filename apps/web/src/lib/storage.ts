@@ -1,5 +1,7 @@
 import { Debouncer } from "@tanstack/react-pacer";
 
+import { isPopoutWindow } from "./windowScope";
+
 export interface StateStorage<R = unknown> {
   getItem: (name: string) => string | null | Promise<string | null>;
   setItem: (name: string, value: string) => R;
@@ -36,6 +38,12 @@ export function isStateStorage(
 }
 
 export function resolveStorage(storage: Partial<StateStorage> | null | undefined): StateStorage {
+  // Popout pane windows get window-local storage: persisted UI stores load
+  // localStorage into memory per window and write back debounced, so a
+  // popout sharing the main window's keys would race it (last writer wins).
+  if (isPopoutWindow()) {
+    return createMemoryStorage();
+  }
   return isStateStorage(storage) ? storage : createMemoryStorage();
 }
 

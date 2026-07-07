@@ -37,6 +37,7 @@ import {
 import { resolveBrowserRecordingStopTarget } from "~/browser/browserRecordingScope";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { isElectron } from "~/env";
+import { isPopoutWindow } from "~/lib/windowScope";
 import { useEnvironments } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
@@ -243,7 +244,10 @@ const raisePreviewAutomationHostError = (
 
 export function PreviewAutomationHosts() {
   const { environments } = useEnvironments();
-  if (!isElectron || !previewBridge?.automation) return null;
+  // Popout pane windows expose the same desktopBridge but cannot host
+  // preview webviews (no webviewTag); only the main window registers as an
+  // automation host, otherwise automation commands race between windows.
+  if (!isElectron || !previewBridge?.automation || isPopoutWindow()) return null;
   return (
     <>
       {/*

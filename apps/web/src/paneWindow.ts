@@ -21,11 +21,20 @@ export type PaneWindowTarget =
       threadId: ThreadId;
       // Relative path of a file to open, or null/undefined for the tree.
       path?: string | null;
+    }
+  | {
+      // A full chat view for a started server thread. Messages and turns are
+      // server-owned, so the window renders the same live thread; only the
+      // composer draft is window-local (see resolveStorage popout isolation).
+      kind: "chat";
+      environmentId: EnvironmentId;
+      threadId: ThreadId;
     };
 
 const PANE_WINDOW_SIZES = {
   terminal: { width: 960, height: 620 },
   files: { width: 1100, height: 740 },
+  chat: { width: 1000, height: 780 },
 } as const;
 
 export function buildPaneWindowPath(target: PaneWindowTarget): string {
@@ -33,16 +42,21 @@ export function buildPaneWindowPath(target: PaneWindowTarget): string {
   if (target.kind === "terminal") {
     search.set("terminalIds", target.terminalIds.join(","));
     search.set("activeTerminalId", target.activeTerminalId);
-  } else if (target.path) {
+  } else if (target.kind === "files" && target.path) {
     search.set("path", target.path);
   }
   return `/popout/${encodeURIComponent(target.environmentId)}/${encodeURIComponent(target.threadId)}?${search.toString()}`;
 }
 
 export function paneWindowTitle(target: PaneWindowTarget): string {
-  if (target.kind === "terminal") return "Terminal";
-  if (target.path) return target.path.slice(target.path.lastIndexOf("/") + 1);
-  return "Files";
+  switch (target.kind) {
+    case "terminal":
+      return "Terminal";
+    case "chat":
+      return "Chat";
+    case "files":
+      return target.path ? target.path.slice(target.path.lastIndexOf("/") + 1) : "Files";
+  }
 }
 
 /**

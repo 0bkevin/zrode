@@ -23,6 +23,7 @@ import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
+import { isPopoutWindow } from "~/lib/windowScope";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { resolvePathLinkTarget } from "~/terminal-links";
 import { ScrollArea } from "~/components/ui/scroll-area";
@@ -78,6 +79,9 @@ interface FilePreviewPanelProps {
 }
 
 const FILE_EXPLORER_STORAGE_KEY = "zrode.fileExplorerOpen";
+// Whether review-comment annotations reach the chat composer from this
+// window; constant for the window's lifetime.
+const reviewCommentsAvailable = !isPopoutWindow();
 const FILE_SAVE_DEBOUNCE_MS = 500;
 const FILE_LINK_REVEAL_ATTRIBUTE = "data-file-link-reveal";
 const FILE_LINK_REVEAL_UNSAFE_CSS = `
@@ -609,8 +613,12 @@ function EditableFileSurface({
             file={fileState.file}
             options={{
               disableFileHeader: true,
-              enableGutterUtility: !hasOpenCommentForm,
-              enableLineSelection: !hasOpenCommentForm,
+              // Review comments land in the composer draft, which is
+              // window-local in popouts — they would render as attached but
+              // never reach the main window's composer. Disable the
+              // affordance there instead of silently dropping input.
+              enableGutterUtility: reviewCommentsAvailable && !hasOpenCommentForm,
+              enableLineSelection: reviewCommentsAvailable && !hasOpenCommentForm,
               onGutterUtilityClick: setSelectedRange,
               onLineSelectionChange: setSelectedRange,
               onLineSelectionEnd: handleLineSelectionEnd,
