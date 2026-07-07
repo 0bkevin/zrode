@@ -4,6 +4,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -413,6 +414,75 @@ describe("OrchestrationEngine", () => {
       "thread.created",
       "thread.deleted",
     ]);
+    await system.dispose();
+  });
+
+  it("persists a project session history import request only for explicit consent", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+
+    const withoutConsent = await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-no-import-create"),
+        projectId: asProjectId("project-no-import"),
+        title: "No Import Project",
+        workspaceRoot: "/tmp/project-no-import",
+        importSessionHistory: false,
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    const withConsent = await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-import-create"),
+        projectId: asProjectId("project-import"),
+        title: "Import Project",
+        workspaceRoot: "/tmp/project-import",
+        importSessionHistory: true,
+        sessionHistoryImportProviders: [
+          ProviderDriverKind.make("codex"),
+          ProviderDriverKind.make("opencode"),
+        ],
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+
+    expect(withoutConsent.sequence).toBe(1);
+    expect(withConsent.sequence).toBe(3);
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "project.created",
+      "project.created",
+      "project.session-history-import-requested",
+    ]);
+
+    const importRequest = events[2];
+    expect(importRequest?.type).toBe("project.session-history-import-requested");
+    if (importRequest?.type !== "project.session-history-import-requested") {
+      throw new Error("Expected project session history import request event.");
+    }
+    expect(importRequest.payload).toEqual({
+      projectId: asProjectId("project-import"),
+      workspaceRoot: "/tmp/project-import",
+      providers: [ProviderDriverKind.make("codex"), ProviderDriverKind.make("opencode")],
+      requestedAt: createdAt,
+    });
+
     await system.dispose();
   });
 

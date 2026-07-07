@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ThreadId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -39,6 +40,190 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const event = Array.isArray(result) ? result[0] : result;
       expect(event.type).toBe("project.created");
       expect((event.payload as { scripts: unknown[] }).scripts).toEqual([]);
+    }),
+  );
+
+  it.effect("does not request project session history import without explicit consent", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const readModel = createEmptyReadModel(now);
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-create-import-history"),
+          projectId: asProjectId("project-import-history"),
+          title: "Import History",
+          workspaceRoot: "/tmp/import-history",
+          createdAt: now,
+        },
+        readModel,
+      });
+
+      const event = Array.isArray(result) ? result : [result];
+      expect(event).toHaveLength(1);
+      expect(event[0]?.type).toBe("project.created");
+    }),
+  );
+
+  it.effect("does not request project session history import without selected providers", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const readModel = createEmptyReadModel(now);
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-create-import-history-no-providers"),
+          projectId: asProjectId("project-import-history-no-providers"),
+          title: "Import History",
+          workspaceRoot: "/tmp/import-history",
+          importSessionHistory: true,
+          createdAt: now,
+        },
+        readModel,
+      });
+
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((event) => event.type)).toEqual(["project.created"]);
+    }),
+  );
+
+  it.effect(
+    "emits a project session history import request only with explicit consent and providers",
+    () =>
+      Effect.gen(function* () {
+        const now = "2026-01-01T00:00:00.000Z";
+        const readModel = createEmptyReadModel(now);
+
+        const result = yield* decideOrchestrationCommand({
+          command: {
+            type: "project.create",
+            commandId: CommandId.make("cmd-project-create-import-history"),
+            projectId: asProjectId("project-import-history"),
+            title: "Import History",
+            workspaceRoot: "/tmp/import-history",
+            importSessionHistory: true,
+            sessionHistoryImportProviders: [
+              ProviderDriverKind.make("codex"),
+              ProviderDriverKind.make("claudeAgent"),
+            ],
+            createdAt: now,
+          },
+          readModel,
+        });
+
+        const events = Array.isArray(result) ? result : [result];
+        expect(events.map((event) => event.type)).toEqual([
+          "project.created",
+          "project.session-history-import-requested",
+        ]);
+        const event = events[1];
+        expect(event?.type).toBe("project.session-history-import-requested");
+        if (event?.type !== "project.session-history-import-requested") return;
+        expect(event.payload).toEqual({
+          projectId: asProjectId("project-import-history"),
+          workspaceRoot: "/tmp/import-history",
+          providers: [ProviderDriverKind.make("codex"), ProviderDriverKind.make("claudeAgent")],
+          requestedAt: now,
+        });
+      }),
+  );
+
+  it.effect("imports historical thread messages without requesting a provider turn", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const initial = createEmptyReadModel(now);
+      const readModel = yield* projectEvent(initial, {
+        sequence: 1,
+        eventId: asEventId("evt-project-create-for-history-import"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-history-import"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.make("cmd-project-create-for-history-import"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-project-create-for-history-import"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-history-import"),
+          title: "Import Project",
+          workspaceRoot: "/tmp/import-project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.history.import",
+          commandId: CommandId.make("cmd-history-import"),
+          threadId: ThreadId.make("thread-history-import"),
+          projectId: asProjectId("project-history-import"),
+          title: "Imported Session",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          provider: ProviderDriverKind.make("codex"),
+          providerThreadId: "codex-thread-1",
+          messages: [
+            {
+              messageId: asMessageId("history-message-user"),
+              role: "user",
+              text: "hello",
+              createdAt: now,
+            },
+            {
+              messageId: asMessageId("history-message-assistant"),
+              role: "assistant",
+              text: "hi",
+              createdAt: now,
+            },
+          ],
+          createdAt: now,
+        },
+        readModel,
+      });
+
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.created",
+        "thread.message-sent",
+        "thread.message-sent",
+      ]);
+      expect(events.some((event) => event.type === "thread.turn-start-requested")).toBe(false);
+    }),
+  );
+
+  it.effect("emits a completion event from project.session-history-import.complete", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const readModel = createEmptyReadModel(now);
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "project.session-history-import.complete",
+          commandId: CommandId.make("cmd-history-import-complete"),
+          projectId: asProjectId("project-history-import"),
+          requestEventId: asEventId("evt-history-import-request"),
+          createdAt: now,
+        },
+        // The read model has no such project on purpose: completion must be
+        // recordable even after the project was deleted mid-import.
+        readModel,
+      });
+
+      const event = Array.isArray(result) ? result[0] : result;
+      expect(event?.type).toBe("project.session-history-import-completed");
+      if (event?.type !== "project.session-history-import-completed") return;
+      expect(event.payload).toEqual({
+        projectId: asProjectId("project-history-import"),
+        requestEventId: asEventId("evt-history-import-request"),
+        completedAt: now,
+      });
     }),
   );
 

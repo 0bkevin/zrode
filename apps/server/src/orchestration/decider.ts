@@ -1,4 +1,6 @@
 import {
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE,
   EventId,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -225,7 +227,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         projectId: command.projectId,
       });
 
-      return {
+      const createdEvent = {
         ...(yield* withEventBase({
           aggregateKind: "project",
           aggregateId: command.projectId,
@@ -242,7 +244,32 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
-      };
+      } satisfies PlannedOrchestrationEvent;
+
+      const importProviders = [...new Set(command.sessionHistoryImportProviders ?? [])];
+
+      if (command.importSessionHistory !== true || importProviders.length === 0) {
+        return createdEvent;
+      }
+
+      return [
+        createdEvent,
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "project",
+            aggregateId: command.projectId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "project.session-history-import-requested",
+          payload: {
+            projectId: command.projectId,
+            workspaceRoot: command.workspaceRoot,
+            providers: importProviders,
+            requestedAt: command.createdAt,
+          },
+        },
+      ];
     }
 
     case "project.meta.update": {
@@ -408,6 +435,91 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         },
       ];
+    }
+
+    case "thread.history.import": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+
+      const threadCreatedEvent = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread" as const,
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {
+            adapterKey: `history-import:${command.provider}`,
+          },
+        })),
+        type: "thread.created" as const,
+        payload: {
+          threadId: command.threadId,
+          projectId: command.projectId,
+          title: command.title,
+          modelSelection: command.modelSelection,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      } satisfies PlannedOrchestrationEvent;
+
+      const messageEvents: PlannedOrchestrationEvent[] = [];
+      for (const message of command.messages) {
+        messageEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread" as const,
+            aggregateId: command.threadId,
+            occurredAt: message.createdAt,
+            commandId: command.commandId,
+            metadata: {
+              adapterKey: `history-import:${command.provider}`,
+            },
+          })),
+          type: "thread.message-sent" as const,
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        } satisfies PlannedOrchestrationEvent);
+      }
+
+      return [threadCreatedEvent, ...messageEvents];
+    }
+
+    case "project.session-history-import.complete": {
+      // Bookkeeping event recorded even when the project was deleted
+      // mid-import so the request is never replayed again.
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "project.session-history-import-completed",
+        payload: {
+          projectId: command.projectId,
+          requestEventId: command.requestEventId,
+          completedAt: command.createdAt,
+        },
+      };
     }
 
     case "thread.delete": {

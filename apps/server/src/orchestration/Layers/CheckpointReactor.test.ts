@@ -346,11 +346,14 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(NodeServices.layer),
     );
 
-    runtime = ManagedRuntime.make(layer);
-    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
-    const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
-    const reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
-    const checkpointStore = await runtime.runPromise(
+    const runtimeForHarness = ManagedRuntime.make(layer);
+    runtime = runtimeForHarness;
+    const engine = await runtimeForHarness.runPromise(Effect.service(OrchestrationEngineService));
+    const snapshotQuery = await runtimeForHarness.runPromise(
+      Effect.service(ProjectionSnapshotQuery),
+    );
+    const reactor = await runtimeForHarness.runPromise(Effect.service(CheckpointReactor));
+    const checkpointStore = await runtimeForHarness.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
     );
     scope = await Effect.runPromise(Scope.make("sequential"));
@@ -420,6 +423,7 @@ describe("CheckpointReactor", () => {
       provider,
       cwd,
       drain,
+      run: <A, E>(effect: Effect.Effect<A, E, never>) => runtimeForHarness.runPromise(effect),
     };
   }
 
@@ -585,6 +589,44 @@ describe("CheckpointReactor", () => {
     await harness.drain();
 
     expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
+  });
+
+  it("does not capture git checkpoints for imported history messages", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const historyThreadId = ThreadId.make("thread-history-import-checkpoint");
+
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.history.import",
+        commandId: CommandId.make("cmd-history-import-checkpoint"),
+        threadId: historyThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Imported history",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        provider: ProviderDriverKind.make("codex"),
+        providerThreadId: "codex-history-checkpoint",
+        messages: [
+          {
+            messageId: MessageId.make("history-import-checkpoint-message"),
+            role: "user",
+            text: "historical prompt",
+            createdAt,
+          },
+        ],
+        createdAt,
+      }),
+    );
+
+    await harness.drain();
+
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(historyThreadId, 0))).toBe(false);
+    const snapshot = await harness.readModel();
+    const historyThread = snapshot.threads.find((entry) => entry.id === historyThreadId);
+    expect(historyThread?.checkpoints).toHaveLength(0);
   });
 
   it("ignores auxiliary thread turn completion while primary turn is active", async () => {
