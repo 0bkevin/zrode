@@ -1,6 +1,15 @@
 import type { ContextMenuItem, PreviewSessionSnapshot } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
-import { ClipboardList, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
+import {
+  ClipboardList,
+  FileDiff,
+  Files,
+  Globe2,
+  PictureInPicture2,
+  Plus,
+  TerminalSquare,
+  X,
+} from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
@@ -35,6 +44,8 @@ interface RightPanelTabsProps {
   previewSessions: Readonly<Record<string, PreviewSessionSnapshot>>;
   terminalLabelsById: ReadonlyMap<string, string>;
   onActivate: (surface: RightPanelSurface) => void;
+  /** Absent when surfaces cannot be detached (e.g. draft threads). */
+  onMoveSurfaceToNewWindow?: ((surface: RightPanelSurface) => void) | undefined;
   onCloseSurface: (surface: RightPanelSurface) => void;
   onCloseOtherSurfaces: (surface: RightPanelSurface) => void;
   onCloseSurfacesToRight: (surface: RightPanelSurface) => void;
@@ -56,7 +67,26 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
 } as const;
 
-type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
+type TabContextMenuAction =
+  | "copy-path"
+  | "move-to-window"
+  | "close"
+  | "close-others"
+  | "close-to-right"
+  | "close-all";
+
+// Surfaces that can be hosted by a dedicated pane window: server-backed
+// panes, plus preview tabs with a live desktop tab (their webview is
+// re-created in the pane window from the session's URL). Diff/plan remain
+// main-window only.
+function canMoveSurfaceToNewWindow(surface: RightPanelSurface): boolean {
+  return (
+    surface.kind === "terminal" ||
+    surface.kind === "files" ||
+    surface.kind === "file" ||
+    (surface.kind === "preview" && surface.resourceId !== null)
+  );
+}
 
 function DisabledReasonTooltip(props: { reason: string; trigger: ReactElement }) {
   return (
@@ -273,6 +303,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
   const { resolvedTheme } = useTheme();
   const tabListRef = useRef<HTMLDivElement>(null);
+  const activeSurface =
+    props.surfaces.find((surface) => surface.id === props.activeSurfaceId) ?? null;
+  const onMoveSurfaceToNewWindow = props.onMoveSurfaceToNewWindow;
 
   const handleTabContextMenu = useCallback(
     async (event: ReactMouseEvent, surface: RightPanelSurface) => {
@@ -288,6 +321,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       const items: ContextMenuItem<TabContextMenuAction>[] = [];
       if (surface.kind === "file") {
         items.push({ id: "copy-path", label: "Copy path" });
+      }
+      if (props.onMoveSurfaceToNewWindow && canMoveSurfaceToNewWindow(surface)) {
+        items.push({ id: "move-to-window", label: "Move to new window" });
       }
       items.push(
         { id: "close", label: "Close" },
@@ -312,6 +348,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       switch (action) {
         case "copy-path":
           if (surface.kind === "file") props.onCopyFilePath(surface.relativePath);
+          break;
+        case "move-to-window":
+          props.onMoveSurfaceToNewWindow?.(surface);
           break;
         case "close":
           props.onCloseSurface(surface);
@@ -475,6 +514,23 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             ) : null}
           </div>
         </ScrollArea>
+        {activeSurface && onMoveSurfaceToNewWindow && canMoveSurfaceToNewWindow(activeSurface) ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label={`Move ${surfaceTitle(activeSurface, props.previewSessions, props.terminalLabelsById)} to new window`}
+                  className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [-webkit-app-region:no-drag]"
+                  onClick={() => onMoveSurfaceToNewWindow(activeSurface)}
+                >
+                  <PictureInPicture2 className="size-4" />
+                </button>
+              }
+            />
+            <TooltipPopup side="bottom">Move to new window</TooltipPopup>
+          </Tooltip>
+        ) : null}
         {props.layoutControls}
       </div>
       <div className="flex min-h-0 flex-1 flex-col">

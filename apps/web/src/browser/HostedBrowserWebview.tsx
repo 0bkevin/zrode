@@ -105,8 +105,35 @@ export function HostedBrowserWebview(props: {
     webview.addEventListener("did-attach", register);
     webview.addEventListener("dom-ready", register);
     register();
+    // Re-assert registration when the desktop tab reports a different guest:
+    // a transient cross-window claim expiry (e.g. after system sleep) can let
+    // another window steal and then abandon the registration, leaving the tab
+    // pointed at a destroyed webContents while this guest is alive. Throttled
+    // so two live hosts can never fight in a tight loop.
+    let lastReassertAt = 0;
+    const unsubscribeStateChange = bridge.onStateChange((changedTabId, state) => {
+      if (disposed || changedTabId !== tabId || webviewRef.current !== webview) return;
+      let ownWebContentsId: number | null = null;
+      try {
+        ownWebContentsId = webview.getWebContentsId();
+      } catch {
+        return;
+      }
+      if (
+        !Number.isInteger(ownWebContentsId) ||
+        (ownWebContentsId as number) <= 0 ||
+        state.webContentsId === ownWebContentsId
+      ) {
+        return;
+      }
+      const now = Date.now();
+      if (now - lastReassertAt < 1_000) return;
+      lastReassertAt = now;
+      register();
+    });
     return () => {
       disposed = true;
+      unsubscribeStateChange();
       webview.removeEventListener("did-attach", register);
       webview.removeEventListener("dom-ready", register);
     };

@@ -2,6 +2,8 @@ import * as Schema from "effect/Schema";
 import * as Record from "effect/Record";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 
+import { isPopoutWindow } from "../lib/windowScope";
+
 export class LocalStorageOperationError extends Schema.TaggedErrorClass<LocalStorageOperationError>()(
   "LocalStorageOperationError",
   {
@@ -15,22 +17,27 @@ export class LocalStorageOperationError extends Schema.TaggedErrorClass<LocalSto
   }
 }
 
+function createMemoryLocalStorage(): Storage {
+  const store = new Map<string, string>();
+  return {
+    clear: () => store.clear(),
+    getItem: (_) => store.get(_) ?? null,
+    key: (_) => Record.keys(store).at(_) ?? null,
+    get length() {
+      return store.size;
+    },
+    removeItem: (_) => store.delete(_),
+    setItem: (_, value) => store.set(_, value),
+  };
+}
+
+// Popout pane windows get window-local storage for the same reason as
+// resolveStorage in lib/storage.ts: their writes must not clobber the main
+// window's keys (file-explorer visibility, panel widths, ...).
 const isomorphicLocalStorage: Storage =
-  typeof window !== "undefined"
+  typeof window !== "undefined" && !isPopoutWindow()
     ? window.localStorage
-    : (function () {
-        const store = new Map<string, string>();
-        return {
-          clear: () => store.clear(),
-          getItem: (_) => store.get(_) ?? null,
-          key: (_) => Record.keys(store).at(_) ?? null,
-          get length() {
-            return store.size;
-          },
-          removeItem: (_) => store.delete(_),
-          setItem: (_, value) => store.set(_, value),
-        };
-      })();
+    : createMemoryLocalStorage();
 
 const read = (key: string) => {
   try {

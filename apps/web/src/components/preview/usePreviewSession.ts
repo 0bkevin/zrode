@@ -7,6 +7,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
+import { isPopoutWindow } from "~/lib/windowScope";
 import {
   applyPreviewServerEvent,
   applyPreviewServerSnapshot,
@@ -52,6 +53,14 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
         recoveringUrl = null;
         recoveryId += 1;
         reconcilePreviewServerSessions(threadRef, result.value.sessions);
+        return;
+      }
+
+      // Auto-recovery re-opens a session from the last known URL. Popout
+      // windows also mount this hook now; only the main window may recover,
+      // otherwise two windows race to open duplicate sessions.
+      if (isPopoutWindow()) {
+        applyPreviewServerSnapshot(threadRef, null);
         return;
       }
 

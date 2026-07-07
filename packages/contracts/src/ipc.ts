@@ -440,6 +440,28 @@ export const PickFolderOptionsSchema = Schema.Struct({
   targetEnvironmentId: Schema.optionalKey(Schema.String),
 });
 
+export interface DesktopPaneWindowInput {
+  // App-relative route path for the pane window's renderer, e.g.
+  // "/popout/env/thread?kind=terminal". Constrained to the /popout/
+  // route namespace so this IPC surface can only open pane views, never
+  // arbitrary app locations.
+  path: string;
+  title?: string;
+  width?: number;
+  height?: number;
+}
+
+const PaneWindowDimensionSchema = Schema.Int.check(
+  Schema.isBetween({ minimum: 200, maximum: 8000 }),
+);
+
+export const DesktopPaneWindowInputSchema = Schema.Struct({
+  path: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
+  title: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))),
+  width: Schema.optionalKey(PaneWindowDimensionSchema),
+  height: Schema.optionalKey(PaneWindowDimensionSchema),
+});
+
 export interface DesktopWslDistro {
   name: string;
   isDefault: boolean;
@@ -973,6 +995,11 @@ export interface DesktopBridge {
     bearerToken: string,
   ) => Promise<AuthWebSocketTicketResult>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
+  /**
+   * Prompts still awaiting an answer. Fetched by the prompt dialog on mount
+   * so a prompt pushed while this window was loading is not lost.
+   */
+  getPendingSshPasswordPrompts: () => Promise<readonly DesktopSshPasswordPromptRequest[]>;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
@@ -993,6 +1020,12 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /**
+   * Open a dedicated OS window rendering a single pane (terminal, files, …)
+   * at a /popout/ route. Resolves false when the main process rejects the
+   * request (e.g. a path outside the popout namespace).
+   */
+  openPaneWindow: (input: DesktopPaneWindowInput) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;

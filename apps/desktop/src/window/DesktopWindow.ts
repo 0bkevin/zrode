@@ -1,3 +1,4 @@
+import type { DesktopPaneWindowInput } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -76,6 +77,13 @@ export class DesktopWindow extends Context.Service<
     // produce a stranded window pointing at nothing.
     readonly handleBackendNotReady: Effect.Effect<void>;
     readonly dispatchMenuAction: (action: string) => Effect.Effect<void, DesktopWindowError>;
+    // Open a dedicated OS window rendering a single pane of the web app at a
+    // /popout/ route. Pane windows use the native OS frame, are never treated
+    // as the main window, and don't participate in the preview subsystem.
+    // Returns false when the requested path is outside the popout namespace.
+    readonly createPane: (
+      input: DesktopPaneWindowInput,
+    ) => Effect.Effect<boolean, DesktopWindowError>;
     readonly syncAppearance: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
@@ -163,6 +171,7 @@ function syncWindowAppearance(
   window: Electron.BrowserWindow,
   shouldUseDarkColors: boolean,
   platform: NodeJS.Platform,
+  hasTitleBarOverlay: boolean,
 ): Effect.Effect<void> {
   return Effect.sync(() => {
     if (window.isDestroyed()) {
@@ -171,10 +180,33 @@ function syncWindowAppearance(
 
     window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
-    if (typeof titleBarOverlay === "object") {
-      window.setTitleBarOverlay(titleBarOverlay);
+    // setTitleBarOverlay throws on windows created without an overlay
+    // (native-frame pane windows, the frameless splash).
+    if (typeof titleBarOverlay === "object" && hasTitleBarOverlay) {
+      try {
+        window.setTitleBarOverlay(titleBarOverlay);
+      } catch {
+        // A window created without an overlay can slip through the membership
+        // check (e.g. a pane window between creation and registration); a
+        // missed overlay recolor must not kill the appearance sync.
+      }
     }
   });
+}
+
+export const PANE_WINDOW_PATH_PREFIX = "/popout/";
+
+export function isAllowedPaneWindowPath(path: string): boolean {
+  return path.startsWith(PANE_WINDOW_PATH_PREFIX);
+}
+
+// Belt-and-braces bounds for renderer-supplied pane geometry; the IPC schema
+// already validates, but the window must stay usable whatever arrives here.
+function clampPaneWindowDimension(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(8000, Math.max(200, Math.round(value)));
 }
 
 type RevealSubscription = (listener: () => void) => void;
@@ -211,6 +243,10 @@ export const make = Effect.gen(function* () {
   // The transient "Connecting to WSL" splash window, tracked separately so it
   // is never mistaken for the real main window.
   const splashWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  // Ids of live pane windows (popout terminal/files/...). Tracked so
+  // main-window resolution and menu dispatch never latch onto a pane, and so
+  // appearance sync knows these windows have no title-bar overlay.
+  const paneWindowIdsRef = yield* Ref.make<ReadonlySet<number>>(new Set<number>());
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
@@ -238,44 +274,32 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(Effect.flatMap(withoutSplash));
-  const focusedMainWindow = electronWindow.focusedMainOrFirst.pipe(Effect.flatMap(withoutSplash));
+  // Pane windows must never be treated as the main window: menu actions are
+  // handled by the app shell, which pane routes don't render, and ensureMain
+  // must recreate a real main even while panes are still open.
+  const withoutPanes = (window: Option.Option<Electron.BrowserWindow>) =>
+    Ref.get(paneWindowIdsRef).pipe(
+      Effect.map((paneIds) =>
+        Option.isSome(window) && paneIds.has(window.value.id)
+          ? Option.none<Electron.BrowserWindow>()
+          : window,
+      ),
+    );
 
-  const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
-    Electron.BrowserWindow,
-    DesktopWindowError
-  > {
-    yield* previewManager.getBrowserSession();
-    const applicationUrl = getDesktopUrl(environment.isDevelopment);
-    const iconPaths = yield* assets.iconPaths;
-    const iconOption = getIconOption(iconPaths, environment.platform);
-    const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
-    const window = yield* electronWindow.create({
-      width: 1100,
-      height: 780,
-      minWidth: 840,
-      minHeight: 620,
-      show: false,
-      autoHideMenuBar: true,
-      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
-      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
-      ...iconOption,
-      title: environment.displayName,
-      ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
-      webPreferences: {
-        preload: environment.preloadPath,
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webviewTag: true,
-      },
-    });
+  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(
+    Effect.flatMap(withoutSplash),
+    Effect.flatMap(withoutPanes),
+  );
+  const focusedMainWindow = electronWindow.focusedMainOrFirst.pipe(
+    Effect.flatMap(withoutSplash),
+    Effect.flatMap(withoutPanes),
+  );
 
-    if (environment.platform === "darwin") {
-      window.setAutoHideCursor(false);
-    }
-
-    yield* previewManager.setMainWindow(window);
+  // Shared renderer wiring used by both the main window and pane windows:
+  // only preview-partition webviews may attach, spellcheck/edit context menu,
+  // and routing external links to the OS browser instead of in-app
+  // navigation or new Electron windows.
+  const attachPreviewWebviewGuard = (window: Electron.BrowserWindow) => {
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       if (
         typeof params.partition !== "string" ||
@@ -289,7 +313,9 @@ export const make = Effect.gen(function* () {
       webPreferences.nodeIntegrationInSubFrames = false;
       webPreferences.contextIsolation = false;
     });
+  };
 
+  const attachRendererContextMenu = (window: Electron.BrowserWindow) => {
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
 
@@ -337,7 +363,12 @@ export const make = Effect.gen(function* () {
 
       void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
     });
+  };
 
+  const attachExternalNavigationGuards = (
+    window: Electron.BrowserWindow,
+    applicationUrl: string,
+  ) => {
     window.webContents.setWindowOpenHandler(({ url }) => {
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
         void runPromise(electronShell.openExternal(url));
@@ -359,47 +390,48 @@ export const make = Effect.gen(function* () {
         void runPromise(electronShell.openExternal(url));
       }
     });
+  };
 
-    window.on("page-title-updated", (event) => {
-      event.preventDefault();
-      window.setTitle(environment.displayName);
-    });
-
-    let developmentLoadRetryIndex = 0;
-    let developmentLoadRetryFiber: Fiber.Fiber<void, never> | undefined;
-    const clearDevelopmentLoadRetry = () => {
-      if (developmentLoadRetryFiber === undefined) {
+  // Renderer loading shared by the main window and pane windows: initial
+  // load, failure/crash logging, and the development retry/backoff that
+  // covers Vite/backend restarts.
+  const attachRendererLoadLifecycle = (input: {
+    window: Electron.BrowserWindow;
+    applicationUrl: string;
+    targetUrl: string;
+    logLabel: string;
+    onLoaded?: () => void;
+  }) => {
+    const { window, applicationUrl, targetUrl, logLabel, onLoaded } = input;
+    let retryIndex = 0;
+    let retryFiber: Fiber.Fiber<void, never> | undefined;
+    const clearRetry = () => {
+      if (retryFiber === undefined) {
         return;
       }
-      const retryFiber = developmentLoadRetryFiber;
-      developmentLoadRetryFiber = undefined;
-      runFork(Fiber.interrupt(retryFiber));
+      const fiber = retryFiber;
+      retryFiber = undefined;
+      runFork(Fiber.interrupt(fiber));
     };
-    const loadApplication = () => {
+    const load = () => {
       if (window.isDestroyed()) {
         return;
       }
-      void window.loadURL(applicationUrl).catch(() => undefined);
+      void window.loadURL(targetUrl).catch(() => undefined);
     };
-    const scheduleDevelopmentLoadRetry = () => {
-      if (developmentLoadRetryFiber !== undefined || window.isDestroyed()) {
+    const scheduleRetry = () => {
+      if (retryFiber !== undefined || window.isDestroyed()) {
         return undefined;
       }
-
-      const retryIndex = Math.min(
-        developmentLoadRetryIndex,
-        DEVELOPMENT_LOAD_RETRY_DELAYS_MS.length - 1,
-      );
-      const retryInMs = DEVELOPMENT_LOAD_RETRY_DELAYS_MS[retryIndex] ?? 2_000;
-      developmentLoadRetryIndex += 1;
-      developmentLoadRetryFiber = runFork(
+      const delayIndex = Math.min(retryIndex, DEVELOPMENT_LOAD_RETRY_DELAYS_MS.length - 1);
+      const retryInMs = DEVELOPMENT_LOAD_RETRY_DELAYS_MS[delayIndex] ?? 2_000;
+      retryIndex += 1;
+      retryFiber = runFork(
         Effect.sleep(retryInMs).pipe(
           Effect.andThen(
             Effect.sync(() => {
-              developmentLoadRetryFiber = undefined;
-              if (!window.isDestroyed()) {
-                loadApplication();
-              }
+              retryFiber = undefined;
+              load();
             }),
           ),
         ),
@@ -417,9 +449,9 @@ export const make = Effect.gen(function* () {
       ) {
         return;
       }
-      clearDevelopmentLoadRetry();
-      developmentLoadRetryIndex = 0;
-      window.setTitle(environment.displayName);
+      clearRetry();
+      retryIndex = 0;
+      onLoaded?.();
     });
     window.webContents.on(
       "did-fail-load",
@@ -435,10 +467,10 @@ export const make = Effect.gen(function* () {
             isMainFrame,
             validatedUrl: validatedURL,
           })
-            ? scheduleDevelopmentLoadRetry()
+            ? scheduleRetry()
             : undefined;
         void runPromise(
-          logWindowWarning("main window failed to load", {
+          logWindowWarning(`${logLabel} failed to load`, {
             errorCode,
             errorDescription,
             url: validatedURL,
@@ -449,11 +481,66 @@ export const make = Effect.gen(function* () {
     );
     window.webContents.on("render-process-gone", (_event, details) => {
       void runPromise(
-        logWindowWarning("main window render process gone", {
+        logWindowWarning(`${logLabel} render process gone`, {
           reason: details.reason,
           exitCode: details.exitCode,
         }),
       );
+    });
+
+    return { load, clearRetry };
+  };
+
+  const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
+    Electron.BrowserWindow,
+    DesktopWindowError
+  > {
+    yield* previewManager.getBrowserSession();
+    const applicationUrl = getDesktopUrl(environment.isDevelopment);
+    const iconPaths = yield* assets.iconPaths;
+    const iconOption = getIconOption(iconPaths, environment.platform);
+    const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    const window = yield* electronWindow.create({
+      width: 1100,
+      height: 780,
+      minWidth: 840,
+      minHeight: 620,
+      show: false,
+      autoHideMenuBar: true,
+      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...iconOption,
+      title: environment.displayName,
+      ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
+      webPreferences: {
+        preload: environment.preloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webviewTag: true,
+      },
+    });
+
+    if (environment.platform === "darwin") {
+      window.setAutoHideCursor(false);
+    }
+
+    yield* previewManager.setMainWindow(window);
+    attachPreviewWebviewGuard(window);
+    attachRendererContextMenu(window);
+    attachExternalNavigationGuards(window, applicationUrl);
+
+    window.on("page-title-updated", (event) => {
+      event.preventDefault();
+      window.setTitle(environment.displayName);
+    });
+
+    const rendererLoad = attachRendererLoadLifecycle({
+      window,
+      applicationUrl,
+      targetUrl: applicationUrl,
+      logLabel: "main window",
+      onLoaded: () => window.setTitle(environment.displayName),
     });
 
     const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
@@ -466,13 +553,13 @@ export const make = Effect.gen(function* () {
       void runPromise(Effect.andThen(electronWindow.reveal(window), dismissConnectingSplash));
     });
 
-    loadApplication();
+    rendererLoad.load();
     if (environment.isDevelopment) {
       window.webContents.openDevTools({ mode: "detach" });
     }
 
     window.on("closed", () => {
-      clearDevelopmentLoadRetry();
+      rendererLoad.clearRetry();
       void runPromise(electronWindow.clearMain(Option.some(window)));
     });
 
@@ -485,6 +572,85 @@ export const make = Effect.gen(function* () {
     yield* logWindowInfo("main window created");
     return window;
   }).pipe(Effect.withSpan("desktop.window.createMain"));
+
+  const createPane = Effect.fn("desktop.window.createPane")(function* (
+    input: DesktopPaneWindowInput,
+  ): Effect.fn.Return<boolean, DesktopWindowError> {
+    if (!isAllowedPaneWindowPath(input.path)) {
+      yield* logWindowWarning("rejected pane window request outside popout namespace", {
+        path: input.path,
+      });
+      return false;
+    }
+
+    // Pane windows can host preview webviews (a popped-out browser pane), so
+    // the browser session must exist before a <webview> tries to attach.
+    yield* previewManager.getBrowserSession();
+    const applicationUrl = getDesktopUrl(environment.isDevelopment);
+    const iconPaths = yield* assets.iconPaths;
+    const iconOption = getIconOption(iconPaths, environment.platform);
+    const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    const window = yield* electronWindow.create({
+      width: clampPaneWindowDimension(input.width, 1000),
+      height: clampPaneWindowDimension(input.height, 700),
+      minWidth: 480,
+      minHeight: 320,
+      show: false,
+      autoHideMenuBar: true,
+      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...iconOption,
+      title: input.title?.slice(0, 200) ?? environment.displayName,
+      // Native OS frame: pane windows carry no custom titlebar chrome, so the
+      // renderer needs no drag regions and the OS handles move/resize.
+      webPreferences: {
+        preload: environment.preloadPath,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webviewTag: true,
+      },
+    });
+
+    if (environment.platform === "darwin") {
+      window.setAutoHideCursor(false);
+    }
+
+    yield* Ref.update(paneWindowIdsRef, (paneIds) => new Set(paneIds).add(window.id));
+    // Pane windows may embed preview guests (popped-out browser tabs).
+    yield* previewManager.registerHostWindow(window);
+
+    attachPreviewWebviewGuard(window);
+    attachRendererContextMenu(window);
+    attachExternalNavigationGuards(window, applicationUrl);
+
+    // The pane route rides in the URL fragment: the renderer uses hash
+    // history in Electron and the desktop protocol proxy never sees the
+    // fragment, so every window loads the same proxied app URL.
+    const rendererLoad = attachRendererLoadLifecycle({
+      window,
+      applicationUrl,
+      targetUrl: `${applicationUrl}#${input.path}`,
+      logLabel: "pane window",
+    });
+    window.on("closed", () => {
+      rendererLoad.clearRetry();
+      void runPromise(
+        Ref.update(paneWindowIdsRef, (paneIds) => {
+          const next = new Set(paneIds);
+          next.delete(window.id);
+          return next;
+        }),
+      );
+    });
+    window.once("ready-to-show", () => {
+      void runPromise(electronWindow.reveal(window));
+    });
+
+    rendererLoad.load();
+    yield* logWindowInfo("pane window created", { path: input.path });
+    return true;
+  });
 
   const ensureMain = Effect.gen(function* () {
     const existingWindow = yield* currentMainWindow;
@@ -610,10 +776,18 @@ export const make = Effect.gen(function* () {
 
       send();
     }),
+    createPane,
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+      const paneWindowIds = yield* Ref.get(paneWindowIdsRef);
+      const splash = yield* Ref.get(splashWindowRef);
       yield* electronWindow.syncAllAppearance((window) =>
-        syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
+        syncWindowAppearance(
+          window,
+          shouldUseDarkColors,
+          environment.platform,
+          !paneWindowIds.has(window.id) && !(Option.isSome(splash) && splash.value === window),
+        ),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
   });

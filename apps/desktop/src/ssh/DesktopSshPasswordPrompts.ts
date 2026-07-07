@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SSH_PASSWORD_PROMPT_CHANNEL } from "../ipc/channels.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 const DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS = 3 * 60 * 1000;
 
@@ -189,12 +190,17 @@ export class DesktopSshPasswordPrompts extends Context.Service<
     readonly resolve: (
       input: DesktopSshPasswordPromptResolutionInput,
     ) => Effect.Effect<void, DesktopSshPasswordPromptResolveError>;
+    // Prompts awaiting an answer. The renderer's prompt dialog fetches these
+    // on mount so a prompt pushed while its window was still loading (e.g. a
+    // main window created on demand for the prompt) is not lost.
+    readonly listPending: Effect.Effect<ReadonlyArray<DesktopSshPasswordPromptRequest>>;
   }
 >()("@t3tools/desktop/ssh/DesktopSshPasswordPrompts") {}
 
 interface PendingSshPasswordPrompt {
   readonly requestId: string;
   readonly destination: string;
+  readonly promptRequest: DesktopSshPasswordPromptRequest;
   readonly deferred: Deferred.Deferred<string, DesktopSshPasswordPromptRequestError>;
 }
 
@@ -226,6 +232,7 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
   options: DesktopSshPasswordPromptsOptions = {},
 ) {
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const desktopWindow = yield* DesktopWindow.DesktopWindow;
   const crypto = yield* Crypto.Crypto;
   const pendingRef = yield* Ref.make(new Map<string, PendingSshPasswordPrompt>());
   const passwordPromptTimeoutMs =
@@ -283,17 +290,28 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
   const request: DesktopSshPasswordPrompts["Service"]["request"] = Effect.fn(
     "desktop.sshPasswordPrompts.request",
   )(function* (input) {
-    const window = yield* electronWindow.main;
-    if (Option.isNone(window)) {
-      return yield* new DesktopSshPromptWindowUnavailableError({
-        destination: input.destination,
-        requestId: null,
-        stage: "before-request",
-      });
-    }
+    // The prompt dialog lives in the main window's renderer. When only pane
+    // windows are open (popouts can outlive the main window), create/reveal a
+    // main window to host the prompt; the dialog also pulls pending prompts
+    // on mount, so a prompt sent while that window is still loading is
+    // recovered rather than lost.
+    const existingMain = yield* electronWindow.main;
+    const mainWindow = Option.isSome(existingMain)
+      ? existingMain.value
+      : yield* desktopWindow.revealOrCreateMain.pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopSshPromptPresentationError({
+                requestId: null,
+                destination: input.destination,
+                operation: "check-window-before-request",
+                cause,
+              }),
+          ),
+        );
 
     const unavailableBeforeRequest = yield* Effect.try({
-      try: () => window.value.isDestroyed(),
+      try: () => mainWindow.isDestroyed(),
       catch: (cause) =>
         new DesktopSshPromptPresentationError({
           requestId: null,
@@ -334,6 +352,7 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
     const pending: PendingSshPasswordPrompt = {
       requestId,
       destination: input.destination,
+      promptRequest,
       deferred,
     };
     yield* Ref.update(pendingRef, (entries) => new Map(entries).set(requestId, pending));
@@ -375,8 +394,8 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
           }),
       });
     const cleanup = runPresentationOperation("remove-window-close-listener", () => {
-      if (!window.value.isDestroyed()) {
-        window.value.removeListener("closed", cancelOnWindowClosed);
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.removeListener("closed", cancelOnWindowClosed);
       }
     }).pipe(Effect.orDie, Effect.ensuring(removePending(pendingRef, requestId)), Effect.asVoid);
     const waitForPassword = Deferred.await(deferred).pipe(
@@ -412,7 +431,7 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
     return yield* Effect.gen(function* () {
       const unavailableBeforePresentation = yield* runPresentationOperation(
         "check-window-before-presentation",
-        () => window.value.isDestroyed(),
+        () => mainWindow.isDestroyed(),
       );
       if (unavailableBeforePresentation) {
         return yield* new DesktopSshPromptWindowUnavailableError({
@@ -422,16 +441,16 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
         });
       }
       yield* runPresentationOperation("register-window-close-listener", () =>
-        window.value.once("closed", cancelOnWindowClosed),
+        mainWindow.once("closed", cancelOnWindowClosed),
       );
       return yield* Effect.gen(function* () {
         yield* runPresentationOperation("send-prompt-request", () =>
-          window.value.webContents.send(SSH_PASSWORD_PROMPT_CHANNEL, promptRequest),
+          mainWindow.webContents.send(SSH_PASSWORD_PROMPT_CHANNEL, promptRequest),
         );
         yield* Effect.yieldNow;
         const unavailableAfterSend = yield* runPresentationOperation(
           "check-window-after-send",
-          () => window.value.isDestroyed(),
+          () => mainWindow.isDestroyed(),
         );
         if (unavailableAfterSend) {
           return yield* new DesktopSshPromptWindowUnavailableError({
@@ -441,14 +460,14 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
           });
         }
         const minimized = yield* runPresentationOperation("check-window-minimized", () =>
-          window.value.isMinimized(),
+          mainWindow.isMinimized(),
         );
         if (minimized) {
-          yield* runPresentationOperation("restore-window", () => window.value.restore());
+          yield* runPresentationOperation("restore-window", () => mainWindow.restore());
         }
         const unavailableAfterRestore = yield* runPresentationOperation(
           "check-window-after-restore",
-          () => window.value.isDestroyed(),
+          () => mainWindow.isDestroyed(),
         );
         if (unavailableAfterRestore) {
           return yield* new DesktopSshPromptWindowUnavailableError({
@@ -457,15 +476,20 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
             stage: "after-restore",
           });
         }
-        yield* runPresentationOperation("focus-window", () => window.value.focus());
+        yield* runPresentationOperation("focus-window", () => mainWindow.focus());
         return yield* waitForPassword;
       }).pipe(Effect.catch(preferSubmittedPassword));
     }).pipe(Effect.ensuring(cleanup));
   });
 
+  const listPending = Ref.get(pendingRef).pipe(
+    Effect.map((entries) => [...entries.values()].map((entry) => entry.promptRequest)),
+  );
+
   return DesktopSshPasswordPrompts.of({
     request,
     resolve,
+    listPending,
   });
 });
 

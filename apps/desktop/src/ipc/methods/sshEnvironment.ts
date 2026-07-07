@@ -16,6 +16,7 @@ import {
   DesktopSshEnvironmentTargetSchema,
   DesktopSshHttpBaseUrlInputSchema,
   DesktopSshPasswordPromptCancelledType,
+  DesktopSshPasswordPromptRequestSchema,
   DesktopSshPasswordPromptResolutionInputSchema,
   ExecutionEnvironmentDescriptor,
   EnvironmentInternalError,
@@ -208,6 +209,16 @@ export const issueSshWebSocketTicket = DesktopIpc.makeIpcMethod({
         bearerToken,
       }),
     )(httpBaseUrl);
+  }),
+});
+
+export const getPendingSshPasswordPrompts = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GET_PENDING_SSH_PROMPTS_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Array(DesktopSshPasswordPromptRequestSchema),
+  handler: Effect.fn("desktop.ipc.sshEnvironment.getPendingPasswordPrompts")(function* () {
+    const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
+    return yield* prompts.listPending;
   }),
 });
 

@@ -6,6 +6,8 @@ import { useEffect, useMemo } from "react";
 
 import { isElectron } from "~/env";
 import { useTheme } from "~/hooks/useTheme";
+import { useClaimedPreviewTabIds, useLocalPreviewTabClaims } from "~/lib/paneTerminalClaims";
+import { isPopoutWindow } from "~/lib/windowScope";
 import { useActivePreviewSessions } from "~/previewStateStore";
 
 import { readPreviewAnnotationTheme } from "./annotationTheme";
@@ -15,19 +17,31 @@ import { HostedBrowserWebview } from "./HostedBrowserWebview";
 export function ElectronBrowserHost() {
   const { resolvedTheme } = useTheme();
   const previewByThreadKey = useActivePreviewSessions();
+  // Per-tab window ownership: a popout window hosts exactly the tabs it has
+  // claimed; the main window hosts everything not claimed by another window.
+  // Without this, every window would mount a webview per session and fight
+  // over registering the same tabId with the desktop preview manager.
+  const remoteClaimedTabIds = useClaimedPreviewTabIds();
+  const localClaimedTabIds = useLocalPreviewTabClaims();
   const sessions = useMemo(
     () =>
       Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
         const threadRef = parseScopedThreadKey(threadKey);
         return threadRef
-          ? Object.values(previewState.sessions).map((snapshot) => ({
-              threadRef,
-              snapshot,
-              zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,
-            }))
+          ? Object.values(previewState.sessions)
+              .filter((snapshot) =>
+                isPopoutWindow()
+                  ? localClaimedTabIds.has(snapshot.tabId)
+                  : !remoteClaimedTabIds.has(snapshot.tabId),
+              )
+              .map((snapshot) => ({
+                threadRef,
+                snapshot,
+                zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,
+              }))
           : [];
       }),
-    [previewByThreadKey],
+    [localClaimedTabIds, previewByThreadKey, remoteClaimedTabIds],
   );
 
   useEffect(() => {
