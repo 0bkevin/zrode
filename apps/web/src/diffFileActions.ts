@@ -1,7 +1,7 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
 
-import { useRightPanelStore } from "./rightPanelStore";
 import { resolvePathLinkTarget } from "./terminal-links";
+import { openWorkspaceFileOrEditor } from "./workspaceFileActions";
 
 interface OpenDiffFilePrimaryActionInput {
   readonly threadRef: ScopedThreadRef | null;
@@ -16,10 +16,11 @@ export function openDiffFilePrimaryAction({
   activeCwd,
   openInEditor,
 }: OpenDiffFilePrimaryActionInput): void {
-  if (threadRef) {
-    useRightPanelStore.getState().openFile(threadRef, filePath);
-    return;
-  }
-
-  openInEditor(activeCwd ? resolvePathLinkTarget(filePath, activeCwd) : filePath);
+  // Diff paths are already repo-relative, so any thread context can preview them.
+  openWorkspaceFileOrEditor({
+    threadRef,
+    workspaceRelativePath: threadRef ? filePath : null,
+    openInEditor: () =>
+      openInEditor(activeCwd ? resolvePathLinkTarget(filePath, activeCwd) : filePath),
+  });
 }

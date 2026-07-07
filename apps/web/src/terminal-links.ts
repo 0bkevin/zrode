@@ -284,3 +284,68 @@ export function resolvePathLinkTarget(rawPath: string, cwd: string): string {
   if (!line) return resolvedPath;
   return `${resolvedPath}:${line}${column ? `:${column}` : ""}`;
 }
+
+export function normalizeWindowsDrivePath(path: string): string {
+  return /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+}
+
+// Collapses `.`/`..` segments so a path can be compared against a workspace root
+// without a textual prefix match wrongly accepting `..`-escaping paths (e.g.
+// `/repo/../other` must not be treated as living inside `/repo`).
+function normalizePathSegments(path: string): string {
+  const isAbsolute = path.startsWith("/");
+  const resolved: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      const last = resolved[resolved.length - 1];
+      if (resolved.length > 0 && last !== "..") {
+        resolved.pop();
+      } else if (!isAbsolute) {
+        resolved.push("..");
+      }
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return (isAbsolute ? "/" : "") + resolved.join("/");
+}
+
+// Returns `path` expressed relative to `workspaceRoot`, or null when the path
+// lives outside the workspace (so callers can fall back to an external editor).
+export function relativizeWorkspacePath(
+  path: string,
+  workspaceRoot: string | undefined,
+): string | null {
+  if (!workspaceRoot) return null;
+  const normalizedPath = normalizePathSegments(
+    normalizeWindowsDrivePath(path.replaceAll("\\", "/")),
+  );
+  const normalizedRoot = normalizePathSegments(
+    normalizeWindowsDrivePath(workspaceRoot.replaceAll("\\", "/")),
+  );
+  const pathForCompare = normalizedPath.toLowerCase();
+  const rootForCompare = normalizedRoot.toLowerCase();
+  if (!pathForCompare.startsWith(`${rootForCompare}/`)) return null;
+  return normalizedPath.slice(normalizedRoot.length + 1);
+}
+
+export interface WorkspaceFilePreviewTarget {
+  readonly relativePath: string;
+  readonly line: number | undefined;
+}
+
+// Resolves a raw terminal/file path against `cwd` and, when it points inside the
+// workspace, returns the workspace-relative path (plus an optional line) needed
+// to open the file in zrode's in-app preview. Paths outside the workspace return
+// null so callers can fall back to an external editor.
+export function resolveWorkspaceFilePreviewTarget(
+  rawPath: string,
+  cwd: string,
+): WorkspaceFilePreviewTarget | null {
+  const { path, line } = splitPathAndPosition(resolvePathLinkTarget(rawPath, cwd));
+  const relativePath = relativizeWorkspacePath(path, cwd);
+  if (!relativePath) return null;
+  const parsedLine = line ? Number.parseInt(line, 10) : Number.NaN;
+  return { relativePath, line: Number.isFinite(parsedLine) ? parsedLine : undefined };
+}

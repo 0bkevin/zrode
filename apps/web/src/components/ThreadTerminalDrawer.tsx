@@ -39,9 +39,11 @@ import {
   extractTerminalLinks,
   isTerminalLinkActivation,
   resolvePathLinkTarget,
+  resolveWorkspaceFilePreviewTarget,
   resolveWrappedTerminalLinkRange,
   wrappedTerminalLinkRangeIntersectsBufferLine,
 } from "../terminal-links";
+import { openWorkspaceFileOrEditor } from "../workspaceFileActions";
 import {
   isDiffToggleShortcut,
   isTerminalClearShortcut,
@@ -316,7 +318,29 @@ export function TerminalViewport({
     environmentId,
     serverConfig?.availableEditors ?? [],
   );
-  const openTerminalPath = useEffectEvent((target: string) => openInPreferredEditor(target));
+  const openTerminalPath = useEffectEvent((rawPath: string, terminal: Terminal) => {
+    // Prefer opening the file inside zrode's in-app preview; only fall back to an
+    // external editor for paths that live outside the workspace.
+    const previewTarget = resolveWorkspaceFilePreviewTarget(rawPath, cwd);
+    openWorkspaceFileOrEditor({
+      threadRef,
+      workspaceRelativePath: previewTarget?.relativePath ?? null,
+      line: previewTarget?.line,
+      openInEditor: () => {
+        void (async () => {
+          const result = await openInPreferredEditor(resolvePathLinkTarget(rawPath, cwd));
+          if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+            return;
+          }
+          const error = squashAtomCommandFailure(result);
+          writeSystemMessage(
+            terminal,
+            error instanceof Error ? error.message : "Unable to open path",
+          );
+        })();
+      },
+    });
+  });
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
@@ -599,18 +623,7 @@ export function TerminalViewport({
                 return;
               }
 
-              const target = resolvePathLinkTarget(match.text, cwd);
-              void (async () => {
-                const result = await openTerminalPath(target);
-                if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-                  return;
-                }
-                const error = squashAtomCommandFailure(result);
-                writeSystemMessage(
-                  latestTerminal,
-                  error instanceof Error ? error.message : "Unable to open path",
-                );
-              })();
+              openTerminalPath(match.text, latestTerminal);
             },
           })),
         );

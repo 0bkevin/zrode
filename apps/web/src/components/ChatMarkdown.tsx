@@ -67,7 +67,7 @@ import {
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
-import { useRightPanelStore } from "../rightPanelStore";
+import { openWorkspaceFileOrEditor } from "../workspaceFileActions";
 import { useActiveEnvironmentId } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { assetEnvironment } from "../state/assets";
@@ -1042,11 +1042,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   }, [onOpen, targetPath]);
 
   const handleOpenInFilePreview = useCallback(() => {
-    if (!threadRef || !workspaceRelativePath) {
-      handleOpenInEditor();
-      return;
-    }
-    useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line);
+    openWorkspaceFileOrEditor({
+      threadRef,
+      workspaceRelativePath,
+      line,
+      openInEditor: handleOpenInEditor,
+    });
   }, [handleOpenInEditor, line, threadRef, workspaceRelativePath]);
 
   const handleOpenInBrowser = useCallback(() => {

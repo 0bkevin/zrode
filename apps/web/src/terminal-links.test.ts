@@ -5,6 +5,7 @@ import {
   extractTerminalLinks,
   isTerminalLinkActivation,
   resolvePathLinkTarget,
+  resolveWorkspaceFilePreviewTarget,
   resolveWrappedTerminalLinkRange,
   wrappedTerminalLinkRangeIntersectsBufferLine,
   type TerminalBufferLineLike,
@@ -195,6 +196,49 @@ describe("resolvePathLinkTarget", () => {
     expect(
       resolvePathLinkTarget("C:/Users/julius/project/src/main.ts:12", "C:\\Users\\julius\\project"),
     ).toBe("C:/Users/julius/project/src/main.ts:12");
+  });
+});
+
+describe("resolveWorkspaceFilePreviewTarget", () => {
+  it("relativizes in-workspace paths and parses the line", () => {
+    expect(resolveWorkspaceFilePreviewTarget("src/main.ts:42:7", "/Users/julius/project")).toEqual({
+      relativePath: "src/main.ts",
+      line: 42,
+    });
+  });
+
+  it("relativizes in-workspace absolute paths", () => {
+    expect(
+      resolveWorkspaceFilePreviewTarget(
+        "/Users/julius/project/src/main.ts",
+        "/Users/julius/project",
+      ),
+    ).toEqual({ relativePath: "src/main.ts", line: undefined });
+  });
+
+  it("returns null for paths outside the workspace so callers open an editor", () => {
+    expect(resolveWorkspaceFilePreviewTarget("/tmp/report.ts", "/Users/julius/project")).toBeNull();
+  });
+
+  it("returns null for relative paths that escape the workspace via ..", () => {
+    expect(
+      resolveWorkspaceFilePreviewTarget("../sibling/notes.txt", "/Users/julius/project"),
+    ).toBeNull();
+  });
+
+  it("collapses .. segments that stay inside the workspace", () => {
+    expect(
+      resolveWorkspaceFilePreviewTarget("src/nested/../main.ts:9", "/Users/julius/project"),
+    ).toEqual({ relativePath: "src/main.ts", line: 9 });
+  });
+
+  it("relativizes in-workspace Windows drive paths", () => {
+    expect(
+      resolveWorkspaceFilePreviewTarget(
+        "C:/Users/julius/project/src/main.ts:12",
+        "C:\\Users\\julius\\project",
+      ),
+    ).toEqual({ relativePath: "src/main.ts", line: 12 });
   });
 });
 
