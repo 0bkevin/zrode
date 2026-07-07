@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { previewAnnotationScreenshotFile } from "~/lib/previewAnnotation";
+import { popoutWindowKind } from "~/lib/windowScope";
 import { ensureLocalApi } from "~/localApi";
 import {
   rememberPreviewUrl,
@@ -64,6 +65,12 @@ const localApi = typeof window === "undefined" ? null : ensureLocalApi();
  * state when no session exists for the thread.
  */
 export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, visible }: Props) {
+  // Pick-element and screenshot-capture feed the chat composer. A preview-only
+  // popout window has no composer (its drafts are window-local), so those
+  // affordances would silently drop input there; chat popouts have their own
+  // composer and keep them. Evaluated per render: a popout's kind can change
+  // (e.g. preview → chat via the root thread-navigation rewrite).
+  const composerUnavailable = popoutWindowKind() === "preview";
   const [focusUrlNonce, setFocusUrlNonce] = useState<number | undefined>(undefined);
   const [pickActive, setPickActive] = useState(false);
   const activeRecordingTabId = useActiveBrowserRecordingTabId();
@@ -574,10 +581,12 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
         onRefresh={handleRefresh}
         onSubmit={(next) => void handleSubmitUrl(next)}
         onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
-        onCapture={previewBridge && tabId ? handleCapture : undefined}
+        onCapture={previewBridge && tabId && !composerUnavailable ? handleCapture : undefined}
         captureDisabled={!desktopOverlay || isUnreachable}
         recording={tabId !== null && activeRecordingTabId === tabId}
-        onPickElement={previewBridge && tabId ? handlePickElement : undefined}
+        onPickElement={
+          previewBridge && tabId && !composerUnavailable ? handlePickElement : undefined
+        }
         pickActive={pickActive}
         // Disable when there's no tab (nothing to pick on) OR the page
         // failed to load (a React overlay covers the webview, so the

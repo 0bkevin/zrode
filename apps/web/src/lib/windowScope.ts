@@ -76,6 +76,19 @@ export function isPopoutWindow(): boolean {
 }
 
 /**
+ * The pane kind this popout window currently displays ("terminal", "files",
+ * "chat", "preview"), or null in the main window. Used to gate features that
+ * need a particular pane's chrome (e.g. previews need a window that can host
+ * webviews and, for composer-bound actions, a composer).
+ */
+export function popoutWindowKind(): string | null {
+  if (!isPopoutWindow()) {
+    return null;
+  }
+  return describeCurrentPopoutLocation()?.search["kind"] ?? null;
+}
+
+/**
  * The popout route this window is currently on, falling back to the last
  * popout route it was seen on (e.g. while deciding a navigation whose URL a
  * history pop already committed). Null when the window never was on one.

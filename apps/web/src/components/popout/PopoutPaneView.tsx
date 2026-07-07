@@ -8,7 +8,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import ChatView from "~/components/ChatView";
 import { ThreadTerminalPanel, type TerminalPanelSurface } from "~/components/ThreadTerminalPanel";
 import { toastManager } from "~/components/ui/toast";
-import { usePaneTerminalClaimPublisher } from "~/lib/paneTerminalClaims";
+import { getConfiguredPreviewUrls } from "~/components/preview/previewEmptyStateLogic";
+import { useClaimedPreviewTabIds, usePaneClaimPublisher } from "~/lib/paneTerminalClaims";
+import { useThreadPreviewState } from "~/previewStateStore";
 import { useProject, useThread } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { environmentShell } from "~/state/shell";
@@ -19,16 +21,23 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { MAX_TERMINALS_PER_GROUP, type Project } from "~/types";
 
 const FilePreviewPanel = lazy(() => import("~/components/files/FilePreviewPanel"));
+const PreviewPanel = lazy(() =>
+  import("~/components/preview/PreviewPanel").then((module) => ({
+    default: module.PreviewPanel,
+  })),
+);
 
 export interface PopoutPaneSearch {
   // null = unrecognized kind; the view renders an error instead of guessing
   // (a mistyped popout URL must not, say, spawn a terminal session).
-  kind: "terminal" | "files" | "chat" | null;
+  kind: "terminal" | "files" | "chat" | "preview" | null;
   // Comma-separated terminal ids for kind=terminal.
   terminalIds?: string;
   activeTerminalId?: string;
   // Relative file path to open for kind=files.
   path?: string;
+  // Preview tab id for kind=preview.
+  tabId?: string;
 }
 
 /**
@@ -70,6 +79,23 @@ export function PopoutPaneView({
       <PopoutErrorFrame
         title="Zrode"
         message="This thread is no longer available. You can close this window."
+      />
+    );
+  }
+
+  if (search.kind === "preview") {
+    if (!search.tabId) {
+      return <PopoutErrorFrame title="Browser" message="This pane link is missing its tab." />;
+    }
+    if (!serverThread) {
+      return <PopoutConnectingFrame title="Browser" />;
+    }
+    return (
+      <PopoutPreviewPane
+        threadRef={threadRef}
+        tabId={search.tabId}
+        configuredUrls={getConfiguredPreviewUrls(project?.scripts)}
+        environmentReady={environmentReady}
       />
     );
   }
@@ -217,7 +243,11 @@ function PopoutTerminalPane({
   });
   const [focusRequestId, setFocusRequestId] = useState(1);
   // Claim these terminals so the main window's drawer doesn't re-adopt them.
-  usePaneTerminalClaimPublisher(threadRef, surface.terminalIds);
+  const claimResources = useMemo(
+    () => ({ terminalIds: surface.terminalIds, previewTabIds: [] }),
+    [surface.terminalIds],
+  );
+  usePaneClaimPublisher(threadRef, claimResources);
 
   const launchTerminal = useCallback(
     (terminalId: string) => {
@@ -317,6 +347,83 @@ function PopoutTerminalPane({
         onActiveTerminalChange={handleActiveTerminalChange}
         onCloseTerminal={handleCloseTerminal}
       />
+    </PopoutPaneFrame>
+  );
+}
+
+const SESSION_LOST_GRACE_MS = 8_000;
+
+function PopoutPreviewPane({
+  threadRef,
+  tabId,
+  configuredUrls,
+  environmentReady,
+}: {
+  threadRef: ScopedThreadRef;
+  tabId: string;
+  configuredUrls: ReadonlyArray<string>;
+  environmentReady: boolean;
+}) {
+  const previewState = useThreadPreviewState(threadRef);
+  const hasSession = (previewState.sessions[tabId] ?? null) !== null;
+  const snapshot = previewState.sessions[tabId] ?? null;
+  // Another window still claims this tab (a second popout for the same tab,
+  // or a not-yet-released source window). Wait reactively instead of
+  // fighting over the webview registration; during a normal move the source
+  // releases within milliseconds of this window booting.
+  const remotelyHosted = useClaimedPreviewTabIds().has(tabId);
+  // The server session disappearing (tab closed elsewhere / server restart
+  // without it) is terminal for this window: the fixed tabId can never be
+  // revived. Grace covers subscription lag right after boot.
+  const [sessionLost, setSessionLost] = useState(false);
+  useEffect(() => {
+    if (hasSession || !environmentReady || remotelyHosted) {
+      return;
+    }
+    const timer = window.setTimeout(() => setSessionLost(true), SESSION_LOST_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [environmentReady, hasSession, remotelyHosted]);
+
+  // Claim the tab so this window's ElectronBrowserHost mounts its webview and
+  // the main window's host releases it (without closing the desktop tab).
+  // No claim while another window holds it or the session is gone.
+  const shouldClaim = !remotelyHosted && !sessionLost;
+  const claimResources = useMemo(
+    () => ({ terminalIds: [], previewTabIds: shouldClaim ? [tabId] : [] }),
+    [shouldClaim, tabId],
+  );
+  usePaneClaimPublisher(threadRef, claimResources);
+
+  if (sessionLost && !hasSession) {
+    return (
+      <PopoutErrorFrame
+        title="Browser"
+        message="This browser tab was closed. You can close this window."
+      />
+    );
+  }
+  if (remotelyHosted) {
+    return (
+      <PopoutErrorFrame title="Browser" message="This browser tab is open in another window." />
+    );
+  }
+
+  const title =
+    snapshot && snapshot.navStatus._tag !== "Idle" && snapshot.navStatus.title.trim().length > 0
+      ? snapshot.navStatus.title
+      : "Browser";
+
+  return (
+    <PopoutPaneFrame title={title}>
+      <Suspense fallback={null}>
+        <PreviewPanel
+          mode="embedded"
+          threadRef={threadRef}
+          tabId={tabId}
+          configuredUrls={configuredUrls}
+          visible
+        />
+      </Suspense>
     </PopoutPaneFrame>
   );
 }

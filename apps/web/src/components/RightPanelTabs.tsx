@@ -75,10 +75,17 @@ type TabContextMenuAction =
   | "close-to-right"
   | "close-all";
 
-// Surfaces whose content is fully server-backed and can therefore be hosted
-// by a dedicated pane window. Preview/diff/plan remain main-window only.
+// Surfaces that can be hosted by a dedicated pane window: server-backed
+// panes, plus preview tabs with a live desktop tab (their webview is
+// re-created in the pane window from the session's URL). Diff/plan remain
+// main-window only.
 function canMoveSurfaceToNewWindow(surface: RightPanelSurface): boolean {
-  return surface.kind === "terminal" || surface.kind === "files" || surface.kind === "file";
+  return (
+    surface.kind === "terminal" ||
+    surface.kind === "files" ||
+    surface.kind === "file" ||
+    (surface.kind === "preview" && surface.resourceId !== null)
+  );
 }
 
 function DisabledReasonTooltip(props: { reason: string; trigger: ReactElement }) {

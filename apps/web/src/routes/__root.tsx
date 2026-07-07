@@ -88,7 +88,7 @@ export const Route = createRootRoute({
       }
       const current = describeCurrentPopoutLocation();
       if (current) {
-        const { kind, terminalIds, activeTerminalId, path } = current.search;
+        const { kind, terminalIds, activeTerminalId, path, tabId } = current.search;
         throw redirect({
           to: "/popout/$environmentId/$threadId",
           params: {
@@ -96,10 +96,14 @@ export const Route = createRootRoute({
             threadId: current.threadId as ThreadId,
           },
           search: {
-            kind: kind === "terminal" || kind === "files" || kind === "chat" ? kind : null,
+            kind:
+              kind === "terminal" || kind === "files" || kind === "chat" || kind === "preview"
+                ? kind
+                : null,
             ...(terminalIds ? { terminalIds } : {}),
             ...(activeTerminalId ? { activeTerminalId } : {}),
             ...(path ? { path } : {}),
+            ...(tabId ? { tabId } : {}),
           },
           replace: true,
         });

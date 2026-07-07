@@ -1,34 +1,53 @@
 /**
- * Cross-window ownership claims for terminals hosted in other windows.
+ * Cross-window ownership claims for panes hosted in other windows.
  *
- * Server terminal sessions have no owner: any window's drawer reconciliation
- * adopts every session it doesn't already account for. With popout pane
- * windows that means the same PTY can end up rendered in two windows (resize
- * fights, and a close from one window kills the other's terminal).
+ * Two kinds of resources need an owner across windows:
  *
- * Every window claims the terminal ids it hosts over a BroadcastChannel and
- * re-broadcasts on a heartbeat; other windows exclude claimed ids from drawer
- * adoption and drop claims whose heartbeats stop, so a crashed window
- * releases its terminals automatically. BroadcastChannel never delivers to
- * the posting window, so a window only ever sees other windows' claims.
+ * - Server terminal sessions: any window's drawer reconciliation adopts every
+ *   session it doesn't already account for, so a moved terminal would render
+ *   the same PTY in two windows (resize fights, and a close from one window
+ *   kills the other's terminal).
+ * - Preview tabs: every window's ElectronBrowserHost mounts a <webview> per
+ *   live session, so two windows would fight over registering the same tabId
+ *   with the desktop preview manager.
+ *
+ * Every window claims the terminal ids and preview tab ids it hosts over a
+ * BroadcastChannel and re-broadcasts on a heartbeat; other windows exclude
+ * claimed ids and drop claims whose heartbeats stop, so a crashed window
+ * releases its resources automatically. BroadcastChannel never delivers to
+ * the posting window, so a window only ever sees other windows' claims; a
+ * window's OWN claims are mirrored in a local registry for components that
+ * need "what does this window host" (popout webview hosting).
  */
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 
-const CHANNEL_NAME = "zrode:pane-terminal-claims:v1";
+const CHANNEL_NAME = "zrode:pane-claims:v1";
 const HEARTBEAT_MS = 5_000;
 const CLAIM_TTL_MS = 3 * HEARTBEAT_MS;
 
+export interface PaneClaimResources {
+  terminalIds: readonly string[];
+  previewTabIds: readonly string[];
+}
+
 type ClaimMessage =
-  | { type: "claim"; claimId: string; threadKey: string; terminalIds: readonly string[] }
+  | {
+      type: "claim";
+      claimId: string;
+      threadKey: string;
+      terminalIds: readonly string[];
+      previewTabIds: readonly string[];
+    }
   | { type: "release"; claimId: string }
   | { type: "query" };
 
 interface ClaimEntry {
   threadKey: string;
   terminalIds: readonly string[];
+  previewTabIds: readonly string[];
   expiresAt: number;
 }
 
@@ -39,6 +58,10 @@ function createChannel(): BroadcastChannel | null {
   return new BroadcastChannel(CHANNEL_NAME);
 }
 
+function sanitizeIds(ids: unknown): readonly string[] {
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
 const EMPTY_CLAIMED_IDS: ReadonlySet<string> = new Set();
 
 /*
@@ -46,11 +69,23 @@ const EMPTY_CLAIMED_IDS: ReadonlySet<string> = new Set();
  */
 const claimsByClaimId = new Map<string, ClaimEntry>();
 const listeners = new Set<() => void>();
-const claimedIdsByThreadKey = new Map<string, ReadonlySet<string>>();
+const claimedTerminalIdsByThreadKey = new Map<string, ReadonlySet<string>>();
+let claimedPreviewTabIdsCache: ReadonlySet<string> | null = null;
 let listenChannel: BroadcastChannel | null = null;
+let lastSweepAt: number | null = null;
+// Tabs a move-to-window flow has handed off but whose destination window
+// hasn't broadcast its claim yet (it is still booting). Treated as claimed so
+// the origin window neither re-adopts nor closes the tab in the gap.
+const detachingPreviewTabExpiries = new Map<string, number>();
+const DETACHING_GRACE_MS = CLAIM_TTL_MS;
+
+function idListsEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
 
 function notify(): void {
-  claimedIdsByThreadKey.clear();
+  claimedTerminalIdsByThreadKey.clear();
+  claimedPreviewTabIdsCache = null;
   for (const listener of listeners) {
     listener();
   }
@@ -58,10 +93,27 @@ function notify(): void {
 
 function sweepExpiredClaims(): void {
   const now = Date.now();
+  // After a system sleep every claim looks expired even though the owning
+  // windows just haven't run yet. Grant one grace heartbeat instead of
+  // dropping live claims and bouncing their resources between windows.
+  if (lastSweepAt !== null && now - lastSweepAt > CLAIM_TTL_MS) {
+    lastSweepAt = now;
+    for (const entry of claimsByClaimId.values()) {
+      entry.expiresAt = Math.max(entry.expiresAt, now + CLAIM_TTL_MS);
+    }
+    return;
+  }
+  lastSweepAt = now;
   let changed = false;
   for (const [claimId, entry] of claimsByClaimId) {
     if (entry.expiresAt <= now) {
       claimsByClaimId.delete(claimId);
+      changed = true;
+    }
+  }
+  for (const [tabId, expiresAt] of detachingPreviewTabExpiries) {
+    if (expiresAt <= now) {
+      detachingPreviewTabExpiries.delete(tabId);
       changed = true;
     }
   }
@@ -70,19 +122,42 @@ function sweepExpiredClaims(): void {
   }
 }
 
+function clearDetachingMarks(previewTabIds: readonly string[]): boolean {
+  let cleared = false;
+  for (const tabId of previewTabIds) {
+    if (detachingPreviewTabExpiries.delete(tabId)) {
+      cleared = true;
+    }
+  }
+  return cleared;
+}
+
 function handleListenMessage(event: MessageEvent): void {
   const message = event.data as ClaimMessage | null;
   if (!message || typeof message !== "object") {
     return;
   }
   if (message.type === "claim" && typeof message.claimId === "string") {
-    claimsByClaimId.set(message.claimId, {
+    const entry: ClaimEntry = {
       threadKey: typeof message.threadKey === "string" ? message.threadKey : "",
-      terminalIds: Array.isArray(message.terminalIds)
-        ? message.terminalIds.filter((id): id is string => typeof id === "string")
-        : [],
+      terminalIds: sanitizeIds(message.terminalIds),
+      previewTabIds: sanitizeIds(message.previewTabIds),
       expiresAt: Date.now() + CLAIM_TTL_MS,
-    });
+    };
+    const detachingCleared = clearDetachingMarks(entry.previewTabIds);
+    const previous = claimsByClaimId.get(message.claimId);
+    claimsByClaimId.set(message.claimId, entry);
+    // Heartbeats mostly repeat the same payload; refreshing expiresAt must
+    // not re-render every consumer (webview hosts resubscribe on render).
+    if (
+      previous !== undefined &&
+      !detachingCleared &&
+      previous.threadKey === entry.threadKey &&
+      idListsEqual(previous.terminalIds, entry.terminalIds) &&
+      idListsEqual(previous.previewTabIds, entry.previewTabIds)
+    ) {
+      return;
+    }
     notify();
     return;
   }
@@ -91,6 +166,17 @@ function handleListenMessage(event: MessageEvent): void {
       notify();
     }
   }
+}
+
+/**
+ * Mark a preview tab as mid-handoff to a new window: it counts as
+ * remote-claimed until the destination window's claim arrives (or a grace
+ * period elapses because the window never came up).
+ */
+export function markPreviewTabDetaching(tabId: string): void {
+  ensureListening();
+  detachingPreviewTabExpiries.set(tabId, Date.now() + DETACHING_GRACE_MS);
+  notify();
 }
 
 function ensureListening(): void {
@@ -118,8 +204,8 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
-function claimedIdsSnapshot(threadKey: string): ReadonlySet<string> {
-  const cached = claimedIdsByThreadKey.get(threadKey);
+function claimedTerminalIdsSnapshot(threadKey: string): ReadonlySet<string> {
+  const cached = claimedTerminalIdsByThreadKey.get(threadKey);
   if (cached) {
     return cached;
   }
@@ -133,8 +219,27 @@ function claimedIdsSnapshot(threadKey: string): ReadonlySet<string> {
     }
   }
   const snapshot: ReadonlySet<string> = ids ?? EMPTY_CLAIMED_IDS;
-  claimedIdsByThreadKey.set(threadKey, snapshot);
+  claimedTerminalIdsByThreadKey.set(threadKey, snapshot);
   return snapshot;
+}
+
+// Preview tab ids are globally unique, so their claim set is not per-thread.
+// Tabs mid-handoff (marked detaching) count as claimed.
+function claimedPreviewTabIdsSnapshot(): ReadonlySet<string> {
+  if (claimedPreviewTabIdsCache) {
+    return claimedPreviewTabIdsCache;
+  }
+  let ids: Set<string> | null = null;
+  for (const entry of claimsByClaimId.values()) {
+    for (const tabId of entry.previewTabIds) {
+      (ids ??= new Set()).add(tabId);
+    }
+  }
+  for (const tabId of detachingPreviewTabExpiries.keys()) {
+    (ids ??= new Set()).add(tabId);
+  }
+  claimedPreviewTabIdsCache = ids ?? EMPTY_CLAIMED_IDS;
+  return claimedPreviewTabIdsCache;
 }
 
 /** Terminal ids for this thread currently hosted by another window. */
@@ -142,28 +247,82 @@ export function useClaimedTerminalIds(ref: ScopedThreadRef): ReadonlySet<string>
   const threadKey = scopedThreadKey(ref);
   return useSyncExternalStore(
     subscribe,
-    () => claimedIdsSnapshot(threadKey),
+    () => claimedTerminalIdsSnapshot(threadKey),
     () => EMPTY_CLAIMED_IDS,
   );
 }
 
+/** Preview tab ids currently hosted by another window (all threads). */
+export function useClaimedPreviewTabIds(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribe, claimedPreviewTabIdsSnapshot, () => EMPTY_CLAIMED_IDS);
+}
+
+/** Non-reactive read of the preview tab ids hosted by other windows. */
+export function readClaimedPreviewTabIds(): ReadonlySet<string> {
+  ensureListening();
+  return claimedPreviewTabIdsSnapshot();
+}
+
 /*
- * Publisher side: claim the terminal ids this window hosts for a thread.
+ * Local mirror: the preview tab ids THIS window has claimed, aggregated over
+ * all publishers in the window. BroadcastChannel doesn't self-deliver, so
+ * components that host what this window owns read this instead.
  */
-interface PaneTerminalClaimPublisher {
-  setTerminalIds: (terminalIds: readonly string[]) => void;
+const localPreviewTabIdsByClaimId = new Map<string, readonly string[]>();
+const localListeners = new Set<() => void>();
+let localPreviewTabIdsCache: ReadonlySet<string> | null = null;
+
+function notifyLocal(): void {
+  localPreviewTabIdsCache = null;
+  for (const listener of localListeners) {
+    listener();
+  }
+}
+
+function localPreviewTabIdsSnapshot(): ReadonlySet<string> {
+  if (localPreviewTabIdsCache) {
+    return localPreviewTabIdsCache;
+  }
+  let ids: Set<string> | null = null;
+  for (const tabIds of localPreviewTabIdsByClaimId.values()) {
+    for (const tabId of tabIds) {
+      (ids ??= new Set()).add(tabId);
+    }
+  }
+  localPreviewTabIdsCache = ids ?? EMPTY_CLAIMED_IDS;
+  return localPreviewTabIdsCache;
+}
+
+function subscribeLocal(listener: () => void): () => void {
+  localListeners.add(listener);
+  return () => {
+    localListeners.delete(listener);
+  };
+}
+
+/** Preview tab ids claimed by THIS window. */
+export function useLocalPreviewTabClaims(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribeLocal, localPreviewTabIdsSnapshot, () => EMPTY_CLAIMED_IDS);
+}
+
+/*
+ * Publisher side: claim the resources this window hosts for a thread.
+ */
+interface PaneClaimPublisher {
+  setResources: (resources: PaneClaimResources) => void;
   dispose: () => void;
 }
 
-export function createPaneTerminalClaimPublisher(threadKey: string): PaneTerminalClaimPublisher {
+export function createPaneClaimPublisher(threadKey: string): PaneClaimPublisher {
   const channel = createChannel();
   if (channel === null) {
-    return { setTerminalIds: () => undefined, dispose: () => undefined };
+    return { setResources: () => undefined, dispose: () => undefined };
   }
   // Uniqueness only (no security property): distinguishes publishers across
   // windows and across remounts within a window.
   const claimId = `claim-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
   let terminalIds: readonly string[] = [];
+  let previewTabIds: readonly string[] = [];
   let disposed = false;
 
   const post = (message: ClaimMessage) => {
@@ -176,7 +335,7 @@ export function createPaneTerminalClaimPublisher(threadKey: string): PaneTermina
   };
   // Updating an existing claimId replaces the entry in listeners atomically,
   // so id changes never open a release→claim gap another window could adopt in.
-  const postClaim = () => post({ type: "claim", claimId, threadKey, terminalIds });
+  const postClaim = () => post({ type: "claim", claimId, threadKey, terminalIds, previewTabIds });
   const release = () => post({ type: "release", claimId });
 
   const heartbeat = setInterval(postClaim, HEARTBEAT_MS);
@@ -192,11 +351,14 @@ export function createPaneTerminalClaimPublisher(threadKey: string): PaneTermina
   window.addEventListener("pagehide", release);
 
   return {
-    setTerminalIds: (nextTerminalIds) => {
+    setResources: (resources) => {
       if (disposed) {
         return;
       }
-      terminalIds = nextTerminalIds;
+      terminalIds = resources.terminalIds;
+      previewTabIds = resources.previewTabIds;
+      localPreviewTabIdsByClaimId.set(claimId, previewTabIds);
+      notifyLocal();
       postClaim();
     },
     dispose: () => {
@@ -209,23 +371,26 @@ export function createPaneTerminalClaimPublisher(threadKey: string): PaneTermina
       channel.removeEventListener("message", handleMessage);
       release();
       channel.close();
+      if (localPreviewTabIdsByClaimId.delete(claimId)) {
+        notifyLocal();
+      }
     },
   };
 }
 
-/** Publish (and keep updated) this window's terminal claims for a thread. */
-export function usePaneTerminalClaimPublisher(
+/** Publish (and keep updated) this window's pane claims for a thread. */
+export function usePaneClaimPublisher(
   ref: ScopedThreadRef | null,
-  terminalIds: readonly string[],
+  resources: PaneClaimResources,
 ): void {
   const threadKey = ref === null ? null : scopedThreadKey(ref);
-  const publisherRef = useRef<PaneTerminalClaimPublisher | null>(null);
+  const publisherRef = useRef<PaneClaimPublisher | null>(null);
 
   useEffect(() => {
     if (threadKey === null) {
       return;
     }
-    const publisher = createPaneTerminalClaimPublisher(threadKey);
+    const publisher = createPaneClaimPublisher(threadKey);
     publisherRef.current = publisher;
     return () => {
       publisherRef.current = null;
@@ -233,8 +398,12 @@ export function usePaneTerminalClaimPublisher(
     };
   }, [threadKey]);
 
-  const idsKey = terminalIds.join("\n");
+  const terminalIdsKey = resources.terminalIds.join("\n");
+  const previewTabIdsKey = resources.previewTabIds.join("\n");
   useEffect(() => {
-    publisherRef.current?.setTerminalIds(idsKey.length === 0 ? [] : idsKey.split("\n"));
-  }, [idsKey, threadKey]);
+    publisherRef.current?.setResources({
+      terminalIds: terminalIdsKey.length === 0 ? [] : terminalIdsKey.split("\n"),
+      previewTabIds: previewTabIdsKey.length === 0 ? [] : previewTabIdsKey.split("\n"),
+    });
+  }, [previewTabIdsKey, terminalIdsKey, threadKey]);
 }

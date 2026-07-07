@@ -15,7 +15,7 @@ import {
 import { Atom } from "effect/unstable/reactivity";
 
 import { PREVIEW_RECENT_URL_LIMIT } from "./components/preview/previewConstants";
-import { isPopoutWindow } from "./lib/windowScope";
+import { isPopoutWindow, popoutWindowKind } from "./lib/windowScope";
 import { appAtomRegistry } from "./rpc/atomRegistry";
 
 export interface DesktopPreviewOverlay {
@@ -410,10 +410,13 @@ export function removePreviewThread(ref: ScopedThreadRef): void {
 
 export function isPreviewSupportedInRuntime(): boolean {
   if (typeof window === "undefined") return false;
-  // Popout pane windows expose the same desktopBridge, but the Electron main
-  // process creates them without webviewTag and the preview manager is bound
-  // to the main window, so browser previews cannot be hosted there.
-  if (isPopoutWindow()) return false;
+  // Preview and chat popout windows can host webviews and display a browser
+  // pane; terminal/files popouts have nowhere to show one, so "open in
+  // preview" affordances must not appear there.
+  if (isPopoutWindow()) {
+    const kind = popoutWindowKind();
+    if (kind !== "preview" && kind !== "chat") return false;
+  }
   return Boolean(window.desktopBridge?.preview);
 }
 

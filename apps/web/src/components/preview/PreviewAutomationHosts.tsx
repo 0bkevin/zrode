@@ -37,6 +37,7 @@ import {
 import { resolveBrowserRecordingStopTarget } from "~/browser/browserRecordingScope";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { isElectron } from "~/env";
+import { readClaimedPreviewTabIds } from "~/lib/paneTerminalClaims";
 import { isPopoutWindow } from "~/lib/windowScope";
 import { useEnvironments } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
@@ -150,6 +151,33 @@ const readRenderedViewport = async (tabId: string): Promise<PreviewRenderedViewp
   return await readWebviewViewport(webview);
 };
 
+// A tab hosted by a popout window has no <webview> in this document; measure
+// the guest through the desktop bridge instead (the main process resolves the
+// webContents by tabId regardless of the hosting window).
+const readRemoteRenderedViewport = async (
+  tabId: string,
+): Promise<PreviewRenderedViewportSize | null> => {
+  if (!previewBridge) return null;
+  try {
+    const value = await previewBridge.automation.evaluate(tabId, {
+      tabId,
+      expression: "({ width: window.innerWidth, height: window.innerHeight })",
+    });
+    if (typeof value !== "object" || value === null) return null;
+    const { width, height } = value as { readonly width?: unknown; readonly height?: unknown };
+    return typeof width === "number" &&
+      Number.isInteger(width) &&
+      width > 0 &&
+      typeof height === "number" &&
+      Number.isInteger(height) &&
+      height > 0
+      ? { width, height }
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 const readDeclaredViewport = (
   webview: ExecutablePreviewWebview | null,
 ): PreviewRenderedViewportSize | null => {
@@ -174,6 +202,23 @@ const waitForRenderedViewport = async (
   while (Date.now() <= deadline) {
     try {
       const webview = findPreviewWebview(tabId);
+      if (webview === null && readClaimedPreviewTabIds().has(tabId)) {
+        // The webview lives in a popout window: its DOM attributes are not
+        // reachable here, so measure the guest via the desktop bridge and
+        // accept a matching size (any size for fill viewports — the popout
+        // window's geometry decides those).
+        const remoteViewport = await readRemoteRenderedViewport(tabId);
+        if (remoteViewport) {
+          const tolerance = 1;
+          if (
+            setting._tag === "fill" ||
+            (Math.abs(remoteViewport.width - setting.width) <= tolerance &&
+              Math.abs(remoteViewport.height - setting.height) <= tolerance)
+          ) {
+            return remoteViewport;
+          }
+        }
+      }
       const appliedSettingKey = webview?.getAttribute("data-preview-viewport-key") ?? null;
       const declaredViewport = readDeclaredViewport(webview);
       const renderedViewport = webview ? await readWebviewViewport(webview) : null;
@@ -374,7 +419,9 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               activeSnapshot = snapshot;
               tabId = activeTabId;
             }
-            if (input.show ?? true) {
+            if ((input.show ?? true) && !readClaimedPreviewTabIds().has(activeTabId)) {
+              // A tab hosted by a popout window is already visible there;
+              // re-opening a surface here would render a blank duplicate.
               useRightPanelStore.getState().openBrowser(threadRef, activeTabId);
             }
             if (activeSnapshot && previewAutomationOpenNeedsOverlay(input, activeSnapshot)) {

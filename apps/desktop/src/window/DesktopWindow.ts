@@ -296,8 +296,25 @@ export const make = Effect.gen(function* () {
   );
 
   // Shared renderer wiring used by both the main window and pane windows:
-  // spellcheck/edit context menu, and routing external links to the OS
-  // browser instead of in-app navigation or new Electron windows.
+  // only preview-partition webviews may attach, spellcheck/edit context menu,
+  // and routing external links to the OS browser instead of in-app
+  // navigation or new Electron windows.
+  const attachPreviewWebviewGuard = (window: Electron.BrowserWindow) => {
+    window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+      if (
+        typeof params.partition !== "string" ||
+        !previewManager.isBrowserPartition(params.partition)
+      ) {
+        event.preventDefault();
+        return;
+      }
+      webPreferences.sandbox = true;
+      webPreferences.nodeIntegration = false;
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.contextIsolation = false;
+    });
+  };
+
   const attachRendererContextMenu = (window: Electron.BrowserWindow) => {
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
@@ -509,20 +526,7 @@ export const make = Effect.gen(function* () {
     }
 
     yield* previewManager.setMainWindow(window);
-    window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-      if (
-        typeof params.partition !== "string" ||
-        !previewManager.isBrowserPartition(params.partition)
-      ) {
-        event.preventDefault();
-        return;
-      }
-      webPreferences.sandbox = true;
-      webPreferences.nodeIntegration = false;
-      webPreferences.nodeIntegrationInSubFrames = false;
-      webPreferences.contextIsolation = false;
-    });
-
+    attachPreviewWebviewGuard(window);
     attachRendererContextMenu(window);
     attachExternalNavigationGuards(window, applicationUrl);
 
@@ -579,6 +583,9 @@ export const make = Effect.gen(function* () {
       return false;
     }
 
+    // Pane windows can host preview webviews (a popped-out browser pane), so
+    // the browser session must exist before a <webview> tries to attach.
+    yield* previewManager.getBrowserSession();
     const applicationUrl = getDesktopUrl(environment.isDevelopment);
     const iconPaths = yield* assets.iconPaths;
     const iconOption = getIconOption(iconPaths, environment.platform);
@@ -601,6 +608,7 @@ export const make = Effect.gen(function* () {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        webviewTag: true,
       },
     });
 
@@ -609,7 +617,10 @@ export const make = Effect.gen(function* () {
     }
 
     yield* Ref.update(paneWindowIdsRef, (paneIds) => new Set(paneIds).add(window.id));
+    // Pane windows may embed preview guests (popped-out browser tabs).
+    yield* previewManager.registerHostWindow(window);
 
+    attachPreviewWebviewGuard(window);
     attachRendererContextMenu(window);
     attachExternalNavigationGuards(window, applicationUrl);
 

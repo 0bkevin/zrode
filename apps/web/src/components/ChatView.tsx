@@ -214,7 +214,12 @@ import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayo
 import { ThreadTerminalPanel, type TerminalPanelLaunchContext } from "./ThreadTerminalPanel";
 import { openPaneWindow, type PaneWindowTarget } from "../paneWindow";
 import { isPopoutWindow } from "../lib/windowScope";
-import { useClaimedTerminalIds, usePaneTerminalClaimPublisher } from "../lib/paneTerminalClaims";
+import {
+  markPreviewTabDetaching,
+  useClaimedPreviewTabIds,
+  useClaimedTerminalIds,
+  usePaneClaimPublisher,
+} from "../lib/paneTerminalClaims";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
@@ -1296,13 +1301,31 @@ function ChatViewContent(props: ChatViewProps) {
       ),
     [rightPanelState.surfaces],
   );
-  // Claim the terminals this window hosts (right-panel surfaces + drawer) so
-  // other windows' drawer reconciliation doesn't adopt the same sessions.
+  // Claim the resources this window hosts (right-panel surfaces + drawer) so
+  // other windows don't adopt the same terminal sessions or preview tabs.
   const hostedTerminalIds = useMemo(
     () => [...new Set([...panelTerminalIds, ...terminalUiState.terminalIds])],
     [panelTerminalIds, terminalUiState.terminalIds],
   );
-  usePaneTerminalClaimPublisher(activeThreadRef, hostedTerminalIds);
+  // Never claim a preview tab another window already claims (a transient
+  // double-claim would make the owning popout believe it lost the tab).
+  const claimedPreviewTabIds = useClaimedPreviewTabIds();
+  const hostedPreviewTabIds = useMemo(
+    () =>
+      rightPanelState.surfaces.flatMap((surface) =>
+        surface.kind === "preview" &&
+        surface.resourceId !== null &&
+        !claimedPreviewTabIds.has(surface.resourceId)
+          ? [surface.resourceId]
+          : [],
+      ),
+    [claimedPreviewTabIds, rightPanelState.surfaces],
+  );
+  const hostedPaneResources = useMemo(
+    () => ({ terminalIds: hostedTerminalIds, previewTabIds: hostedPreviewTabIds }),
+    [hostedPreviewTabIds, hostedTerminalIds],
+  );
+  usePaneClaimPublisher(activeThreadRef, hostedPaneResources);
   const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
   const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
@@ -1312,10 +1335,31 @@ function ChatViewContent(props: ChatViewProps) {
 
   useEffect(() => {
     if (!activeThreadRef) return;
-    useRightPanelStore
-      .getState()
-      .reconcileBrowserSurfaces(activeThreadRef, Object.keys(activePreviewState.sessions));
-  }, [activePreviewState.sessions, activeThreadRef]);
+    // Sessions hosted by another window must not be re-adopted as surfaces
+    // here — that would render a blank pane, double-claim the tab, and let a
+    // stray close destroy the popout's session. When the claim is released
+    // (popout closed) the dependency fires again and the surface returns.
+    let sessionTabIds = Object.keys(activePreviewState.sessions).filter(
+      (sessionTabId) => !claimedPreviewTabIds.has(sessionTabId),
+    );
+    if (isPopoutWindow()) {
+      // Popout windows never adopt session-driven surfaces (a chat popout
+      // adopting the thread's sessions would claim tabs the main window is
+      // hosting); they only prune surfaces they explicitly opened. Surfaces
+      // are read non-reactively: reconcile writes fresh array identities, so
+      // depending on them would loop.
+      const ownSurfaceTabIds = new Set(
+        selectThreadRightPanelState(
+          useRightPanelStore.getState().byThreadKey,
+          activeThreadRef,
+        ).surfaces.flatMap((surface) =>
+          surface.kind === "preview" && surface.resourceId !== null ? [surface.resourceId] : [],
+        ),
+      );
+      sessionTabIds = sessionTabIds.filter((sessionTabId) => ownSurfaceTabIds.has(sessionTabId));
+    }
+    useRightPanelStore.getState().reconcileBrowserSurfaces(activeThreadRef, sessionTabIds);
+  }, [activePreviewState.sessions, activeThreadRef, claimedPreviewTabIds]);
 
   const planSidebarOpen = activeRightPanelKind === "plan";
 
@@ -3260,7 +3304,14 @@ function ChatViewContent(props: ChatViewProps) {
                 threadId: activeThreadRef.threadId,
                 ...(surface.kind === "file" ? { path: surface.relativePath } : {}),
               }
-            : null;
+            : surface.kind === "preview" && surface.resourceId !== null
+              ? {
+                  kind: "preview",
+                  environmentId: activeThreadRef.environmentId,
+                  threadId: activeThreadRef.threadId,
+                  tabId: surface.resourceId,
+                }
+              : null;
       if (!target) return;
       void openPaneWindow(target)
         .catch(() => false)
@@ -3274,6 +3325,11 @@ function ChatViewContent(props: ChatViewProps) {
               }),
             );
             return;
+          }
+          // A moved preview tab counts as claimed until the new window's
+          // claim arrives, so this window neither re-adopts nor closes it.
+          if (target.kind === "preview") {
+            markPreviewTabDetaching(target.tabId);
           }
           // Close the tab here without terminating anything server-side — the
           // new window reattaches to the same terminal sessions / workspace.

@@ -1,4 +1,5 @@
 import { previewBridge } from "~/components/preview/previewBridge";
+import { readClaimedPreviewTabIds } from "~/lib/paneTerminalClaims";
 
 interface DesktopTabLease {
   references: number;
@@ -37,6 +38,9 @@ export function acquireDesktopTab(tabId: string): AcquiredDesktopTab {
         const latest = leases.get(tabId);
         if (!latest || latest.references > 0) return;
         leases.delete(tabId);
+        // The tab moved to another window: this window's webview unmounted,
+        // but the desktop tab lives on for the claiming window to re-register.
+        if (readClaimedPreviewTabIds().has(tabId)) return;
         void previewBridge?.closeTab(tabId);
       }, 0);
     },

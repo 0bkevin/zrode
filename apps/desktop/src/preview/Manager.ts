@@ -27,14 +27,7 @@ import type {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import {
-  type BrowserWindow,
-  type Session,
-  clipboard,
-  nativeImage,
-  shell,
-  webContents,
-} from "electron";
+import { BrowserWindow, type Session, clipboard, nativeImage, shell, webContents } from "electron";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -392,6 +385,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   const annotationThemeRef = yield* Ref.make(DEFAULT_ANNOTATION_THEME);
   const mainWindowRef = yield* Ref.make<Option.Option<BrowserWindow>>(Option.none());
+  const hostWindowIdsRef = yield* Ref.make<ReadonlySet<number>>(new Set<number>());
   const tabsRef = yield* SynchronizedRef.make<ReadonlyMap<string, PreviewTabState>>(new Map());
   const attachedRef = yield* Ref.make<ReadonlyMap<number, ManagedListeners>>(new Map());
   const listenersRef = yield* Ref.make<ReadonlySet<Listener>>(new Set());
@@ -1210,12 +1204,27 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       event: Electron.Event,
       input: Electron.Input,
     ) {
+      if (!isAppShortcut(input)) {
+        return;
+      }
+      // Re-inject the shortcut into the window hosting this guest (main
+      // window or a popout pane), falling back to the main window.
+      const hostWindow =
+        !wc.isDestroyed() && wc.hostWebContents
+          ? BrowserWindow.fromWebContents(wc.hostWebContents)
+          : null;
       const mainWindow = yield* Ref.get(mainWindowRef);
-      if (!isAppShortcut(input) || Option.isNone(mainWindow) || mainWindow.value.isDestroyed()) {
+      const targetWindow =
+        hostWindow !== null && !hostWindow.isDestroyed()
+          ? hostWindow
+          : Option.isSome(mainWindow) && !mainWindow.value.isDestroyed()
+            ? mainWindow.value
+            : null;
+      if (targetWindow === null) {
         return;
       }
       event.preventDefault();
-      mainWindow.value.webContents.sendInputEvent({
+      targetWindow.webContents.sendInputEvent({
         type: "keyDown",
         keyCode: input.key,
         modifiers: [
@@ -1270,10 +1279,29 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     yield* install().pipe(Effect.onError(() => Scope.close(scope, Exit.void).pipe(Effect.ignore)));
   });
 
+  // Windows allowed to embed preview guests (the main window and pane
+  // windows). While at least one is registered, registerWebview rejects
+  // guests embedded anywhere else.
+  const registerHostWindow = Effect.fn("PreviewManager.registerHostWindow")(function* (
+    window: BrowserWindow,
+  ) {
+    yield* Ref.update(hostWindowIdsRef, (ids) => new Set(ids).add(window.id));
+    window.once("closed", () => {
+      Effect.runFork(
+        Ref.update(hostWindowIdsRef, (ids) => {
+          const next = new Set(ids);
+          next.delete(window.id);
+          return next;
+        }),
+      );
+    });
+  });
+
   const setMainWindow = Effect.fn("PreviewManager.setMainWindow")(function* (
     window: BrowserWindow,
   ) {
     yield* Ref.set(mainWindowRef, Option.some(window));
+    yield* registerHostWindow(window);
   });
 
   const createTab = Effect.fn("PreviewManager.createTab")(function* (tabId: string) {
@@ -1340,12 +1368,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return yield* new PreviewTabNotFoundError({ tabId });
     }
     const wc = webContents.fromId(webContentsId);
-    const mainWindow = yield* Ref.get(mainWindowRef);
-    if (
-      !wc ||
-      wc.getType() !== "webview" ||
-      (Option.isSome(mainWindow) && wc.hostWebContents !== mainWindow.value.webContents)
-    ) {
+    // A preview guest may be embedded by the main window or by a registered
+    // pane window; anything else is rejected. When no host window has been
+    // registered at all (unit tests double electron), validation is skipped.
+    const hostWindowIds = yield* Ref.get(hostWindowIdsRef);
+    const embedderHost = wc && wc.getType() === "webview" ? wc.hostWebContents : null;
+    const embedderWindow = embedderHost ? BrowserWindow.fromWebContents(embedderHost) : null;
+    const embedderAllowed =
+      hostWindowIds.size === 0 ||
+      (embedderWindow !== null &&
+        !embedderWindow.isDestroyed() &&
+        hostWindowIds.has(embedderWindow.id));
+    if (!wc || wc.getType() !== "webview" || !embedderAllowed) {
       return yield* new PreviewWebContentsNotFoundError({ tabId, webContentsId });
     }
     const attached = yield* Ref.get(attachedRef);
@@ -2526,6 +2560,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     revealArtifact,
     saveRecording,
     setAnnotationTheme,
+    registerHostWindow,
     setMainWindow,
     startRecording,
     stopRecording,
@@ -2814,6 +2849,10 @@ export class PreviewManager extends Context.Service<
   PreviewManager,
   {
     readonly setMainWindow: (window: BrowserWindow) => Effect.Effect<void, PreviewManagerError>;
+    // Allow a window (main or pane) to embed preview guest webviews.
+    readonly registerHostWindow: (
+      window: BrowserWindow,
+    ) => Effect.Effect<void, PreviewManagerError>;
     readonly getBrowserSession: (scope?: string) => Effect.Effect<Session, PreviewManagerError>;
     readonly isBrowserPartition: (partition: string) => boolean;
     readonly createTab: (tabId: string) => Effect.Effect<PreviewTabState, PreviewManagerError>;
@@ -2900,6 +2939,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   return PreviewManager.of({
     setMainWindow: operations.setMainWindow,
+    registerHostWindow: operations.registerHostWindow,
     getBrowserSession: Effect.fn("PreviewManager.getBrowserSession")(function* (scope) {
       return yield* browserSession
         .getSession(scope)

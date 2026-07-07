@@ -29,12 +29,22 @@ export type PaneWindowTarget =
       kind: "chat";
       environmentId: EnvironmentId;
       threadId: ThreadId;
+    }
+  | {
+      // A browser preview tab (desktop only). The <webview> is re-created in
+      // the pane window; the URL comes from the server session snapshot and
+      // cookies/storage carry over via the shared preview partition.
+      kind: "preview";
+      environmentId: EnvironmentId;
+      threadId: ThreadId;
+      tabId: string;
     };
 
 const PANE_WINDOW_SIZES = {
   terminal: { width: 960, height: 620 },
   files: { width: 1100, height: 740 },
   chat: { width: 1000, height: 780 },
+  preview: { width: 1100, height: 800 },
 } as const;
 
 export function buildPaneWindowPath(target: PaneWindowTarget): string {
@@ -44,6 +54,8 @@ export function buildPaneWindowPath(target: PaneWindowTarget): string {
     search.set("activeTerminalId", target.activeTerminalId);
   } else if (target.kind === "files" && target.path) {
     search.set("path", target.path);
+  } else if (target.kind === "preview") {
+    search.set("tabId", target.tabId);
   }
   return `/popout/${encodeURIComponent(target.environmentId)}/${encodeURIComponent(target.threadId)}?${search.toString()}`;
 }
@@ -54,6 +66,8 @@ export function paneWindowTitle(target: PaneWindowTarget): string {
       return "Terminal";
     case "chat":
       return "Chat";
+    case "preview":
+      return "Browser";
     case "files":
       return target.path ? target.path.slice(target.path.lastIndexOf("/") + 1) : "Files";
   }
