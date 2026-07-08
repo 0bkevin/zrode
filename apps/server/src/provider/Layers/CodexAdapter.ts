@@ -22,6 +22,7 @@ import {
   RuntimeRequestId,
   ProviderApprovalDecision,
   ThreadId,
+  TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -1052,8 +1053,9 @@ function mapToRuntimeEvents(
     }
     return [
       {
-        type: "model.rerouted",
         ...runtimeEventBase(event, canonicalThreadId),
+        turnId: event.turnId ?? TurnId.make(payload.turnId),
+        type: "model.rerouted",
         payload: {
           fromModel: payload.fromModel,
           toModel: payload.toModel,

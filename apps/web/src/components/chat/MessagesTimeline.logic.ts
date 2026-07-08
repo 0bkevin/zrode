@@ -8,6 +8,7 @@ import {
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
 import { type MessageId, type OrchestrationLatestTurn, type TurnId } from "@t3tools/contracts";
+import type { AssistantNerdStats } from "./messageNerdStats";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
@@ -128,6 +129,7 @@ export type MessagesTimelineRow =
       showAssistantCopyButton: boolean;
       showHandoffButton: boolean;
       assistantCopyStreaming: boolean;
+      assistantNerdStats?: AssistantNerdStats | undefined;
       assistantTurnDiffSummary?: TurnDiffSummary | undefined;
       revertTurnCount?: number | undefined;
       canEditUserMessage?: boolean | undefined;
@@ -373,6 +375,7 @@ export function deriveMessagesTimelineRows(input: {
   expandedWorkGroupIds?: ReadonlySet<string>;
   isWorking: boolean;
   activeTurnStartedAt: string | null;
+  assistantNerdStatsByMessageId?: ReadonlyMap<MessageId, AssistantNerdStats>;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
   editableUserMessageId?: MessageId | null;
@@ -530,6 +533,10 @@ export function deriveMessagesTimelineRows(input: {
         unsettledTurnId === null &&
         timelineEntry.message.id === lastAssistantMessageId,
       assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
+      assistantNerdStats:
+        timelineEntry.message.role === "assistant"
+          ? input.assistantNerdStatsByMessageId?.get(timelineEntry.message.id)
+          : undefined,
       assistantTurnDiffSummary:
         timelineEntry.message.role === "assistant"
           ? input.turnDiffSummaryByAssistantMessageId.get(timelineEntry.message.id)
@@ -614,10 +621,28 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&
         a.showHandoffButton === bm.showHandoffButton &&
         a.assistantCopyStreaming === bm.assistantCopyStreaming &&
+        assistantNerdStatsEqual(a.assistantNerdStats, bm.assistantNerdStats) &&
         a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
         a.revertTurnCount === bm.revertTurnCount &&
         a.canEditUserMessage === bm.canEditUserMessage
       );
     }
   }
+}
+
+function assistantNerdStatsEqual(
+  a: AssistantNerdStats | undefined,
+  b: AssistantNerdStats | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.providerLabel === b.providerLabel &&
+    a.modelLabel === b.modelLabel &&
+    a.modeLabel === b.modeLabel &&
+    a.reasoningLabel === b.reasoningLabel &&
+    a.tokenLabel === b.tokenLabel &&
+    a.tooltipLines.length === b.tooltipLines.length &&
+    a.tooltipLines.every((line, index) => line === b.tooltipLines[index])
+  );
 }

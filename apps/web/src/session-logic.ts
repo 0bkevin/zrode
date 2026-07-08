@@ -632,6 +632,14 @@ export function deriveWorkLogEntries(
   for (const activity of ordered) {
     if (activity.kind === "tool.started") continue;
     if (activity.kind === "task.started") continue;
+    if (
+      activity.kind === "turn.requested" ||
+      activity.kind === "turn.started" ||
+      activity.kind === "turn.completed" ||
+      activity.kind === "model.rerouted"
+    ) {
+      continue;
+    }
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;

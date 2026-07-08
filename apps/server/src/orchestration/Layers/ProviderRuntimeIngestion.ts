@@ -554,6 +554,76 @@ function runtimeEventToActivities(
       ];
     }
 
+    case "turn.started": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "turn.started",
+          summary: "Turn started",
+          payload: {
+            provider: event.provider,
+            ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+            ...(event.payload.model ? { model: event.payload.model } : {}),
+            ...(event.payload.effort ? { effort: event.payload.effort } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "turn.completed": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: normalizeRuntimeTurnState(event.payload.state) === "failed" ? "error" : "info",
+          kind: "turn.completed",
+          summary: "Turn completed",
+          payload: {
+            provider: event.provider,
+            state: event.payload.state,
+            ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+            ...(event.payload.stopReason !== undefined
+              ? { stopReason: event.payload.stopReason }
+              : {}),
+            ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.modelUsage !== undefined
+              ? { modelUsage: event.payload.modelUsage }
+              : {}),
+            ...(event.payload.totalCostUsd !== undefined
+              ? { totalCostUsd: event.payload.totalCostUsd }
+              : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "model.rerouted": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "model.rerouted",
+          summary: "Model rerouted",
+          payload: {
+            provider: event.provider,
+            ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+            fromModel: event.payload.fromModel,
+            toModel: event.payload.toModel,
+            reason: event.payload.reason,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "item.updated": {
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
@@ -1670,7 +1740,34 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  const processDomainEvent = Effect.fn("ProviderRuntimeIngestion.processDomainEvent")(function* (
+    event: TurnStartRequestedDomainEvent,
+  ) {
+    const payload = event.payload;
+    const commandUuid = yield* crypto.randomUUIDv4;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`provider:${event.eventId}:thread-activity-append:${commandUuid}`),
+      threadId: payload.threadId,
+      activity: {
+        id: event.eventId,
+        createdAt: payload.createdAt,
+        tone: "info",
+        kind: "turn.requested",
+        summary: "Turn requested",
+        payload: {
+          messageId: payload.messageId,
+          ...(payload.modelSelection !== undefined
+            ? { modelSelection: payload.modelSelection }
+            : {}),
+          runtimeMode: payload.runtimeMode,
+          interactionMode: payload.interactionMode,
+        },
+        turnId: null,
+      },
+      createdAt: payload.createdAt,
+    });
+  });
 
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);

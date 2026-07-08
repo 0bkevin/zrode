@@ -385,6 +385,7 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
+      ...(settings.showNerdStats !== DEFAULT_UNIFIED_SETTINGS.showNerdStats ? ["Nerd stats"] : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
@@ -434,6 +435,7 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
     settings.automaticGitFetchInterval,
     settings.enableAssistantStreaming,
     settings.sidebarThreadPreviewCount,
+    settings.showNerdStats,
     settings.timestampFormat,
     settings.wordWrap,
     theme,
@@ -460,6 +462,7 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
 
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      showNerdStats: DEFAULT_UNIFIED_SETTINGS.showNerdStats,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
@@ -560,6 +563,30 @@ export function GeneralSettingsPanel() {
                 </SelectItem>
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Nerd stats"
+          description="Show model, mode, reasoning, and token usage beside assistant messages."
+          resetAction={
+            settings.showNerdStats !== DEFAULT_UNIFIED_SETTINGS.showNerdStats ? (
+              <SettingResetButton
+                label="nerd stats"
+                onClick={() =>
+                  updateSettings({
+                    showNerdStats: DEFAULT_UNIFIED_SETTINGS.showNerdStats,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showNerdStats}
+              onCheckedChange={(checked) => updateSettings({ showNerdStats: Boolean(checked) })}
+              aria-label="Show nerd stats"
+            />
           }
         />
 

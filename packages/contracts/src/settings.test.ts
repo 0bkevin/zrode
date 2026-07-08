@@ -31,6 +31,16 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
+describe("ClientSettings nerd stats", () => {
+  it("defaults nerd stats off", () => {
+    expect(decodeClientSettings({}).showNerdStats).toBe(false);
+  });
+
+  it("accepts the nerd stats preference", () => {
+    expect(decodeClientSettings({ showNerdStats: true }).showNerdStats).toBe(true);
+  });
+});
+
 describe("ClientSettings appearance", () => {
   it("defaults to the system palette and standard radius", () => {
     expect(decodeClientSettings({}).appearance).toEqual({

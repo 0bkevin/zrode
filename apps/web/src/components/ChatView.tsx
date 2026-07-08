@@ -209,6 +209,10 @@ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  deriveAssistantNerdStatsByMessageId,
+  type AssistantNerdStats,
+} from "./chat/messageNerdStats";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { ThreadTerminalPanel, type TerminalPanelLaunchContext } from "./ThreadTerminalPanel";
@@ -285,6 +289,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
+const EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID = new Map<MessageId, AssistantNerdStats>();
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
@@ -976,6 +981,7 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setStickyModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
+  const showNerdStats = settings.showNerdStats;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
   const { resolvedTheme } = useTheme();
@@ -2159,6 +2165,16 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
+  const assistantNerdStatsByMessageId = useMemo(
+    () =>
+      showNerdStats
+        ? deriveAssistantNerdStatsByMessageId({
+            messages: timelineMessages,
+            activities: threadActivities,
+          })
+        : EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID,
+    [showNerdStats, threadActivities, timelineMessages],
+  );
   const timelineEntries = useMemo(
     () =>
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
@@ -6159,6 +6175,8 @@ function ChatViewContent(props: ChatViewProps) {
                 markdownCwd={gitCwd ?? undefined}
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
+                showNerdStats={showNerdStats}
+                assistantNerdStatsByMessageId={assistantNerdStatsByMessageId}
                 workspaceRoot={activeWorkspaceRoot}
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
                 anchorMessageId={timelineAnchorMessageId}

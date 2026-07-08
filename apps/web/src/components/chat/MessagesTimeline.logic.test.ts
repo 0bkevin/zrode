@@ -1183,6 +1183,56 @@ describe("computeStableMessagesTimelineRows", () => {
     expect(repeated.result[0]).toBe(initial.result[0]);
   });
 
+  it("reuses message rows when nerd stats are structurally equal", () => {
+    const assistantMessage = {
+      id: "assistant-1" as never,
+      role: "assistant" as const,
+      text: "Done",
+      turnId: "turn-1" as never,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:10Z",
+      streaming: false,
+    };
+    const makeStats = () => ({
+      providerLabel: "Codex",
+      modelLabel: "gpt-5",
+      modeLabel: "Build / Full access",
+      reasoningLabel: "HIGH",
+      tokenLabel: "1k tok",
+      tooltipLines: ["Provider: Codex", "Model: gpt-5", "Tokens burned: 1k"],
+    });
+    const createRows = () =>
+      deriveMessagesTimelineRows({
+        timelineEntries: [
+          {
+            id: "entry-assistant-1",
+            kind: "message",
+            createdAt: assistantMessage.createdAt,
+            message: assistantMessage,
+          },
+        ],
+        assistantNerdStatsByMessageId: new Map([[assistantMessage.id, makeStats()]]),
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaryByAssistantMessageId: new Map(),
+        revertTurnCountByUserMessageId: new Map(),
+      });
+
+    const firstRows = createRows();
+    const initial = computeStableMessagesTimelineRows(firstRows, {
+      byId: new Map(),
+      result: [],
+    });
+    const secondRows = createRows();
+
+    expect(secondRows[0]).not.toBe(firstRows[0]);
+
+    const repeated = computeStableMessagesTimelineRows(secondRows, initial);
+
+    expect(repeated).toBe(initial);
+    expect(repeated.result[0]).toBe(initial.result[0]);
+  });
+
   it("returns a new result when row order changes without content changes", () => {
     const firstUserMessage = {
       id: "user-1" as never,

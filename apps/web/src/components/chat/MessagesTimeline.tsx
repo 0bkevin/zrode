@@ -68,6 +68,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
+import type { AssistantNerdStats } from "./messageNerdStats";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
@@ -125,6 +126,7 @@ import {
 
 interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
+  showNerdStats: boolean;
   routeThreadKey: string;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;
@@ -158,6 +160,7 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID = new Map<MessageId, AssistantNerdStats>();
 const noopEditUserMessage = () => {};
 
 // ---------------------------------------------------------------------------
@@ -190,6 +193,8 @@ interface MessagesTimelineProps {
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
+  showNerdStats?: boolean;
+  assistantNerdStatsByMessageId?: ReadonlyMap<MessageId, AssistantNerdStats>;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   anchorMessageId: MessageId | null;
@@ -239,6 +244,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   markdownCwd,
   resolvedTheme,
   timestampFormat,
+  showNerdStats = false,
+  assistantNerdStatsByMessageId = EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
   anchorMessageId,
@@ -341,6 +348,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
+        assistantNerdStatsByMessageId,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
         editableUserMessageId,
@@ -354,6 +362,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       expandedWorkGroupIds,
       isWorking,
       activeTurnStartedAt,
+      assistantNerdStatsByMessageId,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
       editableUserMessageId,
@@ -453,6 +462,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       timestampFormat,
+      showNerdStats,
       routeThreadKey,
       threadRef: parseScopedThreadKey(routeThreadKey),
       markdownCwd,
@@ -476,6 +486,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }),
     [
       timestampFormat,
+      showNerdStats,
       routeThreadKey,
       markdownCwd,
       resolvedTheme,
@@ -1099,6 +1110,9 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         {row.showAssistantMeta ? (
           <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
             <AssistantCopyButton row={row} />
+            {ctx.showNerdStats && row.assistantNerdStats ? (
+              <AssistantNerdStatsLabel stats={row.assistantNerdStats} />
+            ) : null}
             {!row.message.streaming && (
               <Tooltip>
                 <TooltipTrigger
@@ -1159,6 +1173,49 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
   }
 
   return <MessageCopyButton text={assistantCopyState.text ?? ""} variant="ghost" />;
+}
+
+function AssistantNerdStatsLabel({ stats }: { stats: AssistantNerdStats }) {
+  const primary =
+    stats.providerLabel && stats.modelLabel
+      ? `${stats.providerLabel} - ${stats.modelLabel}`
+      : (stats.modelLabel ?? stats.providerLabel);
+  const parts = [
+    primary ? { key: "model", label: primary } : null,
+    stats.modeLabel ? { key: "mode", label: stats.modeLabel } : null,
+    stats.reasoningLabel ? { key: "reasoning", label: stats.reasoningLabel } : null,
+    stats.tokenLabel ? { key: "tokens", label: stats.tokenLabel } : null,
+  ].filter((part): part is { readonly key: string; readonly label: string } => part !== null);
+
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1 text-muted-foreground" />
+        }
+      >
+        {parts.map((part) => (
+          <span
+            key={part.key}
+            className="max-w-56 truncate rounded-sm bg-muted/40 px-1.5 py-0.5 text-[11px] leading-none"
+          >
+            {part.label}
+          </span>
+        ))}
+      </TooltipTrigger>
+      <TooltipPopup side="top">
+        <div className="grid gap-0.5">
+          {stats.tooltipLines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      </TooltipPopup>
+    </Tooltip>
+  );
 }
 
 function ProposedPlanTimelineRow({
