@@ -369,6 +369,7 @@ export const ServerProcessResourceHistoryFailureTag = Schema.Literals([
   "ProcessDiagnosticsQueryFailedError",
   "ProcessDiagnosticsServerProcessSignalError",
   "ProcessDiagnosticsNotDescendantError",
+  "ProcessDiagnosticsNotListeningError",
   "ProcessDiagnosticsSignalFailedError",
 ]);
 export type ServerProcessResourceHistoryFailureTag =
@@ -395,6 +396,12 @@ export type ServerProcessResourceHistoryResult = typeof ServerProcessResourceHis
 export const ServerSignalProcessInput = Schema.Struct({
   pid: PositiveInt,
   signal: ServerProcessSignal,
+  /**
+   * When supplied, the server verifies the PID still owns this localhost
+   * listener before signaling. This lets the local-server popover stop
+   * externally launched dev servers without allowing stale PID reuse.
+   */
+  port: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0)).check(Schema.isLessThan(65536))),
 });
 export type ServerSignalProcessInput = typeof ServerSignalProcessInput.Type;
 

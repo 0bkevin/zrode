@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -64,6 +64,16 @@ describe("ProcessDiagnostics", () => {
           command: "codex app-server --config /tmp/one two",
         },
       ]);
+    }),
+  );
+
+  it.effect("parses listener process ids from lsof and PowerShell output", () =>
+    Effect.sync(() => {
+      const pids = ProcessDiagnostics.parseListeningProcessIds(
+        ["p123", "p456", "789", "not-a-pid", ""].join("\n"),
+      );
+
+      expect([...pids]).toEqual([123, 456, 789]);
     }),
   );
 
@@ -255,6 +265,79 @@ describe("ProcessDiagnostics", () => {
       expect(error.message).toBe(
         `Process diagnostics query 'ps' failed with exit code 17 in '${process.cwd()}'.`,
       );
+    }),
+  );
+
+  it.effect("signals an external listener when it still owns the requested port", () =>
+    Effect.gen(function* () {
+      const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> =
+        [];
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) => {
+          const childProcess = command as unknown as {
+            readonly command: string;
+            readonly args: ReadonlyArray<string>;
+          };
+          commands.push({ command: childProcess.command, args: childProcess.args });
+          return Effect.succeed(mockHandle({ stdout: "p4242\n" }));
+        }),
+      );
+      const layer = ProcessDiagnostics.layer.pipe(Layer.provide(spawnerLayer));
+      const killSpy = vi.spyOn(process, "kill").mockReturnValue(true);
+
+      try {
+        const result = yield* Effect.service(ProcessDiagnostics.ProcessDiagnostics).pipe(
+          Effect.flatMap((pd) => pd.signal({ pid: 4242, signal: "SIGINT", port: 5173 })),
+          Effect.provide(layer),
+          Effect.provideService(HostProcessPlatform, "linux"),
+        );
+
+        expect(result).toEqual({
+          pid: 4242,
+          signal: "SIGINT",
+          signaled: true,
+          message: Option.none(),
+        });
+        expect(killSpy).toHaveBeenCalledWith(4242, "SIGINT");
+        expect(commands).toEqual([
+          {
+            command: "lsof",
+            args: ["-nP", "-iTCP:5173", "-sTCP:LISTEN", "-F", "p"],
+          },
+        ]);
+      } finally {
+        killSpy.mockRestore();
+      }
+    }),
+  );
+
+  it.effect("refuses an external listener when the pid no longer owns the port", () =>
+    Effect.gen(function* () {
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() => Effect.succeed(mockHandle({ stdout: "p9999\n" }))),
+      );
+      const layer = ProcessDiagnostics.layer.pipe(Layer.provide(spawnerLayer));
+      const killSpy = vi.spyOn(process, "kill").mockReturnValue(true);
+
+      try {
+        const result = yield* Effect.service(ProcessDiagnostics.ProcessDiagnostics).pipe(
+          Effect.flatMap((pd) => pd.signal({ pid: 4242, signal: "SIGINT", port: 5173 })),
+          Effect.provide(layer),
+          Effect.provideService(HostProcessPlatform, "linux"),
+        );
+
+        expect(result).toEqual({
+          pid: 4242,
+          signal: "SIGINT",
+          signaled: false,
+          message: Option.some("Process 4242 is no longer listening on localhost:5173."),
+        });
+        expect(killSpy).not.toHaveBeenCalled();
+      } finally {
+        killSpy.mockRestore();
+      }
     }),
   );
 

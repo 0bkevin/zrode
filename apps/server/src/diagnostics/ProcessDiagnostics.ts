@@ -29,6 +29,7 @@ export interface ProcessRow {
 }
 
 const PROCESS_QUERY_TIMEOUT_MS = 1_000;
+const LISTENER_QUERY_TIMEOUT_MS = 2_500;
 const POSIX_PROCESS_QUERY_COMMAND = "pid=,ppid=,pgid=,stat=,pcpu=,rss=,etime=,command=";
 const PROCESS_QUERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
@@ -39,6 +40,7 @@ export class ProcessDiagnostics extends Context.Service<
     readonly signal: (input: {
       readonly pid: number;
       readonly signal: ServerProcessSignal;
+      readonly port?: number | undefined;
     }) => Effect.Effect<ServerSignalProcessResult>;
   }
 >()("t3/diagnostics/ProcessDiagnostics") {}
@@ -98,6 +100,18 @@ class ProcessDiagnosticsNotDescendantError extends Schema.TaggedErrorClass<Proce
   }
 }
 
+class ProcessDiagnosticsNotListeningError extends Schema.TaggedErrorClass<ProcessDiagnosticsNotListeningError>()(
+  "ProcessDiagnosticsNotListeningError",
+  {
+    pid: Schema.Number,
+    port: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Process ${this.pid} is no longer listening on localhost:${this.port}.`;
+  }
+}
+
 class ProcessDiagnosticsSignalFailedError extends Schema.TaggedErrorClass<ProcessDiagnosticsSignalFailedError>()(
   "ProcessDiagnosticsSignalFailedError",
   {
@@ -116,6 +130,7 @@ const ProcessDiagnosticsError = Schema.Union([
   ProcessDiagnosticsQueryFailedError,
   ProcessDiagnosticsServerProcessSignalError,
   ProcessDiagnosticsNotDescendantError,
+  ProcessDiagnosticsNotListeningError,
   ProcessDiagnosticsSignalFailedError,
 ]);
 type ProcessDiagnosticsError = typeof ProcessDiagnosticsError.Type;
@@ -303,6 +318,18 @@ export function isDiagnosticsQueryProcess(row: ProcessRow, serverPid: number): b
   );
 }
 
+export function parseListeningProcessIds(output: string): ReadonlySet<number> {
+  const pids = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const value = trimmed.startsWith("p") ? trimmed.slice(1) : trimmed;
+    const pid = parsePositiveInt(value);
+    if (pid !== null) pids.add(pid);
+  }
+  return pids;
+}
+
 function makeResult(input: {
   readonly serverPid: number;
   readonly rows: ReadonlyArray<ProcessRow>;
@@ -340,6 +367,7 @@ interface ProcessOutput {
 const runProcess = Effect.fn("runProcess")(function* (input: {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  readonly timeoutMillis?: number;
 }) {
   const cwd = process.cwd();
   return yield* Effect.gen(function* () {
@@ -381,7 +409,7 @@ const runProcess = Effect.fn("runProcess")(function* (input: {
     } satisfies ProcessOutput;
   }).pipe(
     Effect.scoped,
-    Effect.timeoutOption(Duration.millis(PROCESS_QUERY_TIMEOUT_MS)),
+    Effect.timeoutOption(Duration.millis(input.timeoutMillis ?? PROCESS_QUERY_TIMEOUT_MS)),
     Effect.flatMap((result) =>
       Option.match(result, {
         onNone: () =>
@@ -390,7 +418,7 @@ const runProcess = Effect.fn("runProcess")(function* (input: {
               command: input.command,
               argCount: input.args.length,
               cwd,
-              timeoutMillis: PROCESS_QUERY_TIMEOUT_MS,
+              timeoutMillis: input.timeoutMillis ?? PROCESS_QUERY_TIMEOUT_MS,
             }),
           ),
         onSome: Effect.succeed,
@@ -473,6 +501,84 @@ function readWindowsProcessRows(): Effect.Effect<
   );
 }
 
+function readPosixListeningProcessIdsForPort(
+  port: number,
+): Effect.Effect<
+  ReadonlySet<number>,
+  ProcessDiagnosticsError,
+  ChildProcessSpawner.ChildProcessSpawner
+> {
+  return runProcess({
+    command: "lsof",
+    args: ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-F", "p"],
+    timeoutMillis: LISTENER_QUERY_TIMEOUT_MS,
+  }).pipe(
+    Effect.flatMap((result) =>
+      result.exitCode === 0 ||
+      (result.stdout.trim().length === 0 && result.stderr.trim().length === 0)
+        ? Effect.succeed(parseListeningProcessIds(result.stdout))
+        : Effect.fail(
+            new ProcessDiagnosticsQueryFailedError({
+              command: "lsof",
+              argCount: 5,
+              cwd: result.cwd,
+              exitCode: result.exitCode,
+              stdoutBytes: result.stdoutBytes,
+              stderrBytes: result.stderrBytes,
+              stdoutTruncated: result.stdoutTruncated,
+              stderrTruncated: result.stderrTruncated,
+            }),
+          ),
+    ),
+  );
+}
+
+function readWindowsListeningProcessIdsForPort(
+  port: number,
+): Effect.Effect<
+  ReadonlySet<number>,
+  ProcessDiagnosticsError,
+  ChildProcessSpawner.ChildProcessSpawner
+> {
+  const command = [
+    `$connections = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue;`,
+    "foreach ($connection in $connections) {",
+    "if ($connection.OwningProcess -gt 0) { Write-Output $connection.OwningProcess }",
+    "}",
+  ].join(" ");
+
+  return runProcess({
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", command],
+    timeoutMillis: LISTENER_QUERY_TIMEOUT_MS,
+  }).pipe(
+    Effect.flatMap((result) =>
+      result.exitCode !== 0
+        ? Effect.fail(
+            new ProcessDiagnosticsQueryFailedError({
+              command: "powershell.exe",
+              argCount: 4,
+              cwd: result.cwd,
+              exitCode: result.exitCode,
+              stdoutBytes: result.stdoutBytes,
+              stderrBytes: result.stderrBytes,
+              stdoutTruncated: result.stdoutTruncated,
+              stderrTruncated: result.stderrTruncated,
+            }),
+          )
+        : Effect.succeed(parseListeningProcessIds(result.stdout)),
+    ),
+  );
+}
+
+export const readListeningProcessIdsForPort = (port: number) =>
+  Effect.gen(function* () {
+    const platform = yield* HostProcessPlatform;
+    return yield* platform === "win32"
+      ? readWindowsListeningProcessIdsForPort(port)
+      : readPosixListeningProcessIdsForPort(port);
+  });
+
 export const readProcessRows = Effect.gen(function* () {
   const platform = yield* HostProcessPlatform;
   return yield* platform === "win32" ? readWindowsProcessRows() : readPosixProcessRows();
@@ -515,6 +621,38 @@ function assertDescendantPid(
   );
 }
 
+function assertListeningPid(input: { readonly pid: number; readonly port: number }) {
+  return readListeningProcessIdsForPort(input.port).pipe(
+    Effect.flatMap((pids) =>
+      pids.has(input.pid)
+        ? Effect.void
+        : Effect.fail(
+            new ProcessDiagnosticsNotListeningError({
+              pid: input.pid,
+              port: input.port,
+            }),
+          ),
+    ),
+  );
+}
+
+function assertSignalablePid(input: { readonly pid: number; readonly port?: number | undefined }) {
+  if (input.pid === process.pid) {
+    return Effect.fail(
+      new ProcessDiagnosticsServerProcessSignalError({
+        pid: input.pid,
+      }),
+    );
+  }
+
+  return input.port === undefined
+    ? assertDescendantPid(input.pid)
+    : assertListeningPid({
+        pid: input.pid,
+        port: input.port,
+      });
+}
+
 export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -536,7 +674,7 @@ export const make = Effect.gen(function* () {
 
   const signal: ProcessDiagnostics["Service"]["signal"] = Effect.fn("ProcessDiagnostics.signal")(
     function* (input) {
-      return yield* assertDescendantPid(input.pid).pipe(
+      return yield* assertSignalablePid(input).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.flatMap(() =>
           Effect.try({

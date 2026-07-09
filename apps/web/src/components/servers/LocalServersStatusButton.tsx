@@ -179,7 +179,7 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
       void (async () => {
         const result = await signalServerProcess({
           environmentId: threadRef.environmentId,
-          input: { pid, signal: force ? "SIGKILL" : "SIGINT" },
+          input: { pid, signal: force ? "SIGKILL" : "SIGINT", port: server.port },
         });
         if (result._tag === "Failure") {
           clearStopTracking(pid);
@@ -200,9 +200,7 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
           toastManager.add({
             type: "error",
             title: "Can't stop this server",
-            description: message?.includes("descendant")
-              ? "This server wasn't started from Zrode, so it can't be stopped here. Stop it from its own terminal."
-              : (message ?? `Process ${pid} did not accept the signal.`),
+            description: message ?? `Process ${pid} did not accept the signal.`,
           });
         }
         // When the signal landed, keep the "Stopping…" state until the row

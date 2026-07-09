@@ -300,6 +300,7 @@ export const make = Effect.gen(function* () {
       ProcessDiagnosticsQueryFailedError: recordSamplingFailure,
       ProcessDiagnosticsServerProcessSignalError: recordSamplingFailure,
       ProcessDiagnosticsNotDescendantError: recordSamplingFailure,
+      ProcessDiagnosticsNotListeningError: recordSamplingFailure,
       ProcessDiagnosticsSignalFailedError: recordSamplingFailure,
     }),
   );
