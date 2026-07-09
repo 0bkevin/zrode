@@ -35,6 +35,8 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("claudeAgent")]: "claude-sonnet-5",
   [ProviderDriverKind.make("cursor")]: "claude-sonnet-4-6",
   [ProviderDriverKind.make("devin")]: "adaptive",
+  [ProviderDriverKind.make("githubCopilot")]: "claude-sonnet-4.6",
+  [ProviderDriverKind.make("grok")]: "grok-build",
   [ProviderDriverKind.make("opencode")]: "openai/gpt-5",
 };
 
