@@ -6308,65 +6308,71 @@ function ChatViewContent(props: ChatViewProps) {
               </div>
               <div
                 className={cn(
-                  "chat-composer-horizontal-inset chat-composer-lower-chrome relative z-10 flex items-end gap-2",
+                  "chat-composer-horizontal-inset chat-composer-lower-chrome relative z-10",
                   isGitRepo
                     ? "pb-[calc(env(safe-area-inset-bottom)+0.25rem)]"
                     : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
                 )}
               >
-                {isGitRepo && (
-                  <div className="pointer-events-auto min-w-0 flex-1">
-                    <BranchToolbar
-                      environmentId={activeThread.environmentId}
-                      threadId={activeThread.id}
-                      {...(routeKind === "draft" && draftId ? { draftId } : {})}
-                      onEnvModeChange={onEnvModeChange}
-                      startFromOrigin={startFromOrigin}
-                      onStartFromOriginChange={onStartFromOriginChange}
-                      {...(canOverrideServerThreadEnvMode
-                        ? { effectiveEnvModeOverride: envMode }
-                        : {})}
-                      {...(canOverrideServerThreadEnvMode
-                        ? {
-                            activeThreadBranchOverride: activeThreadBranch,
-                            onActiveThreadBranchOverrideChange: setPendingServerThreadBranch,
-                          }
-                        : {})}
-                      envLocked={envLocked}
-                      onComposerFocusRequest={scheduleComposerFocus}
-                      {...(canCheckoutPullRequestIntoThread
-                        ? { onCheckoutPullRequestRequest: openPullRequestDialog }
-                        : {})}
-                      {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
-                      availableEnvironments={logicalProjectEnvironments}
-                    />
-                  </div>
-                )}
-                {/* Servers pill: inline in the footer by default; split panes
-                    portal only the focused pane's pill into the shared
-                    bottom-corner slot so it renders once, not once per pane. */}
-                {activeThreadRef ? (
-                  serverStatusSlot === undefined ? (
-                    <div
-                      className={cn(
-                        "pointer-events-auto ml-auto shrink-0",
-                        isGitRepo ? "pb-3" : "pb-0",
-                      )}
-                    >
-                      <LocalServersStatusButton threadRef={activeThreadRef} />
+                {/* `.chat-composer-lower-chrome` keeps its background off the scrollbar with
+                    a trailing margin, which makes this row narrower than the composer above.
+                    Re-add that gutter as a leading margin so both center on the same axis. */}
+                <div className="ms-[var(--app-scrollbar-width)] flex items-end gap-2">
+                  {/* Mirrors the servers pill's flex region so the toolbar centers on the
+                      composer rather than on whatever space the pill leaves behind. */}
+                  {isGitRepo && <div aria-hidden className="flex-1" />}
+                  {isGitRepo && (
+                    <div className="pointer-events-auto min-w-0 shrink basis-[var(--container-3xl)]">
+                      <BranchToolbar
+                        environmentId={activeThread.environmentId}
+                        threadId={activeThread.id}
+                        {...(routeKind === "draft" && draftId ? { draftId } : {})}
+                        onEnvModeChange={onEnvModeChange}
+                        startFromOrigin={startFromOrigin}
+                        onStartFromOriginChange={onStartFromOriginChange}
+                        {...(canOverrideServerThreadEnvMode
+                          ? { effectiveEnvModeOverride: envMode }
+                          : {})}
+                        {...(canOverrideServerThreadEnvMode
+                          ? {
+                              activeThreadBranchOverride: activeThreadBranch,
+                              onActiveThreadBranchOverrideChange: setPendingServerThreadBranch,
+                            }
+                          : {})}
+                        envLocked={envLocked}
+                        onComposerFocusRequest={scheduleComposerFocus}
+                        {...(canCheckoutPullRequestIntoThread
+                          ? { onCheckoutPullRequestRequest: openPullRequestDialog }
+                          : {})}
+                        {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
+                        availableEnvironments={logicalProjectEnvironments}
+                      />
                     </div>
-                  ) : serverStatusSlot === null ? null : (
-                    // Split panes: floats over pane content with no composer bar
-                    // behind it, so give it a subtle translucent backdrop to stay
-                    // legible (single-pane relies on the composer chrome instead).
-                    createPortal(
-                      <div className="pointer-events-auto rounded-md bg-card/80 backdrop-blur-sm">
+                  )}
+                  {/* Servers pill: inline in the footer by default; split panes
+                      portal only the focused pane's pill into the shared
+                      bottom-corner slot so it renders once, not once per pane. */}
+                  <div className={cn("flex justify-end", isGitRepo ? "flex-1" : "ml-auto")}>
+                    {activeThreadRef && serverStatusSlot === undefined ? (
+                      <div
+                        className={cn("pointer-events-auto shrink-0", isGitRepo ? "pb-3" : "pb-0")}
+                      >
                         <LocalServersStatusButton threadRef={activeThreadRef} />
-                      </div>,
-                      serverStatusSlot,
-                    )
-                  )
-                ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  {activeThreadRef && serverStatusSlot
+                    ? // Split panes: floats over pane content with no composer bar
+                      // behind it, so give it a subtle translucent backdrop to stay
+                      // legible (single-pane relies on the composer chrome instead).
+                      createPortal(
+                        <div className="pointer-events-auto rounded-md bg-card/80 backdrop-blur-sm">
+                          <LocalServersStatusButton threadRef={activeThreadRef} />
+                        </div>,
+                        serverStatusSlot,
+                      )
+                    : null}
+                </div>
               </div>
             </div>
 
