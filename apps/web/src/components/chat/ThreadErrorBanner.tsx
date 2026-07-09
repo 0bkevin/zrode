@@ -16,14 +16,16 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
     <div className="pointer-events-auto w-full max-w-3xl">
       <Alert variant="error" className="bg-background/70 shadow-lg/5 backdrop-blur-md">
         <CircleAlertIcon />
-        <Tooltip>
-          <TooltipTrigger render={<AlertDescription className="line-clamp-3" />}>
-            {error}
-          </TooltipTrigger>
-          <TooltipPopup side="top" className="max-w-96 whitespace-pre-wrap">
-            {error}
-          </TooltipPopup>
-        </Tooltip>
+        <AlertDescription className="min-w-0">
+          <Tooltip>
+            <TooltipTrigger
+              render={<div className="min-w-0 line-clamp-3 wrap-break-word">{error}</div>}
+            />
+            <TooltipPopup side="bottom" className="max-w-96 whitespace-pre-wrap">
+              {error}
+            </TooltipPopup>
+          </Tooltip>
+        </AlertDescription>
         {onDismiss && (
           <AlertAction>
             <Button variant="ghost" size="icon-xs" aria-label="Dismiss error" onClick={onDismiss}>
