@@ -6,7 +6,7 @@ import { cn } from "../lib/utils";
 
 export function ZrodeMarkIcon({
   className,
-  strokeWidth = 56,
+  strokeWidth = 36,
   title,
   ...props
 }: SVGProps<SVGSVGElement> & { readonly title?: string; readonly strokeWidth?: number }) {
@@ -52,16 +52,16 @@ export function BrandWordmark({
   return (
     <span
       aria-label={APP_BASE_NAME}
-      className={cn("inline-flex min-w-0 items-center gap-2", className)}
+      className={cn("inline-flex min-w-0 items-center gap-1", className)}
     >
       <ZrodeMarkIcon className={cn("size-5 text-foreground", markClassName)} />
       <span
         className={cn(
-          "min-w-0 truncate text-sm font-medium tracking-tight text-muted-foreground",
+          "min-w-0 truncate text-sm font-medium uppercase text-muted-foreground",
           textClassName,
         )}
       >
-        {APP_BASE_NAME}
+        {APP_BASE_NAME.toUpperCase()}
       </span>
       {showStage ? (
         <span

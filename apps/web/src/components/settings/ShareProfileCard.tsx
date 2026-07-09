@@ -320,7 +320,7 @@ function drawZrodeMark(
   ctx.translate(input.x, input.y);
   ctx.scale(input.size / ZRODE_MARK_VIEWBOX_SIZE, input.size / ZRODE_MARK_VIEWBOX_SIZE);
   ctx.strokeStyle = input.color;
-  ctx.lineWidth = input.lineWidth ?? 56;
+  ctx.lineWidth = input.lineWidth ?? 36;
   ctx.lineJoin = "round";
   for (const path of ZRODE_MARK_PATHS) {
     ctx.stroke(new Path2D(path));
@@ -388,7 +388,7 @@ function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
   const wordY = markY + 30;
   ctx.font = `700 25px ${FONT}`;
   ctx.fillStyle = c.mutedForeground;
-  ctx.fillText(APP_BASE_NAME, wordX, wordY);
+  ctx.fillText(APP_BASE_NAME.toUpperCase(), wordX, wordY);
 
   ctx.textAlign = "right";
   ctx.font = `600 14px ${FONT}`;
