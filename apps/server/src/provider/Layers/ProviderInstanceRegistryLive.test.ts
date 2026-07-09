@@ -10,17 +10,19 @@
  *
  *  2. **Many drivers, one registry** — the "all drivers slice" describe
  *     block below configures one instance of every shipped driver
- *     (`codex`, `claudeAgent`, `cursor`, `grok`, `devin`, `opencode`) in a single
- *     `ProviderInstanceConfigMap` and asserts the registry boots them all
- *     without cross-contamination. This proves the driver SPI is uniform
- *     across every provider — any driver plugs into the registry through
- *     the same `ProviderDriver` value contract.
+ *     (`codex`, `claudeAgent`, `cursor`, `grok`, `devin`,
+ *     `githubCopilot`, `opencode`) in a single `ProviderInstanceConfigMap`
+ *     and asserts the registry boots them all without cross-contamination.
+ *     This proves the driver SPI is uniform across every provider — any
+ *     driver plugs into the registry through the same `ProviderDriver`
+ *     value contract.
  *
  * Every instance in these tests is configured with `enabled: false` so the
  * provider-status checks short-circuit to pending/disabled snapshots
- * without trying to spawn real `codex` / `claude` / `agent` / `grok` / `devin` / `opencode`
- * binaries. That keeps the assertions focused on registry routing
- * behaviour rather than the runtime details of each provider.
+ * without trying to spawn real `codex` / `claude` / `agent` / `grok` /
+ * `devin` / `copilot` / `opencode` binaries. That keeps the assertions
+ * focused on registry routing behaviour rather than the runtime details of
+ * each provider.
  */
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -29,6 +31,7 @@ import {
   type CodexSettings,
   type CursorSettings,
   type DevinSettings,
+  type GitHubCopilotSettings,
   type GrokSettings,
   type OpenCodeSettings,
   ProviderDriverKind,
@@ -45,6 +48,7 @@ import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { DevinDriver } from "../Drivers/DevinDriver.ts";
+import { GitHubCopilotDriver } from "../Drivers/GitHubCopilotDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
@@ -94,6 +98,16 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 const makeDevinConfig = (overrides: Partial<DevinSettings>): DevinSettings => ({
   enabled: false,
   binaryPath: "devin",
+  customModels: [],
+  ...overrides,
+});
+
+const makeGitHubCopilotConfig = (
+  overrides: Partial<GitHubCopilotSettings>,
+): GitHubCopilotSettings => ({
+  enabled: false,
+  binaryPath: "copilot",
+  homePath: "",
   customModels: [],
   ...overrides,
 });
@@ -267,6 +281,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const cursorId = ProviderInstanceId.make("cursor_default");
       const grokId = ProviderInstanceId.make("grok_default");
       const devinId = ProviderInstanceId.make("devin_default");
+      const githubCopilotId = ProviderInstanceId.make("github_copilot_default");
       const openCodeId = ProviderInstanceId.make("opencode_default");
 
       const codexDriverKind = ProviderDriverKind.make("codex");
@@ -274,6 +289,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const cursorDriverKind = ProviderDriverKind.make("cursor");
       const grokDriverKind = ProviderDriverKind.make("grok");
       const devinDriverKind = ProviderDriverKind.make("devin");
+      const githubCopilotDriverKind = ProviderDriverKind.make("githubCopilot");
       const openCodeDriverKind = ProviderDriverKind.make("opencode");
 
       const configMap: ProviderInstanceConfigMap = {
@@ -310,6 +326,12 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           enabled: false,
           config: makeDevinConfig({}),
         },
+        [githubCopilotId]: {
+          driver: githubCopilotDriverKind,
+          displayName: "GitHub Copilot",
+          enabled: false,
+          config: makeGitHubCopilotConfig({ homePath: "/home/julius/.copilot-work" }),
+        },
         [openCodeId]: {
           driver: openCodeDriverKind,
           displayName: "OpenCode",
@@ -319,7 +341,15 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       };
 
       const { registry } = yield* makeProviderInstanceRegistry({
-        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, DevinDriver, OpenCodeDriver],
+        drivers: [
+          CodexDriver,
+          ClaudeDriver,
+          CursorDriver,
+          GrokDriver,
+          DevinDriver,
+          GitHubCopilotDriver,
+          OpenCodeDriver,
+        ],
         configMap,
       });
 
@@ -329,9 +359,9 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(unavailable).toEqual([]);
 
       const instances = yield* registry.listInstances;
-      expect(instances).toHaveLength(6);
+      expect(instances).toHaveLength(7);
       expect(instances.map((instance) => instance.instanceId).toSorted()).toEqual(
-        [codexId, claudeId, cursorId, grokId, devinId, openCodeId].toSorted(),
+        [codexId, claudeId, cursorId, grokId, devinId, githubCopilotId, openCodeId].toSorted(),
       );
 
       // Instance lookup by id resolves each instance to its own bundle —
@@ -342,18 +372,21 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const cursor = yield* registry.getInstance(cursorId);
       const grok = yield* registry.getInstance(grokId);
       const devin = yield* registry.getInstance(devinId);
+      const githubCopilot = yield* registry.getInstance(githubCopilotId);
       const openCode = yield* registry.getInstance(openCodeId);
       expect(codex?.driverKind).toBe(codexDriverKind);
       expect(claude?.driverKind).toBe(claudeDriverKind);
       expect(cursor?.driverKind).toBe(cursorDriverKind);
       expect(grok?.driverKind).toBe(grokDriverKind);
       expect(devin?.driverKind).toBe(devinDriverKind);
+      expect(githubCopilot?.driverKind).toBe(githubCopilotDriverKind);
       expect(openCode?.driverKind).toBe(openCodeDriverKind);
       expect(codex?.displayName).toBe("Codex");
       expect(claude?.displayName).toBe("Claude");
       expect(cursor?.displayName).toBe("Cursor");
       expect(grok?.displayName).toBe("Grok");
       expect(devin?.displayName).toBe("Devin");
+      expect(githubCopilot?.displayName).toBe("GitHub Copilot");
       expect(openCode?.displayName).toBe("OpenCode");
 
       // Every instance owns its own set of closures — no sharing across
@@ -367,6 +400,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.adapter,
         grok!.adapter,
         devin!.adapter,
+        githubCopilot!.adapter,
         openCode!.adapter,
       ];
       expect(new Set(adapters).size).toBe(adapters.length);
@@ -376,6 +410,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.textGeneration,
         grok!.textGeneration,
         devin!.textGeneration,
+        githubCopilot!.textGeneration,
         openCode!.textGeneration,
       ];
       expect(new Set(textGenerations).size).toBe(textGenerations.length);
@@ -385,6 +420,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.snapshot,
         grok!.snapshot,
         devin!.snapshot,
+        githubCopilot!.snapshot,
         openCode!.snapshot,
       ];
       expect(new Set(snapshots).size).toBe(snapshots.length);
@@ -426,6 +462,14 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(devinSnapshot.driver).toBe(devinDriverKind);
       expect(devinSnapshot.enabled).toBe(false);
       expect(devinSnapshot.continuation?.groupKey).toBe(`${devinDriverKind}:instance:${devinId}`);
+
+      const githubCopilotSnapshot = yield* githubCopilot!.snapshot.getSnapshot;
+      expect(githubCopilotSnapshot.instanceId).toBe(githubCopilotId);
+      expect(githubCopilotSnapshot.driver).toBe(githubCopilotDriverKind);
+      expect(githubCopilotSnapshot.enabled).toBe(false);
+      expect(githubCopilotSnapshot.continuation?.groupKey).toBe(
+        "githubCopilot:home:/home/julius/.copilot-work",
+      );
 
       const openCodeSnapshot = yield* openCode!.snapshot.getSnapshot;
       expect(openCodeSnapshot.instanceId).toBe(openCodeId);

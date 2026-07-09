@@ -3,6 +3,7 @@ import {
   CodexSettings,
   CursorSettings,
   DevinSettings,
+  GitHubCopilotSettings,
   GrokSettings,
   OpenCodeSettings,
   ProviderDriverKind,
@@ -11,6 +12,7 @@ import type * as Schema from "effect/Schema";
 import {
   ClaudeAI,
   CursorIcon,
+  GithubCopilotIcon,
   GrokIcon,
   type Icon,
   OpenAI,
@@ -76,6 +78,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: PiAgentIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinSettings,
+  },
+  {
+    value: ProviderDriverKind.make("githubCopilot"),
+    label: "GitHub Copilot",
+    icon: GithubCopilotIcon,
+    badgeLabel: "Preview",
+    settingsSchema: GitHubCopilotSettings,
   },
   {
     value: ProviderDriverKind.make("opencode"),

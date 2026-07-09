@@ -101,6 +101,12 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
       binaryPath: "devin",
       customModels: [],
     });
+    expect(decoded.providers.githubCopilot).toEqual({
+      enabled: false,
+      binaryPath: "copilot",
+      homePath: "",
+      customModels: [],
+    });
   });
 
   it("decodes a multi-instance map mixing first-party and fork drivers", () => {
@@ -204,6 +210,10 @@ describe("ServerSettingsPatch string normalization", () => {
         devin: {
           binaryPath: "  /opt/homebrew/bin/devin  ",
         },
+        githubCopilot: {
+          binaryPath: "  /opt/homebrew/bin/copilot  ",
+          homePath: "  ~/.copilot-work  ",
+        },
       },
       providerInstances: {
         codex_personal: {
@@ -220,6 +230,8 @@ describe("ServerSettingsPatch string normalization", () => {
     expect(patch.providers?.codex?.binaryPath).toBe("/opt/homebrew/bin/codex");
     expect(patch.providers?.codex?.homePath).toBe("~/.codex");
     expect(patch.providers?.devin?.binaryPath).toBe("/opt/homebrew/bin/devin");
+    expect(patch.providers?.githubCopilot?.binaryPath).toBe("/opt/homebrew/bin/copilot");
+    expect(patch.providers?.githubCopilot?.homePath).toBe("~/.copilot-work");
     expect(patch.providerInstances?.[ProviderInstanceId.make("codex_personal")]?.driver).toBe(
       "codex",
     );

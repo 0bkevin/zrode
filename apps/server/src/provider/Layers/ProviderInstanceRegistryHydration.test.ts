@@ -18,4 +18,15 @@ describe("deriveProviderInstanceConfigMap", () => {
       config: DEFAULT_SERVER_SETTINGS.providers.devin,
     });
   });
+
+  it("synthesizes the default GitHub Copilot instance from legacy provider settings", () => {
+    const githubCopilotDriver = ProviderDriverKind.make("githubCopilot");
+    const githubCopilotId = defaultInstanceIdForDriver(githubCopilotDriver);
+    const map = deriveProviderInstanceConfigMap(DEFAULT_SERVER_SETTINGS);
+
+    expect(map[githubCopilotId]).toEqual({
+      driver: githubCopilotDriver,
+      config: DEFAULT_SERVER_SETTINGS.providers.githubCopilot,
+    });
+  });
 });
