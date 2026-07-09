@@ -48,6 +48,8 @@ import {
   type ContextMenuItem,
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
+  PROVIDER_DISPLAY_NAMES,
+  ProviderDriverKind,
   type ScopedThreadRef,
   type ResolvedKeybindingsConfig,
   type SidebarProjectGroupingMode,
@@ -212,7 +214,14 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
-import { primaryServerConfigAtom, primaryServerKeybindingsAtom } from "../state/server";
+import {
+  primaryServerConfigAtom,
+  primaryServerKeybindingsAtom,
+  primaryServerProvidersAtom,
+} from "../state/server";
+import { deriveProviderInstanceEntries } from "../providerInstances";
+import { formatProviderDriverKindLabel } from "../providerModels";
+import { PROVIDER_ICON_BY_PROVIDER } from "./chat/providerIconUtils";
 import { BrandWordmark } from "./BrandWordmark";
 import {
   derivePhysicalProjectKey,
@@ -367,6 +376,56 @@ interface SidebarThreadRowProps {
   attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
   openPrLink: (event: React.MouseEvent<HTMLElement>, prUrl: string) => void;
 }
+
+/**
+ * Small provider mark shown at the leading edge of a thread row so the user
+ * can tell at a glance which agent/provider the thread is using. Resolves the
+ * thread's `modelSelection.instanceId` to a driver kind via the primary
+ * environment's provider snapshot, falling back to treating the instance id as
+ * a driver slug (true for the built-in default instances) for threads whose
+ * instance isn't in that snapshot (e.g. remote threads). Renders nothing when
+ * the provider has no brand mark.
+ */
+const ThreadProviderIcon = memo(function ThreadProviderIcon({
+  thread,
+}: {
+  thread: SidebarThreadSummary;
+}) {
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const instanceId = thread.modelSelection?.instanceId ?? null;
+  const resolved = useMemo(() => {
+    if (instanceId === null) return null;
+    const entry = deriveProviderInstanceEntries(providers).find(
+      (candidate) => candidate.instanceId === instanceId,
+    );
+    const driverKind = entry?.driverKind ?? ProviderDriverKind.make(instanceId);
+    const Icon = PROVIDER_ICON_BY_PROVIDER[driverKind];
+    if (!Icon) return null;
+    const label =
+      entry?.displayName ??
+      PROVIDER_DISPLAY_NAMES[driverKind] ??
+      formatProviderDriverKindLabel(driverKind);
+    return { Icon, label };
+  }, [instanceId, providers]);
+
+  if (resolved === null) return null;
+  const { Icon, label } = resolved;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            aria-label={label}
+            className="inline-flex size-[11px] shrink-0 items-center justify-center opacity-80"
+          />
+        }
+      >
+        <Icon className="size-[11px]" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">{label}</TooltipPopup>
+    </Tooltip>
+  );
+});
 
 export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
@@ -720,6 +779,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          <ThreadProviderIcon thread={thread} />
           {prStatus && (
             <Tooltip>
               <TooltipTrigger
