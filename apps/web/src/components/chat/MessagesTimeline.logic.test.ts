@@ -504,7 +504,9 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
   });
 
-  it("folds settled-turn commentary and work behind a Worked-for row", () => {
+  it("keeps settled-turn assistant text visible while folding work behind a Worked-for row", () => {
+    const longAssistantText =
+      "I found the important details before running the command, and this longer answer should remain visible when the turn folds.";
     const timelineEntries = [
       {
         id: "user-entry",
@@ -527,7 +529,7 @@ describe("deriveMessagesTimelineRows", () => {
         message: {
           id: "assistant-thought" as never,
           role: "assistant" as const,
-          text: "Looking around first.",
+          text: longAssistantText,
           turnId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:05Z",
           updatedAt: "2026-01-01T00:00:06Z",
@@ -581,7 +583,30 @@ describe("deriveMessagesTimelineRows", () => {
     expect(collapsedRows.map((row) => row.id)).toEqual([
       "user-entry",
       "turn-fold:turn-1",
+      "assistant-thought-entry",
       "assistant-final-entry",
+    ]);
+    expect(collapsedRows.some((row) => row.id === "work-entry-1")).toBe(false);
+    const collapsedAssistantRows = collapsedRows.filter(
+      (row): row is Extract<(typeof collapsedRows)[number], { kind: "message" }> =>
+        row.kind === "message" && row.message.role === "assistant",
+    );
+    expect(collapsedAssistantRows.map((row) => row.message.text)).toEqual([
+      longAssistantText,
+      "Done",
+    ]);
+    expect(collapsedAssistantRows[0]?.message.text.length).toBeGreaterThan(
+      collapsedAssistantRows[1]?.message.text.length ?? 0,
+    );
+    expect(
+      collapsedAssistantRows.map((row) => [
+        row.message.id,
+        row.showAssistantMeta,
+        row.showAssistantCopyButton,
+      ]),
+    ).toEqual([
+      ["assistant-thought", false, false],
+      ["assistant-final", true, true],
     ]);
 
     const expandedRows = deriveMessagesTimelineRows({

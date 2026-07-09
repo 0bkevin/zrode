@@ -1359,8 +1359,14 @@ const make = Effect.gen(function* () {
               : activeTurnId;
         const status = (() => {
           switch (event.type) {
-            case "session.state.changed":
-              return orchestrationSessionStatusFromRuntimeState(event.payload.state);
+            case "session.state.changed": {
+              const runtimeStatus = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              // Some providers announce ready/waiting while the current turn is
+              // still streaming; only turn.completed should settle that turn.
+              const preserveRunningTurn =
+                activeTurnId !== null && (runtimeStatus === "running" || runtimeStatus === "ready");
+              return preserveRunningTurn ? "running" : runtimeStatus;
+            }
             case "turn.started":
               return "running";
             case "session.exited":

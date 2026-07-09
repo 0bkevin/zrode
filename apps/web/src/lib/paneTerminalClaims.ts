@@ -14,10 +14,12 @@
  * Every window claims the terminal ids and preview tab ids it hosts over a
  * BroadcastChannel and re-broadcasts on a heartbeat; other windows exclude
  * claimed ids and drop claims whose heartbeats stop, so a crashed window
- * releases its resources automatically. BroadcastChannel never delivers to
- * the posting window, so a window only ever sees other windows' claims; a
- * window's OWN claims are mirrored in a local registry for components that
- * need "what does this window host" (popout webview hosting).
+ * releases its resources automatically. A BroadcastChannel object does not
+ * receive messages it posts itself, but other BroadcastChannel objects in the
+ * same window can receive those messages. Locally-originated claim ids are
+ * ignored by the listener side; this window's own claims are mirrored in a
+ * local registry for components that need "what does this window host"
+ * (popout webview hosting).
  */
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
@@ -72,7 +74,11 @@ const listeners = new Set<() => void>();
 const claimedTerminalIdsByThreadKey = new Map<string, ReadonlySet<string>>();
 let claimedPreviewTabIdsCache: ReadonlySet<string> | null = null;
 let listenChannel: BroadcastChannel | null = null;
+let listenSweepInterval: ReturnType<typeof setInterval> | null = null;
 let lastSweepAt: number | null = null;
+// Append-only in production: a claim can still be delivered after its
+// publisher disposes, and it must still be recognized as locally originated.
+const locallyOriginatedClaimIds = new Set<string>();
 // Tabs a move-to-window flow has handed off but whose destination window
 // hasn't broadcast its claim yet (it is still booting). Treated as claimed so
 // the origin window neither re-adopts nor closes the tab in the gap.
@@ -137,6 +143,13 @@ function handleListenMessage(event: MessageEvent): void {
   if (!message || typeof message !== "object") {
     return;
   }
+  if (
+    (message.type === "claim" || message.type === "release") &&
+    typeof message.claimId === "string" &&
+    locallyOriginatedClaimIds.has(message.claimId)
+  ) {
+    return;
+  }
   if (message.type === "claim" && typeof message.claimId === "string") {
     const entry: ClaimEntry = {
       threadKey: typeof message.threadKey === "string" ? message.threadKey : "",
@@ -193,7 +206,7 @@ function ensureListening(): void {
   // window.postMessage.)
   // oxlint-disable-next-line unicorn/require-post-message-target-origin
   listenChannel.postMessage({ type: "query" } satisfies ClaimMessage);
-  setInterval(sweepExpiredClaims, HEARTBEAT_MS);
+  listenSweepInterval = setInterval(sweepExpiredClaims, HEARTBEAT_MS);
 }
 
 function subscribe(listener: () => void): () => void {
@@ -265,8 +278,9 @@ export function readClaimedPreviewTabIds(): ReadonlySet<string> {
 
 /*
  * Local mirror: the preview tab ids THIS window has claimed, aggregated over
- * all publishers in the window. BroadcastChannel doesn't self-deliver, so
- * components that host what this window owns read this instead.
+ * all publishers in the window. The listener side ignores locally-originated
+ * BroadcastChannel messages, so components that host what this window owns
+ * read this instead.
  */
 const localPreviewTabIdsByClaimId = new Map<string, readonly string[]>();
 const localListeners = new Set<() => void>();
@@ -305,6 +319,34 @@ export function useLocalPreviewTabClaims(): ReadonlySet<string> {
   return useSyncExternalStore(subscribeLocal, localPreviewTabIdsSnapshot, () => EMPTY_CLAIMED_IDS);
 }
 
+/** Internal/test-only read of the preview tab ids claimed by THIS window. */
+export function __readLocalPreviewTabIdsForTests(): ReadonlySet<string> {
+  return localPreviewTabIdsSnapshot();
+}
+
+/** Internal/test-only reset for module-level BroadcastChannel claim state. */
+export function __resetPaneClaimsForTest(): void {
+  claimsByClaimId.clear();
+  listeners.clear();
+  claimedTerminalIdsByThreadKey.clear();
+  claimedPreviewTabIdsCache = null;
+  if (listenChannel !== null) {
+    listenChannel.removeEventListener("message", handleListenMessage);
+    listenChannel.close();
+    listenChannel = null;
+  }
+  if (listenSweepInterval !== null) {
+    clearInterval(listenSweepInterval);
+    listenSweepInterval = null;
+  }
+  lastSweepAt = null;
+  detachingPreviewTabExpiries.clear();
+  locallyOriginatedClaimIds.clear();
+  localPreviewTabIdsByClaimId.clear();
+  localListeners.clear();
+  localPreviewTabIdsCache = null;
+}
+
 /*
  * Publisher side: claim the resources this window hosts for a thread.
  */
@@ -321,6 +363,8 @@ export function createPaneClaimPublisher(threadKey: string): PaneClaimPublisher 
   // Uniqueness only (no security property): distinguishes publishers across
   // windows and across remounts within a window.
   const claimId = `claim-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+  locallyOriginatedClaimIds.add(claimId);
+  ensureListening();
   let terminalIds: readonly string[] = [];
   let previewTabIds: readonly string[] = [];
   let disposed = false;
@@ -348,7 +392,13 @@ export function createPaneClaimPublisher(threadKey: string): PaneClaimPublisher 
   channel.addEventListener("message", handleMessage);
   // pagehide fires reliably on window close in Chromium (unlike unload); the
   // release message is posted before the document dies.
-  window.addEventListener("pagehide", release);
+  const canUsePagehide =
+    typeof window !== "undefined" &&
+    typeof window.addEventListener === "function" &&
+    typeof window.removeEventListener === "function";
+  if (canUsePagehide) {
+    window.addEventListener("pagehide", release);
+  }
 
   return {
     setResources: (resources) => {
@@ -367,7 +417,9 @@ export function createPaneClaimPublisher(threadKey: string): PaneClaimPublisher 
       }
       disposed = true;
       clearInterval(heartbeat);
-      window.removeEventListener("pagehide", release);
+      if (canUsePagehide) {
+        window.removeEventListener("pagehide", release);
+      }
       channel.removeEventListener("message", handleMessage);
       release();
       channel.close();
