@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useUser } from "@clerk/react";
 import { CheckIcon, CopyIcon, DownloadIcon, Share2Icon } from "lucide-react";
+import { ZRODE_MARK_PATHS, ZRODE_MARK_VIEWBOX_SIZE } from "@t3tools/shared/brand";
 
 import { APP_BASE_NAME } from "../../branding";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
@@ -296,6 +297,37 @@ interface DrawInput {
   readonly user: ShareUser | null;
 }
 
+function drawZrodeMark(
+  ctx: CanvasRenderingContext2D,
+  input: {
+    readonly x: number;
+    readonly y: number;
+    readonly size: number;
+    readonly color: string;
+    readonly lineWidth?: number;
+  },
+) {
+  if (typeof Path2D === "undefined") {
+    ctx.fillStyle = input.color;
+    ctx.font = `700 ${Math.round(input.size * 0.68)}px ${FONT}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(APP_BASE_NAME.slice(0, 1), input.x + input.size / 2, input.y + input.size / 2);
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(input.x, input.y);
+  ctx.scale(input.size / ZRODE_MARK_VIEWBOX_SIZE, input.size / ZRODE_MARK_VIEWBOX_SIZE);
+  ctx.strokeStyle = input.color;
+  ctx.lineWidth = input.lineWidth ?? 56;
+  ctx.lineJoin = "round";
+  for (const path of ZRODE_MARK_PATHS) {
+    ctx.stroke(new Path2D(path));
+  }
+  ctx.restore();
+}
+
 function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
   const { data, user } = input;
   // Resolve every hue used by the legend and by any day-cell in one probe pass.
@@ -306,7 +338,6 @@ function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
   }
   const { tokens: c, extra } = resolveColors([...colorExprs]);
   const accent = c.accent;
-  const accentInk = isLightColor(accent) ? "#0b0b0b" : "#ffffff";
   const dark = !isLightColor(c.background);
   // Elevated surface for panels — a touch above the page background either way.
   const panel = withAlpha(c.foreground, dark ? 0.05 : 0.03);
@@ -344,26 +375,20 @@ function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
   // ── Header: brand mark + wordmark, meta on the right ──
   const markY = 44;
   const markSize = 44;
-  roundRect(ctx, PAD, markY, markSize, markSize, 12);
-  ctx.fillStyle = accent;
-  ctx.fill();
-  ctx.fillStyle = accentInk;
-  ctx.font = `700 26px ${FONT}`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(APP_BASE_NAME.slice(0, 1), PAD + markSize / 2, markY + markSize / 2 + 1);
+  drawZrodeMark(ctx, {
+    x: PAD,
+    y: markY,
+    size: markSize,
+    color: c.foreground,
+  });
 
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   const wordX = PAD + markSize + 15;
   const wordY = markY + 30;
   ctx.font = `700 25px ${FONT}`;
-  ctx.fillStyle = c.foreground;
-  ctx.fillText(APP_BASE_NAME.slice(0, 1), wordX, wordY);
-  const markLetterW = ctx.measureText(APP_BASE_NAME.slice(0, 1)).width;
-  ctx.font = `500 25px ${FONT}`;
   ctx.fillStyle = c.mutedForeground;
-  ctx.fillText(APP_BASE_NAME.slice(1), wordX + markLetterW + 1, wordY);
+  ctx.fillText(APP_BASE_NAME, wordX, wordY);
 
   ctx.textAlign = "right";
   ctx.font = `600 14px ${FONT}`;

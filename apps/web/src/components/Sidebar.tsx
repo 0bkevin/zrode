@@ -77,7 +77,7 @@ import {
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { isElectron } from "../env";
-import { APP_BASE_NAME, APP_STAGE_LABEL } from "../branding";
+import { APP_STAGE_LABEL } from "../branding";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
@@ -213,6 +213,7 @@ import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { primaryServerConfigAtom, primaryServerKeybindingsAtom } from "../state/server";
+import { BrandWordmark } from "./BrandWordmark";
 import {
   derivePhysicalProjectKey,
   deriveProjectGroupingOverrideKey,
@@ -2789,28 +2790,15 @@ function SidebarBrand() {
   return (
     <Link
       aria-label="Go to threads"
-      className="sidebar-brand ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-hidden rounded-md text-foreground outline-hidden ring-ring focus-visible:ring-2"
+      className="sidebar-brand ml-[var(--workspace-titlebar-content-left)] h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md text-foreground outline-hidden ring-ring focus-visible:ring-2"
       to="/"
     >
-      <SidebarBrandName />
-      <span className="sidebar-brand-stage shrink-0 items-center whitespace-nowrap rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-        {stageLabel}
-      </span>
+      <BrandWordmark
+        markClassName="size-[18px]"
+        stageClassName="sidebar-brand-stage"
+        stageLabel={stageLabel}
+      />
     </Link>
-  );
-}
-
-function SidebarBrandName() {
-  const mark = APP_BASE_NAME.slice(0, 1);
-  const rest = APP_BASE_NAME.slice(1);
-
-  return (
-    <span aria-label={APP_BASE_NAME} className="inline-flex min-w-0 shrink items-baseline">
-      <span className="shrink-0 text-lg font-semibold tracking-tight text-foreground">{mark}</span>
-      <span className="truncate text-sm font-medium tracking-tight text-muted-foreground">
-        {rest}
-      </span>
-    </span>
   );
 }
 

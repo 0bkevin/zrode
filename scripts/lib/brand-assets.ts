@@ -1,5 +1,5 @@
 export const BRAND_ASSET_PATHS = {
-  productionMacIconPng: "assets/prod/black-macos-1024.png",
+  productionMacIconPng: "assets/prod/zrode-main-macos-1024.png",
   productionLinuxIconPng: "assets/prod/black-universal-1024.png",
   productionWindowsIconIco: "assets/prod/t3-black-windows.ico",
   productionWebFaviconIco: "assets/prod/t3-black-web-favicon.ico",
@@ -7,7 +7,7 @@ export const BRAND_ASSET_PATHS = {
   productionWebFavicon32Png: "assets/prod/t3-black-web-favicon-32x32.png",
   productionWebAppleTouchIconPng: "assets/prod/t3-black-web-apple-touch-180.png",
 
-  nightlyMacIconPng: "assets/nightly/blueprint-macos-1024.png",
+  nightlyMacIconPng: "assets/nightly/zrode-nightly-macos-1024.png",
   nightlyLinuxIconPng: "assets/nightly/blueprint-universal-1024.png",
   nightlyWindowsIconIco: "assets/nightly/blueprint-windows.ico",
   nightlyWebFaviconIco: "assets/nightly/blueprint-web-favicon.ico",
@@ -15,7 +15,7 @@ export const BRAND_ASSET_PATHS = {
   nightlyWebFavicon32Png: "assets/nightly/blueprint-web-favicon-32x32.png",
   nightlyWebAppleTouchIconPng: "assets/nightly/blueprint-web-apple-touch-180.png",
 
-  developmentDesktopIconPng: "assets/dev/blueprint-macos-1024.png",
+  developmentDesktopIconPng: "assets/dev/zrode-dev-macos-1024.png",
   developmentWindowsIconIco: "assets/dev/blueprint-windows.ico",
   developmentWebFaviconIco: "assets/dev/blueprint-web-favicon.ico",
   developmentWebFavicon16Png: "assets/dev/blueprint-web-favicon-16x16.png",

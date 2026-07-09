@@ -2,7 +2,7 @@ import type { AuthSessionState } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import React, { startTransition, useEffect, useRef, useState, useCallback } from "react";
 
-import { APP_DISPLAY_NAME } from "../../branding";
+import { BrandWordmark } from "../BrandWordmark";
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
@@ -24,9 +24,11 @@ export function PairingPendingSurface() {
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <BrandWordmark
+          className="h-5"
+          markClassName="size-4"
+          textClassName="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+        />
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           Pairing with this environment
         </h1>
@@ -105,9 +107,11 @@ export function PairingRouteSurface({
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <BrandWordmark
+          className="h-5"
+          markClassName="size-4"
+          textClassName="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+        />
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           Pair with this environment
         </h1>
@@ -241,9 +245,11 @@ export function HostedPairingRouteSurface() {
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <BrandWordmark
+          className="h-5"
+          markClassName="size-4"
+          textClassName="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+        />
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           {status === "paired"
             ? "Backend paired"

@@ -18,6 +18,7 @@ import { CommandPalette } from "../components/CommandPalette";
 import { FileSearchPalette } from "../components/FileSearchPalette";
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
+import { BrandWordmark } from "../components/BrandWordmark";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { Button } from "../components/ui/button";
@@ -274,9 +275,11 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
       </div>
 
       <section className="relative w-full max-w-xl rounded-2xl border border-border/80 bg-card/90 p-6 shadow-2xl shadow-black/20 backdrop-blur-md sm:p-8">
-        <p className="text-[11px] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
-          {APP_DISPLAY_NAME}
-        </p>
+        <BrandWordmark
+          className="h-5"
+          markClassName="size-4"
+          textClassName="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground"
+        />
         <h1 className="mt-3 text-2xl font-semibold tracking-tight sm:text-3xl">
           Something went wrong.
         </h1>

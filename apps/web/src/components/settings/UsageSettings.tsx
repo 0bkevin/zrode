@@ -1275,7 +1275,7 @@ export function UsageSettingsPanel() {
         <div className="flex flex-col gap-4 px-4 py-4 sm:px-5">
           <p className="text-xs text-muted-foreground/80">
             Daily token activity of your subscriptions, read from each provider's local session
-            logs, with the rate-limit peaks zrode samples layered in. Each day wears the color of
+            logs, with the rate-limit peaks Zrode samples layered in. Each day wears the color of
             the subscription you used most.
           </p>
           {historyData === null ? (
@@ -1369,7 +1369,7 @@ export function UsageSettingsPanel() {
               ) : null}
               {!hasAnyActivity && !isBackfilling ? (
                 <p className="text-xs text-muted-foreground/70">
-                  No usage activity found in this range. zrode reads past activity from your local
+                  No usage activity found in this range. Zrode reads past activity from your local
                   Claude Code and Codex session logs and samples live usage from the footer meter.
                 </p>
               ) : (
@@ -1471,7 +1471,7 @@ export function UsageSettingsPanel() {
                         Rate-limit pressure
                       </span>
                       <span className="text-[11px] text-muted-foreground/70">
-                        Peak session-window utilization sampled while zrode was running.
+                        Peak session-window utilization sampled while Zrode was running.
                       </span>
                       <UsageAreaChart
                         dayLabels={pressureDayLabels}
@@ -1536,7 +1536,7 @@ export function UsageSettingsPanel() {
         <p className="flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground/50">
           <FlameIcon className="size-3" aria-hidden />
           Token activity comes from each provider's local session logs on this machine; rate-limit
-          peaks are sampled from the subscriptions' own APIs while zrode runs. Data is kept for{" "}
+          peaks are sampled from the subscriptions' own APIs while Zrode runs. Data is kept for{" "}
           {historyData.retentionDays} days.
         </p>
       ) : null}
