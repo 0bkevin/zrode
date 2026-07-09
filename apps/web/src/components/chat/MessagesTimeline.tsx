@@ -1125,39 +1125,37 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
                 </TooltipPopup>
               </Tooltip>
             )}
+            {row.showHandoffButton && ctx.onRequestHandoff !== null ? (
+              <AssistantHandoffButton onRequestHandoff={ctx.onRequestHandoff} />
+            ) : null}
           </div>
-        ) : null}
-        {row.showHandoffButton && ctx.onRequestHandoff !== null ? (
-          <AssistantHandoffButton onRequestHandoff={ctx.onRequestHandoff} />
         ) : null}
       </div>
     </>
   );
 }
 
-// Stays visible (unlike the hover-only meta row) so the affordance is
-// discoverable at the point where the user decides how to continue.
+// Sits inline in the meta row alongside the copy button and timestamp,
+// separated by a hairline divider so the action reads as distinct.
 function AssistantHandoffButton({ onRequestHandoff }: { onRequestHandoff: () => void }) {
   return (
-    <div className="mt-1.5">
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              type="button"
-              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border/60 bg-card px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:border-border hover:text-foreground"
-              onClick={onRequestHandoff}
-            />
-          }
-        >
-          <ArrowRightLeftIcon className="size-3" />
-          Hand off
-        </TooltipTrigger>
-        <TooltipPopup side="top">
-          Continue this conversation on another provider or subscription
-        </TooltipPopup>
-      </Tooltip>
-    </div>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            className="-my-0.5 flex cursor-pointer items-center gap-1 border-border/60 border-l pl-2 text-muted-foreground text-xs transition-colors hover:text-foreground"
+            onClick={onRequestHandoff}
+          />
+        }
+      >
+        <ArrowRightLeftIcon className="size-3" />
+        Hand off
+      </TooltipTrigger>
+      <TooltipPopup side="top">
+        Continue this conversation on another provider or subscription
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 
