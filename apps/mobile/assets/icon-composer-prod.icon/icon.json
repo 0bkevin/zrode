@@ -1,26 +1,96 @@
 {
-  "fill": {
-    "solid": "display-p3:0.00000,0.00000,0.00000,1.00000"
-  },
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "display-p3:0.10779,0.10779,0.10779,1.00000",
+          "display-p3:0.00000,0.00000,0.00000,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 0.7
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "display-p3:0.09443,0.09443,0.09443,1.00000",
+          "display-p3:0.00000,0.00000,0.00000,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 0.7
+          }
+        }
+      }
+    }
+  ],
   "groups": [
+    {
+      "layers": [],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.6
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      }
+    },
     {
       "layers": [
         {
-          "image-name": "Z.svg",
-          "name": "Z",
+          "blend-mode-specializations": [
+            {
+              "appearance": "dark",
+              "value": "darken"
+            }
+          ],
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "display-p3:0.79680,0.64312,0.14029,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": "automatic"
+            },
+            {
+              "appearance": "tinted",
+              "value": "automatic"
+            }
+          ],
+          "glass": true,
+          "hidden": false,
+          "image-name": "ZRODE - LOGO.svg",
+          "name": "ZRODE - LOGO",
           "position": {
-            "scale": 10,
+            "scale": 0.8,
             "translation-in-points": [0, 0]
           }
         }
       ],
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.5
+        "opacity": 0.6
       },
       "translucency": {
         "enabled": true,
-        "value": 0.5
+        "value": 0.2
       }
     }
   ],
