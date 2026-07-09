@@ -308,7 +308,7 @@ function CodexResetCredits({
   }
   const expires = formatDurationUntil(resetCredits.nextExpiresAt, nowMs);
   return (
-    <div className="flex flex-col gap-1 border-t pt-2">
+    <div className="flex flex-col gap-1 border-t pt-1.5">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="text-[11px] text-muted-foreground">
@@ -357,7 +357,7 @@ function ProviderUsagePopoverContent({
   const displayName = providerDisplayName(snapshot.provider);
   const hasWindows = snapshot.session !== null || snapshot.weekly !== null;
   return (
-    <div className="flex flex-col gap-2.5 px-3 py-2.5">
+    <div className="flex flex-col gap-2 px-2.5 py-2">
       <div className="flex items-center gap-2">
         <ProviderUsageIcon provider={snapshot.provider} className="size-4 shrink-0" />
         <div className="min-w-0 flex-1">
@@ -422,7 +422,7 @@ function ProviderUsagePopoverContent({
           <UsageWindowRow title="Session" window={snapshot.session} nowMs={nowMs} />
           <UsageWindowRow title="Weekly (all models)" window={snapshot.weekly} nowMs={nowMs} />
           {snapshot.extraLimits.length > 0 ? (
-            <div className="flex flex-col gap-2 border-t pt-2">
+            <div className="flex flex-col gap-1.5 border-t pt-1.5">
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/50">
                 Model limits
               </div>
@@ -432,7 +432,7 @@ function ProviderUsagePopoverContent({
             </div>
           ) : null}
           {snapshot.extraUsage?.enabled ? (
-            <div className="flex items-center justify-between gap-2 border-t pt-2 text-[11px] text-muted-foreground">
+            <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[11px] text-muted-foreground">
               <span>Extra usage</span>
               <span className="tabular-nums text-muted-foreground/70">
                 {snapshot.extraUsage.utilization !== null
@@ -442,7 +442,7 @@ function ProviderUsagePopoverContent({
             </div>
           ) : null}
           {snapshot.credits && (snapshot.credits.hasCredits || snapshot.credits.unlimited) ? (
-            <div className="flex items-center justify-between gap-2 border-t pt-2 text-[11px] text-muted-foreground">
+            <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[11px] text-muted-foreground">
               <span>Credits</span>
               <span className="tabular-nums text-muted-foreground/70">
                 {snapshot.credits.unlimited
