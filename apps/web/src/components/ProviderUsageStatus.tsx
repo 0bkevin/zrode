@@ -166,13 +166,12 @@ function ProviderUsageIcon({
   }
 }
 
-/** The most constrained (highest used) of ALL the provider's limit windows. */
-function maxPercentUsed(snapshot: ProviderUsageSnapshot): number | null {
-  const values = [
-    snapshot.session,
-    snapshot.weekly,
-    ...snapshot.extraLimits.flatMap((limit) => [limit.session, limit.weekly]),
-  ]
+/**
+ * Compact subscription usage should summarize provider-wide capacity. Model
+ * limits are narrower constraints and remain visible in the detailed popover.
+ */
+export function compactProviderUsagePercent(snapshot: ProviderUsageSnapshot): number | null {
+  const values = [snapshot.session, snapshot.weekly]
     .filter((window): window is ProviderUsageWindow => window !== null)
     .map(percentUsed);
   return values.length > 0 ? Math.max(...values) : null;
@@ -785,7 +784,7 @@ function ProviderUsagePill({
   onOpenChange: (open: boolean) => void;
 }) {
   const displayName = providerDisplayName(snapshot.provider);
-  const used = snapshot.status === "ok" ? maxPercentUsed(snapshot) : null;
+  const used = snapshot.status === "ok" ? compactProviderUsagePercent(snapshot) : null;
   return (
     <Popover onOpenChange={onOpenChange}>
       <PopoverTrigger
