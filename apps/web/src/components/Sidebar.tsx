@@ -2795,6 +2795,7 @@ function SidebarBrand() {
     >
       <BrandWordmark
         markClassName="size-[18px]"
+        textClassName="text-[12px] font-semibold leading-none"
         stageClassName="sidebar-brand-stage"
         stageLabel={stageLabel}
       />
