@@ -3600,7 +3600,9 @@ function ChatViewContent(props: ChatViewProps) {
             return;
           }
           const state = legendListRef.current?.getState();
-          const isAtEnd = state?.isNearEnd ?? state?.isAtEnd;
+          // Strict isAtEnd only: isNearEnd (half a viewport) must never
+          // re-enable live-follow while the user is scrolling away.
+          const isAtEnd = state?.isAtEnd;
           const currentScrollOffset = state?.scroll;
           if (
             shouldRestoreTimelineLiveFollowAtEnd({
@@ -3739,7 +3741,8 @@ function ChatViewContent(props: ChatViewProps) {
         const restoreIfUnmoved = () => {
           const state = legendListRef.current?.getState();
           const currentScrollOffset = state?.scroll;
-          const isAtEnd = state?.isNearEnd ?? state?.isAtEnd;
+          // Strict isAtEnd only — see scheduleTimelineLiveFollowAtEndRestore.
+          const isAtEnd = state?.isAtEnd;
           if (
             shouldRestoreTimelineLiveFollowAtEnd({
               userScrollGeneration,

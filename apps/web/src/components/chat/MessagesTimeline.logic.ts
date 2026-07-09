@@ -19,11 +19,17 @@ export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 
 export interface TimelineEndState {
   readonly isAtEnd?: boolean;
+  /**
+   * Deliberately ignored: LegendList's isNearEnd is true within half a
+   * viewport of the bottom, which re-enabled live-follow mid scroll-up and
+   * yanked the viewport back during streaming. Only strict isAtEnd may
+   * re-enable follow.
+   */
   readonly isNearEnd?: boolean;
 }
 
 export function resolveTimelineIsAtEnd(state: TimelineEndState | undefined): boolean | undefined {
-  return state?.isNearEnd ?? state?.isAtEnd;
+  return state?.isAtEnd;
 }
 
 export function resolveTimelineMinimapHeightStyle(itemCount: number): string {

@@ -564,6 +564,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                     },
                   }
             }
+            // Library default (0.1 = 10% of viewport) snaps the viewport back
+            // while the user scrolls up during streaming; keep only a sliver of
+            // tolerance for measurement jitter.
+            maintainScrollAtEndThreshold={0.01}
             maintainVisibleContentPosition={{
               data: true,
               size: false,
