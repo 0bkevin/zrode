@@ -21,6 +21,21 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "devin") {
+    const color = isDarkMode ? "#e5e5e5" : "#171717";
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path
+          d="M12 3.25v3.5M8.25 7h7.5c2.07 0 3.75 1.68 3.75 3.75v4.5A3.75 3.75 0 0 1 15.75 19h-7.5a3.75 3.75 0 0 1-3.75-3.75v-4.5A3.75 3.75 0 0 1 8.25 7ZM9 12h.01M15 12h.01M9.25 15.25h5.5M7 21l1.25-2M17 21l-1.25-2"
+          stroke={color}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={1.8}
+        />
+      </Svg>
+    );
+  }
+
   return (
     <Svg width={size} height={size} viewBox="0 0 256 260" fill="none">
       <Path

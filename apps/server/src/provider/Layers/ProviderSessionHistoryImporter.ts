@@ -46,6 +46,7 @@ const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 const CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
 const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 const CURSOR_PROVIDER = ProviderDriverKind.make("cursor");
+const DEVIN_PROVIDER = ProviderDriverKind.make("devin");
 const GROK_PROVIDER = ProviderDriverKind.make("grok");
 
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
@@ -757,7 +758,7 @@ const make = Effect.gen(function* () {
         Effect.catchCause(catchProviderImportCause(input, provider)),
       );
     }
-    if (provider === CURSOR_PROVIDER || provider === GROK_PROVIDER) {
+    if (provider === CURSOR_PROVIDER || provider === DEVIN_PROVIDER || provider === GROK_PROVIDER) {
       return Effect.logInfo("provider session history import skipped unsupported provider", {
         projectId: input.projectId,
         provider,

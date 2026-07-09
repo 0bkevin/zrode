@@ -40,7 +40,8 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { primaryServerProvidersAtom, serverEnvironment } from "../../state/server";
-import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon } from "../Icons";
+import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon, PiAgentIcon } from "../Icons";
+import { isUnmeteredProviderEligible } from "../providerUsageEligibility";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import {
@@ -167,15 +168,16 @@ function formatPercent(value: number): string {
 
 // ── Unmetered subscriptions (no local token data) ────────────────────
 //
-// Cursor and Grok integrate with zrode but keep no local per-message token
-// usage on disk (Cursor records code-authorship stats; Grok's local logs only
-// hold a constant system-prompt size), so there is nothing to backfill. We
+// Cursor, Devin, and Grok integrate with zrode but keep no local per-message
+// token usage on disk (Cursor records code-authorship stats; Grok's local logs
+// only hold a constant system-prompt size), so there is nothing to backfill. We
 // still surface them honestly with a link to the vendor's own dashboard.
 
-type UnmeteredKind = "cursor" | "grok";
+type UnmeteredKind = "cursor" | "devin" | "grok";
 
 const UNMETERED_DRIVER_TO_KIND: Readonly<Record<string, UnmeteredKind>> = {
   cursor: "cursor",
+  devin: "devin",
   grok: "grok",
 };
 
@@ -184,6 +186,7 @@ const UNMETERED_META: Record<
   { label: string; dashboardUrl: string; icon: typeof CursorIcon }
 > = {
   cursor: { label: "Cursor", dashboardUrl: "https://cursor.com/dashboard", icon: CursorIcon },
+  devin: { label: "Devin", dashboardUrl: "https://app.devin.ai", icon: PiAgentIcon },
   grok: { label: "Grok", dashboardUrl: "https://accounts.x.ai", icon: GrokIcon },
 };
 
@@ -1035,8 +1038,8 @@ export function UsageSettingsPanel() {
     [visibleByDay],
   );
 
-  // Enabled + authenticated Cursor/Grok subscriptions — shown with a dashboard
-  // link since they expose no local usage to chart.
+  // Enabled Cursor/Grok/Devin subscriptions — shown with a dashboard link
+  // since they expose no local usage to chart.
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const unmeteredSubs = useMemo(() => {
     const seen = new Set<UnmeteredKind>();
@@ -1044,13 +1047,7 @@ export function UsageSettingsPanel() {
       [];
     for (const provider of serverProviders) {
       const kind = UNMETERED_DRIVER_TO_KIND[provider.driver];
-      if (
-        kind === undefined ||
-        seen.has(kind) ||
-        !provider.enabled ||
-        !provider.installed ||
-        provider.auth.status !== "authenticated"
-      ) {
+      if (kind === undefined || seen.has(kind) || !isUnmeteredProviderEligible(provider)) {
         continue;
       }
       seen.add(kind);

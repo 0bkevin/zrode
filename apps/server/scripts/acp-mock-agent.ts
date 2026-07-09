@@ -28,6 +28,13 @@ const emitLateUpdateAfterCancel = process.env.ZRODE_ACP_EMIT_LATE_UPDATE_AFTER_C
 const omitXAiPromptCompleteStopReason =
   process.env.ZRODE_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.ZRODE_ACP_FAIL_LOAD_SESSION === "1";
+const advertiseAuthMethods = process.env.ZRODE_ACP_ADVERTISE_AUTH_METHODS === "1";
+const requireAuthForSession = process.env.ZRODE_ACP_REQUIRE_AUTH_FOR_SESSION === "1";
+const requireAuthForPrompt = process.env.ZRODE_ACP_REQUIRE_AUTH_FOR_PROMPT === "1";
+const mockAuthMethodId = process.env.ZRODE_ACP_AUTH_METHOD_ID ?? "test";
+const authDelayMs = Number(process.env.ZRODE_ACP_AUTH_DELAY_MS ?? "0");
+const emitAvailableCommandsOnSessionNew =
+  process.env.ZRODE_ACP_EMIT_AVAILABLE_COMMANDS_ON_SESSION_NEW === "1";
 const emitLoadReplay = process.env.ZRODE_ACP_EMIT_LOAD_REPLAY === "1";
 const hangLoadSessionAfterReplay = process.env.ZRODE_ACP_HANG_LOAD_SESSION_AFTER_REPLAY === "1";
 const delayLoadSessionAfterReplay = process.env.ZRODE_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
@@ -55,8 +62,33 @@ let currentReasoning = "medium";
 let currentContext = "272k";
 let currentFast = false;
 let promptCount = 0;
+let authenticated = false;
 let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
+
+function mockAvailableCommands(): ReadonlyArray<AcpSchema.AvailableCommand> {
+  return [
+    { name: "login", description: "Sign in to Devin" },
+    {
+      name: "launch",
+      description: "Launch a Devin task",
+      input: { hint: "task" },
+    },
+    { name: "/status", description: "Show status from ACP" },
+  ];
+}
+
+function scheduleAvailableCommandsUpdate(requestedSessionId: string): void {
+  setImmediate(() => {
+    writeJsonRpcNotification("session/update", {
+      sessionId: requestedSessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: mockAvailableCommands(),
+      },
+    });
+  });
+}
 
 function promptIdFromRequestMeta(
   request: Pick<AcpSchema.PromptRequest, "_meta">,
@@ -304,18 +336,49 @@ const program = Effect.gen(function* () {
       return {
         protocolVersion: 1,
         agentCapabilities: { loadSession: true },
+        ...(advertiseAuthMethods
+          ? {
+              authMethods: [
+                {
+                  id: mockAuthMethodId,
+                  name: "Mock auth",
+                },
+              ],
+            }
+          : {}),
       };
     }),
   );
 
-  yield* agent.handleAuthenticate(() => Effect.succeed({}));
+  yield* agent.handleAuthenticate((request) =>
+    Effect.gen(function* () {
+      if (request.methodId !== mockAuthMethodId) {
+        return yield* AcpError.AcpRequestError.invalidParams(
+          `Unknown mock auth method: ${request.methodId}`,
+        );
+      }
+      if (Number.isFinite(authDelayMs) && authDelayMs > 0) {
+        yield* Effect.sleep(`${authDelayMs} millis`);
+      }
+      authenticated = true;
+      return {};
+    }),
+  );
 
   yield* agent.handleCreateSession(() =>
-    Effect.succeed({
-      sessionId,
-      modes: modeState(),
-      models: modelState(),
-      configOptions: configOptions(),
+    Effect.gen(function* () {
+      if (requireAuthForSession && !authenticated) {
+        return yield* AcpError.AcpRequestError.authRequired("Mock authentication required");
+      }
+      if (emitAvailableCommandsOnSessionNew) {
+        scheduleAvailableCommandsUpdate(sessionId);
+      }
+      return {
+        sessionId,
+        modes: modeState(),
+        models: modelState(),
+        configOptions: configOptions(),
+      };
     }),
   );
 
@@ -346,6 +409,9 @@ const program = Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       if (failLoadSession) {
         return yield* AcpError.AcpRequestError.internalError("Mock load session failure");
+      }
+      if (requireAuthForSession && !authenticated) {
+        return yield* AcpError.AcpRequestError.authRequired("Mock authentication required");
       }
       if (hangLoadSessionAfterReplay || delayLoadSessionAfterReplay) {
         emitLoadReplayNotifications(requestedSessionId);
@@ -460,6 +526,13 @@ const program = Effect.gen(function* () {
 
       if (Number.isFinite(promptDelayMs) && promptDelayMs > 0) {
         yield* Effect.sleep(`${promptDelayMs} millis`);
+      }
+
+      if (requireAuthForPrompt && !authenticated) {
+        return yield* new AcpError.AcpRequestError({
+          code: -32013,
+          errorMessage: "Permission denied: Mock authentication required",
+        });
       }
 
       if (failPrompt) {

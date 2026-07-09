@@ -5,7 +5,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
-import type { ToolLifecycleItemType } from "@t3tools/contracts";
+import type { ServerProviderSlashCommand, ToolLifecycleItemType } from "@t3tools/contracts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -80,6 +80,8 @@ export interface AcpPermissionRequest {
   readonly toolCall?: AcpToolCallState;
 }
 
+export type AcpAvailableCommand = ServerProviderSlashCommand;
+
 export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ModeChanged";
@@ -108,6 +110,11 @@ export type AcpParsedSessionEvent =
       readonly itemId?: string;
       readonly text: string;
       readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly commands: ReadonlyArray<AcpAvailableCommand>;
+      readonly rawPayload: unknown;
     };
 
 type AcpSessionSetupResponse =
@@ -118,6 +125,11 @@ type AcpSessionSetupResponse =
 type AcpToolCallUpdate = Extract<
   EffectAcpSchema.SessionNotification["update"],
   { readonly sessionUpdate: "tool_call" | "tool_call_update" }
+>;
+
+type AcpAvailableCommandsUpdate = Extract<
+  EffectAcpSchema.SessionNotification["update"],
+  { readonly sessionUpdate: "available_commands_update" }
 >;
 
 export function extractModelConfigId(sessionResponse: AcpSessionSetupResponse): string | undefined {
@@ -217,6 +229,33 @@ function normalizeToolCallStatus(
     default:
       return fallback;
   }
+}
+
+function normalizeSlashCommandName(name: string): string | undefined {
+  const trimmed = name.trim().replace(/^\/+/, "");
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseAvailableCommands(
+  update: AcpAvailableCommandsUpdate,
+): ReadonlyArray<AcpAvailableCommand> {
+  const commands: Array<AcpAvailableCommand> = [];
+  const seen = new Set<string>();
+  for (const command of update.availableCommands) {
+    const name = normalizeSlashCommandName(command.name);
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    const description = command.description.trim();
+    const hint = command.input?.hint.trim();
+    commands.push({
+      name,
+      ...(description ? { description } : {}),
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return commands;
 }
 
 function normalizeCommandValue(value: unknown): string | undefined {
@@ -572,6 +611,14 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           rawPayload: params,
         });
       }
+      break;
+    }
+    case "available_commands_update": {
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        commands: parseAvailableCommands(upd),
+        rawPayload: params,
+      });
       break;
     }
     default:
