@@ -3,9 +3,11 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
 import * as NodeFS from "node:fs";
+import * as NodeTimersPromises from "node:timers/promises";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -57,6 +59,209 @@ describe("AcpSessionRuntime", () => {
           requestLogger: (event) =>
             Effect.sync(() => {
               requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect("skips initial authenticate when configured", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      expect(requestEvents.some((event) => event.method === "authenticate")).toBe(false);
+      expect(
+        requestEvents.some(
+          (event) => event.method === "session/new" && event.status === "succeeded",
+        ),
+      ).toBe(true);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          skipAuthenticate: true,
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect(
+    "authenticates with an advertised method after auth-required session setup failure",
+    () => {
+      const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+      return Effect.gen(function* () {
+        const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+        const started = yield* runtime.start();
+
+        expect(started.sessionId).toBe("mock-session-1");
+        expect(
+          requestEvents.some(
+            (event) => event.method === "session/new" && event.status === "failed",
+          ),
+        ).toBe(true);
+        expect(
+          requestEvents.some(
+            (event) => event.method === "authenticate" && event.status === "succeeded",
+          ),
+        ).toBe(true);
+        expect(
+          requestEvents.filter(
+            (event) => event.method === "session/new" && event.status === "succeeded",
+          ),
+        ).toHaveLength(1);
+      }).pipe(
+        Effect.provide(
+          AcpSessionRuntime.layer({
+            spawn: {
+              command: mockAgentCommand,
+              args: mockAgentArgs,
+              env: {
+                ZRODE_ACP_ADVERTISE_AUTH_METHODS: "1",
+                ZRODE_ACP_REQUIRE_AUTH_FOR_SESSION: "1",
+              },
+            },
+            cwd: process.cwd(),
+            clientInfo: { name: "t3-test", version: "0.0.0" },
+            authMethodId: "test",
+            skipAuthenticate: true,
+            authenticateOnSessionAuthFailure: true,
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                requestEvents.push(event);
+              }),
+          }),
+        ),
+        Effect.scoped,
+        Effect.provide(NodeServices.layer),
+      );
+    },
+  );
+
+  it.effect("authenticates with an advertised method and retries prompt auth failures", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+
+      expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+      expect(
+        requestEvents.filter(
+          (event) => event.method === "session/prompt" && event.status === "failed",
+        ),
+      ).toHaveLength(1);
+      expect(
+        requestEvents.filter(
+          (event) => event.method === "authenticate" && event.status === "succeeded",
+        ),
+      ).toHaveLength(1);
+      expect(
+        requestEvents.filter(
+          (event) => event.method === "session/prompt" && event.status === "succeeded",
+        ),
+      ).toHaveLength(1);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              ZRODE_ACP_ADVERTISE_AUTH_METHODS: "1",
+              ZRODE_ACP_REQUIRE_AUTH_FOR_PROMPT: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          skipAuthenticate: true,
+          authenticateOnSessionAuthFailure: true,
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect("does not retry a prompt auth failure after cancellation during authentication", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    let runtimeService: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      runtimeService = runtime;
+      yield* runtime.start();
+
+      const startedAt = yield* Clock.currentTimeMillis;
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "hi" }],
+      });
+      expect((yield* Clock.currentTimeMillis) - startedAt).toBeLessThan(900);
+      expect(promptResult).toMatchObject({ stopReason: "cancelled" });
+      expect(
+        requestEvents.filter(
+          (event) => event.method === "session/prompt" && event.status === "started",
+        ),
+      ).toHaveLength(1);
+      expect(
+        requestEvents.some(
+          (event) => event.method === "authenticate" && event.status === "started",
+        ),
+      ).toBe(true);
+      yield* Effect.promise(() => NodeTimersPromises.setTimeout(1100));
+      expect(
+        requestEvents.filter(
+          (event) => event.method === "session/prompt" && event.status === "started",
+        ),
+      ).toHaveLength(1);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              ZRODE_ACP_ADVERTISE_AUTH_METHODS: "1",
+              ZRODE_ACP_REQUIRE_AUTH_FOR_PROMPT: "1",
+              ZRODE_ACP_AUTH_DELAY_MS: "1000",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          skipAuthenticate: true,
+          authenticateOnSessionAuthFailure: true,
+          requestLogger: (event) =>
+            Effect.gen(function* () {
+              requestEvents.push(event);
+              if (event.method === "authenticate" && event.status === "started") {
+                yield* (runtimeService?.cancel ?? Effect.void).pipe(
+                  Effect.ignore,
+                  Effect.forkChild({ startImmediately: true }),
+                );
+              }
             }),
         }),
       ),

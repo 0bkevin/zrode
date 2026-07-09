@@ -273,6 +273,69 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("projects available command updates into slash command events", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [
+          {
+            name: " /login ",
+            description: " Sign in ",
+          },
+          {
+            name: "ask",
+            description: "",
+            input: { hint: " question " },
+          },
+          {
+            name: "/login",
+            description: "Duplicate",
+          },
+          {
+            name: "   ",
+            description: "Ignored",
+          },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "AvailableCommandsUpdated",
+        commands: [
+          { name: "login", description: "Sign in" },
+          { name: "ask", input: { hint: "question" } },
+        ],
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: [
+              {
+                name: " /login ",
+                description: " Sign in ",
+              },
+              {
+                name: "ask",
+                description: "",
+                input: { hint: " question " },
+              },
+              {
+                name: "/login",
+                description: "Duplicate",
+              },
+              {
+                name: "   ",
+                description: "Ignored",
+              },
+            ],
+          },
+        },
+      },
+    ]);
+  });
+
   it("projects typed ACP plan and content updates", () => {
     const planResult = parseSessionUpdateEvent({
       sessionId: "session-1",

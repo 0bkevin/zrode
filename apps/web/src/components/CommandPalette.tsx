@@ -204,6 +204,7 @@ const HISTORY_IMPORT_CODEX_PROVIDER = ProviderDriverKind.make("codex");
 const HISTORY_IMPORT_CLAUDE_PROVIDER = ProviderDriverKind.make("claudeAgent");
 const HISTORY_IMPORT_OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 const HISTORY_IMPORT_CURSOR_PROVIDER = ProviderDriverKind.make("cursor");
+const HISTORY_IMPORT_DEVIN_PROVIDER = ProviderDriverKind.make("devin");
 const HISTORY_IMPORT_GROK_PROVIDER = ProviderDriverKind.make("grok");
 
 const ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS: ReadonlyArray<{
@@ -215,6 +216,7 @@ const ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS: ReadonlyArray<{
   { provider: HISTORY_IMPORT_CLAUDE_PROVIDER, label: "Claude", supported: true },
   { provider: HISTORY_IMPORT_OPENCODE_PROVIDER, label: "OpenCode", supported: true },
   { provider: HISTORY_IMPORT_CURSOR_PROVIDER, label: "Cursor", supported: false },
+  { provider: HISTORY_IMPORT_DEVIN_PROVIDER, label: "Devin", supported: false },
   { provider: HISTORY_IMPORT_GROK_PROVIDER, label: "Grok", supported: false },
 ];
 

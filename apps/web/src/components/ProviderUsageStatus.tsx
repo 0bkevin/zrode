@@ -23,7 +23,8 @@ import {
 } from "../state/server";
 import { useEnvironmentThread } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
-import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon } from "./Icons";
+import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon, PiAgentIcon } from "./Icons";
+import { isUnmeteredProviderEligible } from "./providerUsageEligibility";
 import { useRelativeTimeTick } from "./settings/settingsLayout";
 import { toastManager } from "./ui/toast";
 import { Button } from "./ui/button";
@@ -33,10 +34,10 @@ import { Skeleton } from "./ui/skeleton";
 /** Providers whose rate-limit windows zrode can meter server-side. */
 type UsageProviderKind = ProviderUsageSnapshot["provider"];
 /** Providers zrode integrates but whose vendors expose no usage API yet. */
-type UnmeteredProviderKind = "cursor" | "grok" | "opencode";
+type UnmeteredProviderKind = "cursor" | "devin" | "grok" | "opencode";
 type AnyUsageProviderKind = UsageProviderKind | UnmeteredProviderKind;
 
-/** An enabled + authenticated provider without a usage API. */
+/** An enabled provider without a usage API that is usable on this machine. */
 interface UnmeteredProvider {
   readonly kind: UnmeteredProviderKind;
   readonly displayName: string;
@@ -59,6 +60,7 @@ const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   claude: "https://claude.ai/settings/usage",
   codex: "https://chatgpt.com/codex/settings/usage",
   cursor: "https://cursor.com/dashboard",
+  devin: "https://app.devin.ai",
   grok: "https://accounts.x.ai",
   opencode: "https://opencode.ai",
 };
@@ -73,6 +75,7 @@ const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
   claudeAgent: "claude",
   codex: "codex",
   cursor: "cursor",
+  devin: "devin",
   grok: "grok",
   opencode: "opencode",
 };
@@ -138,6 +141,8 @@ function providerDisplayName(provider: AnyUsageProviderKind): string {
       return "Codex";
     case "cursor":
       return "Cursor";
+    case "devin":
+      return "Devin";
     case "grok":
       return "Grok";
     case "opencode":
@@ -159,6 +164,8 @@ function ProviderUsageIcon({
       return <OpenAI className={className} />;
     case "cursor":
       return <CursorIcon className={className} />;
+    case "devin":
+      return <PiAgentIcon className={className} />;
     case "grok":
       return <GrokIcon className={className} />;
     case "opencode":
@@ -520,7 +527,7 @@ function ProviderUsagePendingPopoverContent({
 }
 
 /**
- * Enabled + authenticated providers that have no usage API: they still get a
+ * Enabled providers that have no usage API: they still get a
  * footer tile (icon-only) whose popover shows the signed-in account and links
  * to the vendor's own usage dashboard.
  */
@@ -530,15 +537,10 @@ function useUnmeteredProviders(): ReadonlyArray<UnmeteredProvider> {
     const byKind = new Map<UnmeteredProviderKind, UnmeteredProvider>();
     for (const provider of providers) {
       const kind = DRIVER_TO_USAGE_KIND[provider.driver];
-      if (kind !== "cursor" && kind !== "grok" && kind !== "opencode") {
+      if (kind !== "cursor" && kind !== "devin" && kind !== "grok" && kind !== "opencode") {
         continue;
       }
-      if (
-        byKind.has(kind) ||
-        !provider.enabled ||
-        !provider.installed ||
-        provider.auth.status !== "authenticated"
-      ) {
+      if (byKind.has(kind) || !isUnmeteredProviderEligible(provider)) {
         continue;
       }
       byKind.set(kind, {
