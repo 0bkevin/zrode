@@ -357,7 +357,7 @@ function ProviderUsagePopoverContent({
   const displayName = providerDisplayName(snapshot.provider);
   const hasWindows = snapshot.session !== null || snapshot.weekly !== null;
   return (
-    <div className="flex flex-col gap-2 px-2.5 py-2">
+    <div className="flex flex-col gap-2 p-3">
       <div className="flex items-center gap-2">
         <ProviderUsageIcon provider={snapshot.provider} className="size-4 shrink-0" />
         <div className="min-w-0 flex-1">
@@ -475,7 +475,7 @@ function ProviderUsagePendingPopoverContent({
 }) {
   const displayName = providerDisplayName(provider);
   return (
-    <div className="flex flex-col gap-3 p-3">
+    <div className="flex flex-col gap-2 p-3">
       <div className="flex items-center gap-2">
         <ProviderUsageIcon provider={provider} className="size-4 shrink-0" />
         <div className="min-w-0 flex-1">
@@ -612,8 +612,13 @@ function UnmeteredProviderPill({ provider }: { provider: UnmeteredProvider }) {
           </button>
         }
       />
-      <PopoverPopup side="top" align="end" className="w-72 max-w-none p-0">
-        <div className="flex flex-col gap-2.5 px-3 py-2.5">
+      <PopoverPopup
+        side="top"
+        align="end"
+        className="w-72 max-w-none p-0"
+        viewportClassName="p-0 [--viewport-inline-padding:--spacing(0)]"
+      >
+        <div className="flex flex-col gap-2 p-3">
           <div className="flex items-center gap-2">
             <ProviderUsageIcon provider={provider.kind} className="size-4 shrink-0" />
             <div className="min-w-0 flex-1">
@@ -692,7 +697,12 @@ function PendingProviderUsagePill({
           </button>
         }
       />
-      <PopoverPopup side="top" align="end" className="w-72 max-w-none p-0">
+      <PopoverPopup
+        side="top"
+        align="end"
+        className="w-72 max-w-none p-0"
+        viewportClassName="p-0 [--viewport-inline-padding:--spacing(0)]"
+      >
         <ProviderUsagePendingPopoverContent
           provider={provider}
           error={error}
@@ -826,7 +836,12 @@ function ProviderUsagePill({
           </button>
         }
       />
-      <PopoverPopup side="top" align="end" className="w-72 max-w-none p-0">
+      <PopoverPopup
+        side="top"
+        align="end"
+        className="w-72 max-w-none p-0"
+        viewportClassName="p-0 [--viewport-inline-padding:--spacing(0)]"
+      >
         <ProviderUsagePopoverContent
           snapshot={snapshot}
           availableProviders={availableProviders}
