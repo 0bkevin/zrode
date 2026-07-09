@@ -23,7 +23,7 @@ import {
 } from "../state/server";
 import { useEnvironmentThread } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
-import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon, PiAgentIcon } from "./Icons";
+import { ClaudeAI, CursorIcon, DevinIcon, GrokIcon, OpenAI, OpenCodeIcon } from "./Icons";
 import { isUnmeteredProviderEligible } from "./providerUsageEligibility";
 import { useRelativeTimeTick } from "./settings/settingsLayout";
 import { toastManager } from "./ui/toast";
@@ -165,7 +165,7 @@ function ProviderUsageIcon({
     case "cursor":
       return <CursorIcon className={className} />;
     case "devin":
-      return <PiAgentIcon className={className} />;
+      return <DevinIcon className={className} />;
     case "grok":
       return <GrokIcon className={className} />;
     case "opencode":

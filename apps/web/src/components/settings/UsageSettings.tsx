@@ -40,7 +40,7 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { primaryServerProvidersAtom, serverEnvironment } from "../../state/server";
-import { ClaudeAI, CursorIcon, GrokIcon, OpenAI, OpenCodeIcon, PiAgentIcon } from "../Icons";
+import { ClaudeAI, CursorIcon, DevinIcon, GrokIcon, OpenAI, OpenCodeIcon } from "../Icons";
 import { isUnmeteredProviderEligible } from "../providerUsageEligibility";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
@@ -186,7 +186,7 @@ const UNMETERED_META: Record<
   { label: string; dashboardUrl: string; icon: typeof CursorIcon }
 > = {
   cursor: { label: "Cursor", dashboardUrl: "https://cursor.com/dashboard", icon: CursorIcon },
-  devin: { label: "Devin", dashboardUrl: "https://app.devin.ai", icon: PiAgentIcon },
+  devin: { label: "Devin", dashboardUrl: "https://app.devin.ai", icon: DevinIcon },
   grok: { label: "Grok", dashboardUrl: "https://accounts.x.ai", icon: GrokIcon },
 };
 

@@ -2,12 +2,12 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import {
   ClaudeAI,
   CursorIcon,
+  DevinIcon,
   GithubCopilotIcon,
   GrokIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
-  PiAgentIcon,
 } from "../Icons";
 import { PROVIDER_OPTIONS } from "../../session-logic";
 
@@ -17,7 +17,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("opencode")]: OpenCodeIcon,
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
-  [ProviderDriverKind.make("devin")]: PiAgentIcon,
+  [ProviderDriverKind.make("devin")]: DevinIcon,
   [ProviderDriverKind.make("githubCopilot")]: GithubCopilotIcon,
 };
 

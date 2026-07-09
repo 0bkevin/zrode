@@ -12,12 +12,12 @@ import type * as Schema from "effect/Schema";
 import {
   ClaudeAI,
   CursorIcon,
+  DevinIcon,
   GithubCopilotIcon,
   GrokIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
-  PiAgentIcon,
 } from "../Icons";
 
 type ProviderSettingsSchema = {
@@ -75,7 +75,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
   {
     value: ProviderDriverKind.make("devin"),
     label: "Devin",
-    icon: PiAgentIcon,
+    icon: DevinIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinSettings,
   },
