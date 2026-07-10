@@ -2439,6 +2439,59 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("runtime exploded");
   });
 
+  it("normalizes provider-native runtime errors before persisting or displaying them", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-html"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        message: "unexpected status 403 Forbidden: <html><head><title>Denied</title></head></html>",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastError === "Provider request failed: 403 Forbidden.",
+    );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-runtime-error-html",
+    );
+    const activityPayload = activity?.payload as Record<string, unknown> | undefined;
+
+    expect(thread.session?.lastError).toBe("Provider request failed: 403 Forbidden.");
+    expect(activityPayload?.message).toBe("Provider request failed: 403 Forbidden.");
+  });
+
+  it("replaces internal diagnostics on failed turn completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-diagnostic"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-diagnostic"),
+      payload: {
+        state: "failed",
+        errorMessage: "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.lastError === "Turn failed",
+    );
+    expect(thread.session?.status).toBe("error");
+    expect(thread.session?.lastError).toBe("Turn failed");
+  });
+
   it("records runtime.error activities from the typed payload message", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -1,3 +1,5 @@
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
+
 const TRANSPORT_ERROR_PATTERNS = [
   /\bSocketCloseError\b/i,
   /\bSocketOpenError\b/i,
@@ -35,5 +37,8 @@ export function isTransportConnectionErrorMessage(message: string | null | undef
  * real errors and transient connection issues.
  */
 export function sanitizeThreadErrorMessage(message: string | null | undefined): string | null {
-  return isTransportConnectionErrorMessage(message) ? null : (message ?? null);
+  if (isTransportConnectionErrorMessage(message)) {
+    return null;
+  }
+  return normalizeProviderErrorMessage(message);
 }

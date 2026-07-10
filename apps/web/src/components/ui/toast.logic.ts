@@ -1,4 +1,11 @@
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
+
+export function visibleErrorToastText(type: unknown, value: unknown): string | undefined {
+  return type === "error" && typeof value === "string"
+    ? (normalizeProviderErrorMessage(value) ?? undefined)
+    : undefined;
+}
 
 export function shouldHideCollapsedToastContent(
   visibleToastIndex: number,

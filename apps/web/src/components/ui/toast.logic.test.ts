@@ -4,7 +4,25 @@ import {
   buildVisibleToastLayout,
   shouldHideCollapsedToastContent,
   shouldRenderThreadScopedToast,
+  visibleErrorToastText,
 } from "./toast.logic";
+
+describe("visibleErrorToastText", () => {
+  it("normalizes provider-native error titles and descriptions", () => {
+    assert.equal(
+      visibleErrorToastText(
+        "error",
+        "unexpected status 403 Forbidden: <html><head><title>Denied</title></head></html>",
+      ),
+      "Provider request failed: 403 Forbidden.",
+    );
+  });
+
+  it("leaves non-error descriptions to the toast context", () => {
+    assert.equal(visibleErrorToastText("warning", "Keep this warning"), undefined);
+    assert.equal(visibleErrorToastText("error", { detail: "structured" }), undefined);
+  });
+});
 
 describe("shouldHideCollapsedToastContent", () => {
   it("keeps a single visible toast readable", () => {

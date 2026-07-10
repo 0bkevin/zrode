@@ -98,6 +98,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useUiStateStore } from "../uiStateStore";
+import { useNotificationDismissalStore } from "../notificationDismissalStore";
 import {
   buildPlanImplementationThreadTitle,
   buildPlanImplementationPrompt,
@@ -1051,11 +1052,15 @@ function ChatViewContent(props: ChatViewProps) {
   const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
     Record<string, string | null>
   >({});
-  // Session `lastError` messages the user dismissed; without this, clearing the local
-  // error falls back to `session.lastError` and the banner can never be closed.
-  const [dismissedSessionErrorsByThreadKey, setDismissedSessionErrorsByThreadKey] = useState<
-    Record<string, string>
-  >({});
+  const dismissedSessionError = useNotificationDismissalStore(
+    (store) => store.threadSessionErrorByThreadKey[routeThreadKey] ?? null,
+  );
+  const dismissThreadSessionError = useNotificationDismissalStore(
+    (store) => store.dismissThreadSessionError,
+  );
+  const clearThreadSessionErrorDismissal = useNotificationDismissalStore(
+    (store) => store.clearThreadSessionErrorDismissal,
+  );
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -1219,19 +1224,15 @@ function ChatViewContent(props: ChatViewProps) {
   const visibleSessionError =
     sessionLastError !== null &&
     !isSessionRunning &&
-    sessionErrorSignature !== dismissedSessionErrorsByThreadKey[routeThreadKey]
+    sessionErrorSignature !== dismissedSessionError
       ? sessionLastError
       : null;
   const threadError = isServerThread ? (localServerError ?? visibleSessionError) : localDraftError;
   useEffect(() => {
     if (sessionLastError !== null) return;
     // Error cleared (turn succeeded): drop any dismissal record so it can't linger.
-    setDismissedSessionErrorsByThreadKey((existing) => {
-      if (!(routeThreadKey in existing)) return existing;
-      const { [routeThreadKey]: _dismissed, ...rest } = existing;
-      return rest;
-    });
-  }, [routeThreadKey, sessionLastError]);
+    clearThreadSessionErrorDismissal(routeThreadKey);
+  }, [clearThreadSessionErrorDismissal, routeThreadKey, sessionLastError]);
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
@@ -2367,15 +2368,7 @@ function ChatViewContent(props: ChatViewProps) {
           const sessionError = session?.lastError ?? null;
           if (session && sessionError !== null) {
             const signature = `${session.updatedAt}::${sessionError}`;
-            setDismissedSessionErrorsByThreadKey((existing) => {
-              if (existing[routeThreadKey] === signature) {
-                return existing;
-              }
-              return {
-                ...existing,
-                [routeThreadKey]: signature,
-              };
-            });
+            dismissThreadSessionError(routeThreadKey, signature);
           }
         }
         return;
@@ -2391,7 +2384,14 @@ function ChatViewContent(props: ChatViewProps) {
         };
       });
     },
-    [draftId, localServerError, routeThreadKey, routeThreadRef, serverThread],
+    [
+      dismissThreadSessionError,
+      draftId,
+      localServerError,
+      routeThreadKey,
+      routeThreadRef,
+      serverThread,
+    ],
   );
 
   const readLastUserMessageEditDraftSnapshot = useCallback((): LastUserMessageEditDraftSnapshot => {

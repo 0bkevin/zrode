@@ -65,6 +65,26 @@ describe("sanitizeThreadErrorMessage", () => {
     );
   });
 
+  it("normalizes provider diagnostics and HTML responses", () => {
+    expect(
+      sanitizeThreadErrorMessage(
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+      ),
+    ).toBe("Provider request failed.");
+    expect(
+      sanitizeThreadErrorMessage(
+        "unexpected status 403 Forbidden: <html><head><title>Denied</title></head></html>",
+      ),
+    ).toBe("Provider request failed: 403 Forbidden.");
+  });
+
+  it("trims messages and strips empty values", () => {
+    expect(sanitizeThreadErrorMessage("  Invalid model selection  ")).toBe(
+      "Invalid model selection",
+    );
+    expect(sanitizeThreadErrorMessage("   ")).toBeNull();
+  });
+
   it("returns null for null/undefined", () => {
     expect(sanitizeThreadErrorMessage(null)).toBeNull();
     expect(sanitizeThreadErrorMessage(undefined)).toBeNull();
