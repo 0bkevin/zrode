@@ -13,6 +13,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -301,10 +302,11 @@ const make = Effect.gen(function* () {
     const providerError = isProviderAdapterRequestError(failReason?.error)
       ? failReason.error
       : undefined;
-    if (providerError) {
-      return providerError.detail;
-    }
-    return Cause.pretty(cause);
+    const detail = providerError ? providerError.detail : Cause.pretty(cause);
+    return (
+      normalizeProviderErrorMessage(detail, { fallback: "Provider request failed." }) ??
+      "Provider request failed."
+    );
   };
 
   const setThreadSession = (input: {

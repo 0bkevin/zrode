@@ -26,6 +26,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -164,6 +165,10 @@ function maxCheckpointTurnCount(
 
 function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
+}
+
+function userFacingProviderError(message: string | null | undefined, fallback: string): string {
+  return normalizeProviderErrorMessage(message, { fallback }) ?? fallback;
 }
 
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
@@ -328,6 +333,7 @@ function runtimeEventToActivities(
     }
 
     case "runtime.error": {
+      const message = userFacingProviderError(event.payload.message, "Provider runtime error");
       return [
         {
           id: event.eventId,
@@ -336,7 +342,7 @@ function runtimeEventToActivities(
           kind: "runtime.error",
           summary: "Runtime error",
           payload: {
-            message: truncateDetail(event.payload.message),
+            message: truncateDetail(message),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1384,10 +1390,16 @@ const make = Effect.gen(function* () {
         })();
         const lastError =
           event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+            ? userFacingProviderError(
+                event.payload.reason ?? thread.session?.lastError,
+                "Provider session error",
+              )
             : event.type === "turn.completed" &&
                 normalizeRuntimeTurnState(event.payload.state) === "failed"
-              ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
+              ? userFacingProviderError(
+                  event.payload.errorMessage ?? thread.session?.lastError,
+                  "Turn failed",
+                )
               : status === "ready"
                 ? null
                 : (thread.session?.lastError ?? null);
@@ -1656,7 +1668,10 @@ const make = Effect.gen(function* () {
       }
 
       if (event.type === "runtime.error") {
-        const runtimeErrorMessage = event.payload.message;
+        const runtimeErrorMessage = userFacingProviderError(
+          event.payload.message,
+          "Provider runtime error",
+        );
 
         const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
           ? true

@@ -1,4 +1,5 @@
 import { type ServerProvider } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import { memo, useEffect, useState } from "react";
 import { InfoIcon, XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
@@ -29,12 +30,14 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   const title = isUnauthenticated
     ? `${providerName} is unauthenticated`
     : `${providerName} provider status`;
+  const fallbackMessage =
+    status.status === "error"
+      ? `${providerName} provider is unavailable.`
+      : `${providerName} provider has limited availability.`;
   const message = isUnauthenticated
     ? "Sign in via the CLI to authenticate again."
-    : (status.message ??
-      (status.status === "error"
-        ? `${providerName} provider is unavailable.`
-        : `${providerName} provider has limited availability.`));
+    : (normalizeProviderErrorMessage(status.message, { fallback: fallbackMessage }) ??
+      fallbackMessage);
 
   const bannerKey = `${status.driver}:${status.status}:${title}:${message}`;
   if (bannerKey === dismissedKey) {

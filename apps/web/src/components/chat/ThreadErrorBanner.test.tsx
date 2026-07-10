@@ -17,4 +17,14 @@ describe("ThreadErrorBanner", () => {
     expect(errorTextIndex).toBeGreaterThan(descriptionSlotIndex);
     expect(actionSlotIndex).toBe(-1);
   });
+
+  it("normalizes provider-native diagnostics before rendering", () => {
+    const htmlError =
+      "unexpected status 403 Forbidden: <html><head><title>Denied</title></head></html>";
+    const markup = renderToStaticMarkup(<ThreadErrorBanner error={htmlError} />);
+
+    expect(markup).toContain("Provider request failed: 403 Forbidden.");
+    expect(markup).not.toContain("&lt;html&gt;");
+    expect(markup).not.toContain("Denied");
+  });
 });
