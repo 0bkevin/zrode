@@ -95,6 +95,11 @@ const TIMESTAMP_FORMAT_LABELS = {
   "24-hour": "24-hour",
 } as const;
 
+const FILE_EXPLORER_POSITION_LABELS = {
+  left: "Left",
+  right: "Right",
+} as const;
+
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 
 function withoutProviderInstanceKey<V>(
@@ -390,6 +395,9 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
         ? ["Visible threads"]
         : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
+      ...(settings.fileExplorerPosition !== DEFAULT_UNIFIED_SETTINGS.fileExplorerPosition
+        ? ["File explorer position"]
+        : []),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
         : []),
@@ -434,6 +442,7 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
     settings.diffIgnoreWhitespace,
     settings.automaticGitFetchInterval,
     settings.enableAssistantStreaming,
+    settings.fileExplorerPosition,
     settings.sidebarThreadPreviewCount,
     settings.showNerdStats,
     settings.timestampFormat,
@@ -464,6 +473,7 @@ export function useSettingsRestore(scope: "general" | "appearance", onRestored?:
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       showNerdStats: DEFAULT_UNIFIED_SETTINGS.showNerdStats,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
+      fileExplorerPosition: DEFAULT_UNIFIED_SETTINGS.fileExplorerPosition,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
@@ -611,6 +621,47 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) => updateSettings({ wordWrap: Boolean(checked) })}
               aria-label="Wrap code, tables, diffs, and file previews by default"
             />
+          }
+        />
+
+        <SettingsRow
+          title="File explorer position"
+          description="Choose which side of the file editor shows the workspace explorer."
+          resetAction={
+            settings.fileExplorerPosition !== DEFAULT_UNIFIED_SETTINGS.fileExplorerPosition ? (
+              <SettingResetButton
+                label="file explorer position"
+                onClick={() =>
+                  updateSettings({
+                    fileExplorerPosition: DEFAULT_UNIFIED_SETTINGS.fileExplorerPosition,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.fileExplorerPosition}
+              onValueChange={(value) => {
+                if (value === "left" || value === "right") {
+                  updateSettings({ fileExplorerPosition: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-40" aria-label="File explorer position">
+                <SelectValue>
+                  {FILE_EXPLORER_POSITION_LABELS[settings.fileExplorerPosition]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="left">
+                  {FILE_EXPLORER_POSITION_LABELS.left}
+                </SelectItem>
+                <SelectItem hideIndicator value="right">
+                  {FILE_EXPLORER_POSITION_LABELS.right}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
 

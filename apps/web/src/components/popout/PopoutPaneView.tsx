@@ -12,6 +12,7 @@ import { toastManager } from "~/components/ui/toast";
 import { getConfiguredPreviewUrls } from "~/components/preview/previewEmptyStateLogic";
 import { useClaimedPreviewTabIds, usePaneClaimPublisher } from "~/lib/paneTerminalClaims";
 import { useThreadPreviewState } from "~/previewStateStore";
+import type { FileRevealTarget } from "~/rightPanelStore";
 import { useProject, useThread } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { environmentShell } from "~/state/shell";
@@ -445,7 +446,20 @@ function PopoutFilesPane({
   availableEditors: React.ComponentProps<typeof FilePreviewPanel>["availableEditors"];
 }) {
   useFileDocumentBeforeUnloadProtection();
-  const [activePath, setActivePath] = useState<string | null>(initialPath);
+  const [activeFile, setActiveFile] = useState<{
+    relativePath: string | null;
+    revealTarget: FileRevealTarget | null;
+    revealRequestId: number;
+  }>(() => ({ relativePath: initialPath, revealTarget: null, revealRequestId: 0 }));
+  const activePath = activeFile.relativePath;
+  const handleOpenFile = useCallback((relativePath: string, revealTarget?: FileRevealTarget) => {
+    setActiveFile((current) => ({
+      relativePath,
+      revealTarget: revealTarget ?? null,
+      revealRequestId:
+        current.revealRequestId >= Number.MAX_SAFE_INTEGER ? 1 : current.revealRequestId + 1,
+    }));
+  }, []);
   const title = activePath
     ? `${activePath.slice(activePath.lastIndexOf("/") + 1)} — ${project.title}`
     : `Files — ${project.title}`;
@@ -458,14 +472,15 @@ function PopoutFilesPane({
           environmentId={project.environmentId}
           cwd={workspaceRoot}
           projectName={project.title}
+          layoutMode="standalone"
           threadRef={threadRef}
           composerDraftTarget={threadRef}
           keybindings={keybindings}
           availableEditors={availableEditors}
           relativePath={activePath}
-          revealLine={null}
-          revealRequestId={0}
-          onOpenFile={setActivePath}
+          revealTarget={activeFile.revealTarget}
+          revealRequestId={activeFile.revealRequestId}
+          onOpenFile={handleOpenFile}
         />
       </Suspense>
     </PopoutPaneFrame>

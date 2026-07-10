@@ -124,6 +124,7 @@ import {
   selectActiveRightPanelSurface,
   selectOrderedFileSurfaces,
   selectThreadRightPanelState,
+  type FileRevealTarget,
   type RightPanelSurface,
   useRightPanelStore,
 } from "../rightPanelStore";
@@ -3091,9 +3092,9 @@ function ChatViewContent(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
   const openFileSurface = useCallback(
-    (relativePath: string, line?: number) => {
+    (relativePath: string, target?: FileRevealTarget) => {
       if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, line);
+      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, target);
     },
     [activeProject, activeThreadRef],
   );
@@ -6226,6 +6227,7 @@ function ChatViewContent(props: ChatViewProps) {
           environmentId={activeProject.environmentId}
           cwd={activeWorkspaceRoot}
           projectName={activeProject.title}
+          layoutMode="docked"
           threadRef={activeThreadRef}
           composerDraftTarget={composerDraftTarget}
           keybindings={keybindings}
@@ -6233,7 +6235,7 @@ function ChatViewContent(props: ChatViewProps) {
           relativePath={
             activeRightPanelSurface.kind === "file" ? activeRightPanelSurface.relativePath : null
           }
-          revealLine={activeFileSurface?.revealLine ?? null}
+          revealTarget={activeFileSurface?.revealTarget ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
           pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}

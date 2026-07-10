@@ -67,3 +67,42 @@ index d1558633de87044b7aa96cff09443db11f163cec..c0b16f0a0bec6fba2026f24f38b2c0a8
      }
    },
    "publishConfig": {
+diff --git a/dist/editor/textMeasure.js b/dist/editor/textMeasure.js
+index 19b89e13e..de38a4dbe 100644
+--- a/dist/editor/textMeasure.js
++++ b/dist/editor/textMeasure.js
+@@ -39,2 +39,4 @@ var Metrics = class {
+-		const textWithExpandedTabs = text.replaceAll("	", " ".repeat(this.tabSize));
+-		if (needsDomTextMeasurement(textWithExpandedTabs)) return this.domMeasureTextWidth(textWithExpandedTabs);
++		const containsTabs = text.includes("	");
++		const isAscii = getExpandedAsciiTextColumns(text, this.tabSize) !== -1;
++		const textWithExpandedTabs = containsTabs && isAscii ? expandTabsToTabStops(text, this.tabSize) : text;
++		if (containsTabs && !isAscii || needsDomTextMeasurement(textWithExpandedTabs)) return this.domMeasureTextWidth(textWithExpandedTabs);
+@@ -107 +109,2 @@ function getExpandedAsciiTextColumns(text, tabSize) {
+-		columns += text.charCodeAt(i) === 9 ? tabSize : 1;
++		if (text.charCodeAt(i) !== 9) columns += 1;
++		else if (tabSize > 0) columns += tabSize - columns % tabSize;
+@@ -111,0 +115,17 @@ function getExpandedAsciiTextColumns(text, tabSize) {
++/** Expand ASCII tabs to the spaces required to reach the next tab stop. */
++function expandTabsToTabStops(text, tabSize) {
++	if (tabSize <= 0) return text.replaceAll("	", "");
++	let columns = 0;
++	let expandedText = "";
++	for (let i = 0; i < text.length; i++) {
++		if (text.charCodeAt(i) !== 9) {
++			expandedText += text[i];
++			columns += 1;
++			continue;
++		}
++		const spaces = tabSize - columns % tabSize;
++		expandedText += " ".repeat(spaces);
++		columns += spaces;
++	}
++	return expandedText;
++}
+diff --git a/dist/renderers/FileRenderer.js b/dist/renderers/FileRenderer.js
+index 5c34e1837..b2fb62f5f 100644
+--- a/dist/renderers/FileRenderer.js
++++ b/dist/renderers/FileRenderer.js
+@@ -75,0 +76 @@ var FileRenderer = class {
++		this.computedLang = file.lang ?? getFiletypeFromFileName(file.name);

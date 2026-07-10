@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   migratePersistedRightPanelState,
+  normalizeFileRevealTarget,
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
   selectOrderedFileSurfaces,
@@ -101,7 +102,7 @@ describe("rightPanelStore", () => {
               id: "file:src/index.ts",
               kind: "file",
               relativePath: "src/index.ts",
-              revealLine: null,
+              revealTarget: null,
               revealRequestId: 0,
             },
           ],
@@ -109,6 +110,93 @@ describe("rightPanelStore", () => {
         },
       },
     });
+  });
+
+  it("migrates legacy line reveals to one-based reveal targets", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "file:src/index.ts",
+            surfaces: [
+              {
+                id: "file:src/index.ts",
+                kind: "file",
+                relativePath: "src/index.ts",
+                revealLine: 0.9,
+                revealRequestId: -1,
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "file:src/index.ts",
+          surfaces: [
+            {
+              id: "file:src/index.ts",
+              kind: "file",
+              relativePath: "src/index.ts",
+              revealTarget: { kind: "line", line: 1 },
+              revealRequestId: 0,
+            },
+          ],
+          ...defaultWorkspaceSidebarState,
+        },
+      },
+    });
+  });
+
+  it("normalizes persisted UTF-16 reveal ranges", () => {
+    const migrated = migratePersistedRightPanelState({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "file:src/index.ts",
+          surfaces: [
+            {
+              id: "file:src/index.ts",
+              kind: "file",
+              relativePath: "src/index.ts",
+              revealTarget: {
+                kind: "range",
+                start: { line: 10.8, column: 14.9 },
+                end: { line: 3.2, column: -4 },
+              },
+              revealRequestId: 7,
+            },
+          ],
+        },
+      },
+    });
+
+    expect(selectThreadRightPanelState(migrated.byThreadKey, refA).surfaces[0]).toEqual({
+      id: "file:src/index.ts",
+      kind: "file",
+      relativePath: "src/index.ts",
+      revealTarget: {
+        kind: "range",
+        start: { line: 3, column: 1 },
+        end: { line: 10, column: 14 },
+      },
+      revealRequestId: 7,
+    });
+  });
+
+  it("rejects malformed reveal targets without leaking invalid coordinates", () => {
+    expect(
+      normalizeFileRevealTarget({
+        kind: "range",
+        start: { line: 4, column: 2 },
+        end: { line: Number.NaN, column: 8 },
+      }),
+    ).toBeNull();
+    expect(normalizeFileRevealTarget({ kind: "line", line: Number.POSITIVE_INFINITY })).toBeNull();
+    expect(normalizeFileRevealTarget({ kind: "selection", line: 3 })).toBeNull();
   });
 
   it("migrates persisted workspace sidebar state and defaults invalid values", () => {
@@ -190,14 +278,14 @@ describe("rightPanelStore", () => {
           id: "file:src/index.ts",
           kind: "file",
           relativePath: "src/index.ts",
-          revealLine: null,
+          revealTarget: null,
           revealRequestId: 2,
         },
         {
           id: "file:README.md",
           kind: "file",
           relativePath: "README.md",
-          revealLine: null,
+          revealTarget: null,
           revealRequestId: 1,
         },
       ],
@@ -363,7 +451,7 @@ describe("rightPanelStore", () => {
           id: "file:src/index.ts",
           kind: "file",
           relativePath: "src/index.ts",
-          revealLine: 87,
+          revealTarget: { kind: "line", line: 87 },
           revealRequestId: 2,
         },
       ],
@@ -380,11 +468,38 @@ describe("rightPanelStore", () => {
           id: "file:src/index.ts",
           kind: "file",
           relativePath: "src/index.ts",
-          revealLine: null,
+          revealTarget: null,
           revealRequestId: 3,
         },
       ],
       ...defaultWorkspaceSidebarState,
+    });
+  });
+
+  it("updates and normalizes range reveal requests when reopening a file surface", () => {
+    useRightPanelStore.getState().openFile(refA, "src/index.ts", {
+      kind: "range",
+      start: { line: 8.9, column: 21.7 },
+      end: { line: 8.1, column: 4.2 },
+    });
+    useRightPanelStore.getState().openFile(refA, "src/index.ts", {
+      kind: "range",
+      start: { line: 12, column: 3 },
+      end: { line: 12, column: 9 },
+    });
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces[0],
+    ).toEqual({
+      id: "file:src/index.ts",
+      kind: "file",
+      relativePath: "src/index.ts",
+      revealTarget: {
+        kind: "range",
+        start: { line: 12, column: 3 },
+        end: { line: 12, column: 9 },
+      },
+      revealRequestId: 2,
     });
   });
 
@@ -590,7 +705,7 @@ describe("rightPanelStore", () => {
           id: "file:src/index.ts",
           kind: "file",
           relativePath: "src/index.ts",
-          revealLine: null,
+          revealTarget: null,
           revealRequestId: 1,
         },
       ],

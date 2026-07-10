@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
+  ClientSettingsPatch,
   ClientSettingsSchema,
   DEFAULT_SERVER_SETTINGS,
   ServerSettings,
@@ -10,6 +11,7 @@ import {
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
+const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
@@ -38,6 +40,25 @@ describe("ClientSettings nerd stats", () => {
 
   it("accepts the nerd stats preference", () => {
     expect(decodeClientSettings({ showNerdStats: true }).showNerdStats).toBe(true);
+  });
+});
+
+describe("ClientSettings file explorer position", () => {
+  it("defaults the file explorer to the right", () => {
+    expect(decodeClientSettings({}).fileExplorerPosition).toBe("right");
+  });
+
+  it("accepts either side and rejects unknown positions", () => {
+    expect(decodeClientSettings({ fileExplorerPosition: "left" }).fileExplorerPosition).toBe(
+      "left",
+    );
+    expect(() => decodeClientSettings({ fileExplorerPosition: "bottom" })).toThrow();
+  });
+
+  it("accepts the position in client settings patches", () => {
+    expect(decodeClientSettingsPatch({ fileExplorerPosition: "left" })).toEqual({
+      fileExplorerPosition: "left",
+    });
   });
 });
 

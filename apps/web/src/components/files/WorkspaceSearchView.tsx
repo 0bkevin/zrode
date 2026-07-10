@@ -23,6 +23,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "~/lib/utils";
 import { useTheme } from "~/hooks/useTheme";
 import { projectEnvironment } from "~/state/projects";
+import type { FileRevealTarget } from "~/rightPanelStore";
 
 import { PierreEntryIcon } from "../chat/PierreEntryIcon";
 
@@ -30,7 +31,7 @@ interface WorkspaceSearchViewProps {
   environmentId: EnvironmentId;
   cwd: string;
   focusRequestId: number;
-  onOpenFile: (relativePath: string, line: number) => void;
+  onOpenFile: (relativePath: string, target: FileRevealTarget) => void;
 }
 
 interface SearchRequest {
@@ -196,7 +197,13 @@ function SearchResultGroup({
               key={key}
               type="button"
               className="flex h-6 w-full min-w-0 items-center gap-2 pl-7 pr-2 text-left text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              onClick={() => onOpenFile(relativePath, match.line)}
+              onClick={() =>
+                onOpenFile(relativePath, {
+                  kind: "range",
+                  start: { line: match.line, column: match.column },
+                  end: { line: match.line, column: match.endColumn },
+                })
+              }
               title={`${relativePath}:${match.line}:${match.column}`}
             >
               <span className="w-8 shrink-0 text-right font-mono text-[10px] opacity-70">

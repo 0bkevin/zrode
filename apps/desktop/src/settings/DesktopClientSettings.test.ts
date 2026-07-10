@@ -23,6 +23,7 @@ const clientSettings: ClientSettings = {
   confirmThreadDelete: false,
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
+  fileExplorerPosition: "left",
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",

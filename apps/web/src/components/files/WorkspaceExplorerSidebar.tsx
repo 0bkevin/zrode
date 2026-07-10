@@ -1,14 +1,15 @@
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, FileExplorerPosition, ScopedThreadRef } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { Files, Search } from "lucide-react";
+import { Files, PanelLeft, PanelRight, Search } from "lucide-react";
 import { memo, useCallback } from "react";
 
 import { cn } from "~/lib/utils";
 import {
   selectThreadRightPanelState,
+  type FileRevealTarget,
   type RightPanelSurface,
   useRightPanelStore,
 } from "~/rightPanelStore";
@@ -28,7 +29,9 @@ interface WorkspaceExplorerSidebarProps {
   activeRelativePath: string | null;
   threadRef: ScopedThreadRef;
   pendingSurfaceIds: ReadonlySet<string>;
-  onOpenFile: (relativePath: string, line?: number) => void;
+  onOpenFile: (relativePath: string, target?: FileRevealTarget) => void;
+  fileExplorerPosition: FileExplorerPosition;
+  onFileExplorerPositionChange: (position: FileExplorerPosition) => void;
   onCloseFile?: (surface: FileSurface) => void;
   onCloseAllFiles?: () => void;
 }
@@ -41,6 +44,8 @@ function WorkspaceExplorerSidebar({
   threadRef,
   pendingSurfaceIds,
   onOpenFile,
+  fileExplorerPosition,
+  onFileExplorerPositionChange,
   onCloseFile,
   onCloseAllFiles,
 }: WorkspaceExplorerSidebarProps) {
@@ -99,38 +104,55 @@ function WorkspaceExplorerSidebar({
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-foreground">
           {view === "search" ? "Search" : "Explorer"}
         </span>
-        <div
-          className="flex items-center gap-0.5"
-          role="tablist"
-          aria-label="Workspace sidebar view"
-        >
+        <div className="flex items-center gap-0.5">
+          <div
+            className="flex items-center gap-0.5"
+            role="tablist"
+            aria-label="Workspace sidebar view"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "explorer"}
+              aria-label="Explorer"
+              title="Explorer"
+              className={cn(
+                "rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground",
+                view === "explorer" && "bg-accent text-foreground",
+              )}
+              onClick={showExplorer}
+            >
+              <Files className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === "search"}
+              aria-label="Search"
+              title="Search in Files"
+              className={cn(
+                "rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground",
+                view === "search" && "bg-accent text-foreground",
+              )}
+              onClick={showSearch}
+            >
+              <Search className="size-3.5" />
+            </button>
+          </div>
           <button
             type="button"
-            role="tab"
-            aria-selected={view === "explorer"}
-            aria-label="Explorer"
-            title="Explorer"
-            className={cn(
-              "rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground",
-              view === "explorer" && "bg-accent text-foreground",
-            )}
-            onClick={showExplorer}
+            aria-label={`Move Explorer to the ${fileExplorerPosition === "left" ? "right" : "left"}`}
+            title={`Move Explorer to the ${fileExplorerPosition === "left" ? "right" : "left"}`}
+            className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+            onClick={() =>
+              onFileExplorerPositionChange(fileExplorerPosition === "left" ? "right" : "left")
+            }
           >
-            <Files className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "search"}
-            aria-label="Search"
-            title="Search in Files"
-            className={cn(
-              "rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground",
-              view === "search" && "bg-accent text-foreground",
+            {fileExplorerPosition === "left" ? (
+              <PanelRight className="size-3.5" />
+            ) : (
+              <PanelLeft className="size-3.5" />
             )}
-            onClick={showSearch}
-          >
-            <Search className="size-3.5" />
           </button>
         </div>
       </div>
@@ -139,7 +161,7 @@ function WorkspaceExplorerSidebar({
           environmentId={environmentId}
           cwd={cwd}
           focusRequestId={panelState.workspaceSidebarFocusRequestId}
-          onOpenFile={(relativePath, line) => onOpenFile(relativePath, line)}
+          onOpenFile={(relativePath, target) => onOpenFile(relativePath, target)}
         />
       ) : (
         <>

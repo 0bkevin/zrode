@@ -19,6 +19,24 @@ export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 export const WORKSPACE_SIDEBAR_VIEWS = ["explorer", "search"] as const;
 export type WorkspaceSidebarView = (typeof WORKSPACE_SIDEBAR_VIEWS)[number];
 
+/** A one-based position whose column is measured in UTF-16 code units. */
+export interface FileRevealPosition {
+  readonly line: number;
+  readonly column: number;
+}
+
+/**
+ * A location to reveal in a file preview. Range ends are exclusive. Lines and
+ * UTF-16 columns are one-based, matching the project-search protocol.
+ */
+export type FileRevealTarget =
+  | { readonly kind: "line"; readonly line: number }
+  | {
+      readonly kind: "range";
+      readonly start: FileRevealPosition;
+      readonly end: FileRevealPosition;
+    };
+
 export type RightPanelSurface =
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
@@ -36,7 +54,7 @@ export type RightPanelSurface =
       id: `file:${string}`;
       kind: "file";
       relativePath: string;
-      revealLine: number | null;
+      revealTarget: FileRevealTarget | null;
       revealRequestId: number;
     }
   | { id: "plan"; kind: "plan" };
@@ -44,7 +62,7 @@ export type RightPanelSurface =
 export type RightPanelFileSurface = Extract<RightPanelSurface, { kind: "file" }>;
 
 const RIGHT_PANEL_STORAGE_KEY = "zrode:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 8;
+const RIGHT_PANEL_STORAGE_VERSION = 9;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -58,7 +76,11 @@ interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
   open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
-  openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
+  openFile: (
+    ref: ScopedThreadRef,
+    relativePath: string,
+    target?: number | FileRevealTarget | null,
+  ) => void;
   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
   splitTerminal: (
     ref: ScopedThreadRef,
@@ -114,13 +136,13 @@ const browserSurface = (tabId: string | null): RightPanelSurface =>
 
 const fileSurface = (
   relativePath: string,
-  revealLine: number | null,
+  revealTarget: FileRevealTarget | null,
   revealRequestId: number,
 ): RightPanelSurface => ({
   id: `file:${relativePath}`,
   kind: "file",
   relativePath,
-  revealLine,
+  revealTarget,
   revealRequestId,
 });
 
@@ -253,9 +275,47 @@ const updateThread = (
   return { ...byThreadKey, [threadKey]: next };
 };
 
-function normalizeRevealLine(line: number | undefined): number | null {
-  if (line === undefined || !Number.isFinite(line)) return null;
-  return Math.max(1, Math.trunc(line));
+function normalizeOneBasedCoordinate(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.trunc(value)));
+}
+
+function normalizeFileRevealPosition(value: unknown): FileRevealPosition | null {
+  if (!value || typeof value !== "object") return null;
+  const position = value as { readonly line?: unknown; readonly column?: unknown };
+  const line = normalizeOneBasedCoordinate(position.line);
+  const column = normalizeOneBasedCoordinate(position.column);
+  return line === null || column === null ? null : { line, column };
+}
+
+function compareFileRevealPositions(left: FileRevealPosition, right: FileRevealPosition): number {
+  return left.line === right.line ? left.column - right.column : left.line - right.line;
+}
+
+/** Normalize untrusted or legacy reveal data into the canonical persisted shape. */
+export function normalizeFileRevealTarget(value: unknown): FileRevealTarget | null {
+  const legacyLine = normalizeOneBasedCoordinate(value);
+  if (legacyLine !== null) return { kind: "line", line: legacyLine };
+  if (!value || typeof value !== "object") return null;
+
+  const target = value as {
+    readonly kind?: unknown;
+    readonly line?: unknown;
+    readonly start?: unknown;
+    readonly end?: unknown;
+  };
+  if (target.kind === "line") {
+    const line = normalizeOneBasedCoordinate(target.line);
+    return line === null ? null : { kind: "line", line };
+  }
+  if (target.kind !== "range") return null;
+
+  const first = normalizeFileRevealPosition(target.start);
+  const second = normalizeFileRevealPosition(target.end);
+  if (first === null || second === null) return null;
+  const [start, end] =
+    compareFileRevealPositions(first, second) <= 0 ? [first, second] : [second, first];
+  return { kind: "range", start, end };
 }
 
 export function migratePersistedRightPanelState(persistedState: unknown): {
@@ -275,19 +335,31 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                 threadState && typeof threadState === "object" ? threadState : null;
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
+                    if (!surface || typeof surface !== "object") return [];
                     if (surface.kind === "file") {
-                      const revealLine =
-                        typeof surface.revealLine === "number" &&
-                        Number.isFinite(surface.revealLine)
-                          ? Math.max(1, Math.trunc(surface.revealLine))
-                          : null;
+                      const persistedFileSurface = surface as RightPanelFileSurface & {
+                        readonly revealLine?: unknown;
+                        readonly revealTarget?: unknown;
+                        readonly revealRequestId?: unknown;
+                      };
+                      const {
+                        revealLine: legacyRevealLine,
+                        revealTarget: persistedRevealTarget,
+                        revealRequestId: persistedRevealRequestId,
+                        ...baseSurface
+                      } = persistedFileSurface;
+                      const revealTarget = normalizeFileRevealTarget(
+                        Object.hasOwn(persistedFileSurface, "revealTarget")
+                          ? persistedRevealTarget
+                          : legacyRevealLine,
+                      );
                       const revealRequestId =
-                        typeof surface.revealRequestId === "number" &&
-                        Number.isSafeInteger(surface.revealRequestId) &&
-                        surface.revealRequestId >= 0
-                          ? surface.revealRequestId
+                        typeof persistedRevealRequestId === "number" &&
+                        Number.isSafeInteger(persistedRevealRequestId) &&
+                        persistedRevealRequestId >= 0
+                          ? persistedRevealRequestId
                           : 0;
-                      return [{ ...surface, revealLine, revealRequestId }];
+                      return [{ ...baseSurface, revealTarget, revealRequestId }];
                     }
                     if (surface.kind !== "terminal") return [surface];
                     if (
@@ -385,7 +457,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
           }),
         })),
-      openFile: (ref, relativePath, line) =>
+      openFile: (ref, relativePath, target) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
             const withoutStandaloneExplorer = current.surfaces.filter(
@@ -398,8 +470,8 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             );
             const surface = fileSurface(
               relativePath,
-              normalizeRevealLine(line),
-              (existing?.revealRequestId ?? 0) + 1,
+              normalizeFileRevealTarget(target),
+              nextRequestId(existing?.revealRequestId ?? 0),
             );
             return {
               ...current,

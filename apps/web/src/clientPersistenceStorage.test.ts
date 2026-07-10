@@ -90,4 +90,12 @@ describe("clientPersistenceStorage", () => {
     expect(settings).not.toHaveProperty("chatWordWrap");
     expect(settings).not.toHaveProperty("diffWordWrap");
   });
+
+  it("defaults legacy settings to a right-side file explorer", async () => {
+    const testWindow = getTestWindow();
+    testWindow.localStorage.setItem("zrode:client-settings:v1", JSON.stringify({}));
+    const { readBrowserClientSettings } = await import("./clientPersistenceStorage");
+
+    expect(readBrowserClientSettings()?.fileExplorerPosition).toBe("right");
+  });
 });

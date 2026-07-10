@@ -26,7 +26,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
-import { useClientSettings } from "~/hooks/useSettings";
+import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
@@ -51,13 +51,16 @@ import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-import type { RightPanelSurface } from "~/rightPanelStore";
+import type { FileRevealTarget, RightPanelSurface } from "~/rightPanelStore";
 import WorkspaceExplorerSidebar from "./WorkspaceExplorerSidebar";
 import {
   FILE_EXPLORER_DEFAULT_WIDTH,
   FILE_EXPLORER_MAX_WIDTH,
   FILE_EXPLORER_MIN_WIDTH,
+  type FilePreviewLayoutMode,
   resolveFileExplorerMaxWidth,
+  resolveFileExplorerPaneLayout,
+  resolveFileExplorerSplitLayout,
 } from "./fileExplorerLayout";
 import {
   areFileCommentAnnotationsEqual,
@@ -74,27 +77,31 @@ import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import { fileRevealTargetLine, fileRevealTargetToEditorSelection } from "./fileRevealSelection";
 import { fileDocumentErrorMessage, useFileDocument } from "./fileDocumentRuntime";
 import type { FileDocumentHandle, FileDocumentSnapshot } from "./fileDocumentStore";
 import {
   WORKSPACE_EDITOR_UNSAFE_CSS,
+  WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
   workspaceEditorBackground,
   workspaceEditorTheme,
 } from "./workspaceEditorPresentation";
+import { WorkspaceEditorWorkerPoolProvider } from "./WorkspaceEditorWorkerPoolProvider";
 
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
+  layoutMode: FilePreviewLayoutMode;
   relativePath: string | null;
   threadRef: ScopedThreadRef;
   composerDraftTarget: ScopedThreadRef | DraftId;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
-  revealLine: number | null;
+  revealTarget: FileRevealTarget | null;
   revealRequestId: number;
   pendingSurfaceIds?: ReadonlySet<string>;
-  onOpenFile: (relativePath: string, line?: number) => void;
+  onOpenFile: (relativePath: string, target?: FileRevealTarget) => void;
   onCloseFile?: (surface: Extract<RightPanelSurface, { kind: "file" }>) => void;
   onCloseAllFiles?: () => void;
 }
@@ -175,20 +182,6 @@ const WORKSPACE_FILE_UNSAFE_CSS = `${WORKSPACE_EDITOR_UNSAFE_CSS}${FILE_LINK_REV
 const EDITABLE_FILE_UNSAFE_CSS = `${WORKSPACE_FILE_UNSAFE_CSS}${EDITABLE_GUTTER_BUTTON_CSS}`;
 type FilePostRender = NonNullable<FileOptions<unknown>["onPostRender"]>;
 
-function clampFileLine(contents: string, requestedLine: number): number {
-  let lineCount = 1;
-  for (let index = 0; index < contents.length; index += 1) {
-    const character = contents.charCodeAt(index);
-    if (character === 10) {
-      lineCount += 1;
-    } else if (character === 13) {
-      lineCount += 1;
-      if (contents.charCodeAt(index + 1) === 10) index += 1;
-    }
-  }
-  return Math.min(Math.max(1, requestedLine), lineCount);
-}
-
 function updateFileLinkReveal(fileContainer: HTMLElement, line: number | null): void {
   const root = fileContainer.shadowRoot ?? fileContainer;
   for (const element of root.querySelectorAll<HTMLElement>(`[${FILE_LINK_REVEAL_ATTRIBUTE}]`)) {
@@ -204,104 +197,100 @@ function updateFileLinkReveal(fileContainer: HTMLElement, line: number | null): 
     ?.setAttribute(FILE_LINK_REVEAL_ATTRIBUTE, "");
 }
 
-function useFileLineReveal(
+function useFileReveal(
   relativePath: string | null,
-  revealLine: number | null,
+  revealTarget: FileRevealTarget | null,
   revealRequestId: number,
   contents: string,
 ): FilePostRender {
-  const [handledRequestIdsByPath] = useState(() => new Map<string, number>());
-  const [latestRequestIdsByPath] = useState(() => new Map<string, number>());
-  const [pendingFramesByPath] = useState(() => new Map<string, number>());
+  const latestRef = useRef({ relativePath, revealTarget, revealRequestId, contents });
+  latestRef.current = { relativePath, revealTarget, revealRequestId, contents };
+  const mountedRef = useRef<{
+    fileContainer: HTMLElement;
+    instance: Parameters<FilePostRender>[1];
+  } | null>(null);
+  const handledRequestIdsByPathRef = useRef(new Map<string, number>());
+  const pendingFrameRef = useRef<number | null>(null);
 
-  return useCallback<FilePostRender>(
-    (fileContainer, instance, phase) => {
-      if (relativePath === null) return;
+  const cancelPendingReveal = useCallback(() => {
+    if (pendingFrameRef.current === null) return;
+    cancelAnimationFrame(pendingFrameRef.current);
+    pendingFrameRef.current = null;
+  }, []);
 
-      const cancelPendingReveal = () => {
-        const frameId = pendingFramesByPath.get(relativePath);
-        if (frameId !== undefined) {
-          cancelAnimationFrame(frameId);
-          pendingFramesByPath.delete(relativePath);
-        }
-      };
+  const revealMountedFile = useCallback(() => {
+    const mounted = mountedRef.current;
+    const latest = latestRef.current;
+    if (!mounted || latest.relativePath === null) return;
 
-      if (phase === "unmount") {
-        cancelPendingReveal();
-        return;
-      }
+    const targetLine = fileRevealTargetLine(latest.contents, latest.revealTarget);
+    updateFileLinkReveal(
+      mounted.fileContainer,
+      latest.revealTarget?.kind === "line" ? targetLine : null,
+    );
+    if (!(mounted.instance instanceof VirtualizedFile) || targetLine === null) return;
+    const virtualizedFile = mounted.instance;
+    if (
+      handledRequestIdsByPathRef.current.get(latest.relativePath) === latest.revealRequestId ||
+      pendingFrameRef.current !== null
+    ) {
+      return;
+    }
 
-      // Clamp against the query contents rather than instance.file: the editable
-      // surface keeps its file object frozen while typing, so instance.file goes stale.
-      const targetLine = revealLine === null ? null : clampFileLine(contents, revealLine);
-      updateFileLinkReveal(fileContainer, targetLine);
-
-      if (!(instance instanceof VirtualizedFile)) return;
-
-      if (latestRequestIdsByPath.get(relativePath) !== revealRequestId) {
-        cancelPendingReveal();
-        latestRequestIdsByPath.set(relativePath, revealRequestId);
-      }
-
-      const scrollContainer = fileContainer.closest<HTMLElement>(".file-preview-virtualizer");
-      if (!scrollContainer) return;
-      // A short Pierre host must still cover the editor viewport. This also
-      // keeps its gutter/background continuous below the final source line.
-      fileContainer.style.minHeight = `${Math.ceil(
-        Math.max(instance.height, scrollContainer.clientHeight),
-      )}px`;
-
-      if (targetLine === null) return;
-
+    const scheduledPath = latest.relativePath;
+    const scheduledRequestId = latest.revealRequestId;
+    pendingFrameRef.current = requestAnimationFrame(() => {
+      pendingFrameRef.current = null;
+      const current = latestRef.current;
+      const active = mountedRef.current;
       if (
-        handledRequestIdsByPath.get(relativePath) === revealRequestId ||
-        pendingFramesByPath.has(relativePath)
+        active !== mounted ||
+        current.relativePath !== scheduledPath ||
+        current.revealRequestId !== scheduledRequestId ||
+        !mounted.fileContainer.isConnected
       ) {
         return;
       }
 
-      const reveal = () => {
-        pendingFramesByPath.delete(relativePath);
-        if (
-          latestRequestIdsByPath.get(relativePath) !== revealRequestId ||
-          !fileContainer.isConnected
-        ) {
-          return;
-        }
+      const linePosition = virtualizedFile.getLinePosition(targetLine);
+      const scrollContainer = mounted.fileContainer.closest<HTMLElement>(
+        ".file-preview-virtualizer",
+      );
+      if (!linePosition || !scrollContainer) return;
+      const fileTop =
+        scrollContainer.scrollTop +
+        mounted.fileContainer.getBoundingClientRect().top -
+        scrollContainer.getBoundingClientRect().top;
+      const centeredTop = Math.max(
+        0,
+        fileTop +
+          linePosition.top -
+          Math.max(0, (scrollContainer.clientHeight - linePosition.height) / 2),
+      );
+      const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      scrollContainer.scrollTop = Math.min(centeredTop, maxScrollTop);
+      handledRequestIdsByPathRef.current.set(scheduledPath, scheduledRequestId);
+    });
+  }, []);
 
-        const linePosition = instance.getLinePosition(targetLine);
-        if (!linePosition) return;
+  useLayoutEffect(() => {
+    cancelPendingReveal();
+    revealMountedFile();
+  }, [cancelPendingReveal, relativePath, revealMountedFile, revealRequestId, revealTarget]);
 
-        const fileTop =
-          scrollContainer.scrollTop +
-          fileContainer.getBoundingClientRect().top -
-          scrollContainer.getBoundingClientRect().top;
-        const centeredTop = Math.max(
-          0,
-          fileTop +
-            linePosition.top -
-            Math.max(0, (scrollContainer.clientHeight - linePosition.height) / 2),
-        );
-        const maxScrollTop = Math.max(
-          0,
-          scrollContainer.scrollHeight - scrollContainer.clientHeight,
-        );
+  useEffect(() => cancelPendingReveal, [cancelPendingReveal]);
 
-        scrollContainer.scrollTop = Math.min(centeredTop, maxScrollTop);
-        handledRequestIdsByPath.set(relativePath, revealRequestId);
-      };
-
-      pendingFramesByPath.set(relativePath, requestAnimationFrame(reveal));
+  return useCallback<FilePostRender>(
+    (fileContainer, instance, phase) => {
+      if (phase === "unmount") {
+        if (mountedRef.current?.fileContainer === fileContainer) mountedRef.current = null;
+        cancelPendingReveal();
+        return;
+      }
+      mountedRef.current = { fileContainer, instance };
+      revealMountedFile();
     },
-    [
-      contents,
-      handledRequestIdsByPath,
-      latestRequestIdsByPath,
-      pendingFramesByPath,
-      relativePath,
-      revealLine,
-      revealRequestId,
-    ],
+    [cancelPendingReveal, revealMountedFile],
   );
 }
 
@@ -312,6 +301,7 @@ interface EditableFileSurfaceProps {
   contents: string;
   documentHandle: FileDocumentHandle;
   resolvedTheme: "light" | "dark";
+  revealTarget: FileRevealTarget | null;
   revealRequestId: number;
   wordWrap: boolean;
   onPostRender: FilePostRender;
@@ -348,6 +338,7 @@ function EditableFileSurface({
   contents,
   documentHandle,
   resolvedTheme,
+  revealTarget,
   revealRequestId,
   wordWrap,
   onPostRender,
@@ -366,6 +357,8 @@ function EditableFileSurface({
   );
   const surfaceRef = useRef<HTMLDivElement>(null);
   const selectionFrameRef = useRef<number | null>(null);
+  const revealSelectionFrameRef = useRef<number | null>(null);
+  const handledRevealRequestIdRef = useRef<number | null>(null);
   // The Pierre editor owns the text document while the user types: handing its own
   // onChange contents back through a new `file` prop makes it rebuild the document,
   // which drops focus, caret position, and undo history on every keystroke. Keep the
@@ -384,6 +377,19 @@ function EditableFileSurface({
       editorContents: contents,
     });
   }
+  // Keep range reveal inputs live without making Pierre's onPostRender option
+  // change on every document update. An option identity change can force a
+  // full file render while the contenteditable surface is handling a keystroke.
+  const latestRevealSelectionRef = useRef({
+    contents: fileState.editorContents,
+    revealRequestId,
+    revealTarget,
+  });
+  latestRevealSelectionRef.current = {
+    contents: fileState.editorContents,
+    revealRequestId,
+    revealTarget,
+  };
   const editor = useMemo(
     () =>
       new Editor<FileCommentAnnotationGroup>({
@@ -426,6 +432,49 @@ function EditableFileSurface({
       }),
     [addReviewComment, composerDraftTarget, documentHandle, relativePath],
   );
+
+  const scheduleRevealSelection = useCallback(() => {
+    if (revealSelectionFrameRef.current !== null) {
+      cancelAnimationFrame(revealSelectionFrameRef.current);
+      revealSelectionFrameRef.current = null;
+    }
+
+    const latestReveal = latestRevealSelectionRef.current;
+    if (
+      latestReveal.revealTarget?.kind !== "range" ||
+      handledRevealRequestIdRef.current === latestReveal.revealRequestId
+    ) {
+      return;
+    }
+
+    revealSelectionFrameRef.current = requestAnimationFrame(() => {
+      revealSelectionFrameRef.current = null;
+      const surface = surfaceRef.current;
+      const currentReveal = latestRevealSelectionRef.current;
+      if (
+        !surface?.isConnected ||
+        currentReveal.revealTarget?.kind !== "range" ||
+        handledRevealRequestIdRef.current === currentReveal.revealRequestId
+      ) {
+        return;
+      }
+
+      const selection = fileRevealTargetToEditorSelection(
+        currentReveal.contents,
+        currentReveal.revealTarget,
+      );
+      if (selection === null) return;
+      editor.setSelections([selection]);
+      handledRevealRequestIdRef.current = currentReveal.revealRequestId;
+    });
+  }, [editor]);
+
+  // A search result can target another range in the file that is already
+  // mounted. Pierre does not emit onPostRender when only this external reveal
+  // request changes, so schedule the editor selection from the prop change too.
+  useLayoutEffect(() => {
+    scheduleRevealSelection();
+  }, [revealRequestId, revealTarget, scheduleRevealSelection]);
 
   useEffect(
     () => () => {
@@ -564,8 +613,49 @@ function EditableFileSurface({
         if (!fileContainer.isConnected) return;
         instance.setSelectedLines(selectedRange, { notify: false });
       });
+      scheduleRevealSelection();
     },
-    [onPostRender, selectedRange],
+    [onPostRender, scheduleRevealSelection, selectedRange],
+  );
+
+  useEffect(
+    () => () => {
+      if (selectionFrameRef.current !== null) cancelAnimationFrame(selectionFrameRef.current);
+      if (revealSelectionFrameRef.current !== null) {
+        cancelAnimationFrame(revealSelectionFrameRef.current);
+      }
+    },
+    [],
+  );
+
+  const fileOptions = useMemo<FileOptions<FileCommentAnnotationGroup>>(
+    () => ({
+      disableFileHeader: true,
+      // Review comments land in the composer draft, which is window-local in
+      // popouts — they would render as attached but never reach the main
+      // window's composer. Disable the affordance there instead of silently
+      // dropping input.
+      enableGutterUtility: reviewCommentsAvailable && !hasOpenCommentForm,
+      enableLineSelection: reviewCommentsAvailable && !hasOpenCommentForm,
+      onGutterUtilityClick: setSelectedRange,
+      onLineSelectionChange: setSelectedRange,
+      onLineSelectionEnd: handleLineSelectionEnd,
+      overflow: wordWrap ? "wrap" : "scroll",
+      theme: workspaceEditorTheme(resolvedTheme),
+      themeType: resolvedTheme,
+      tokenizeMaxLineLength: WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
+      useTokenTransformer: true,
+      unsafeCSS: EDITABLE_FILE_UNSAFE_CSS,
+      onPostRender: handlePostRender,
+    }),
+    [
+      handleLineSelectionEnd,
+      handlePostRender,
+      hasOpenCommentForm,
+      resolvedTheme,
+      setSelectedRange,
+      wordWrap,
+    ],
   );
 
   return (
@@ -586,23 +676,7 @@ function EditableFileSurface({
         >
           <File<FileCommentAnnotationGroup>
             file={fileState.file}
-            options={{
-              disableFileHeader: true,
-              // Review comments land in the composer draft, which is
-              // window-local in popouts — they would render as attached but
-              // never reach the main window's composer. Disable the
-              // affordance there instead of silently dropping input.
-              enableGutterUtility: reviewCommentsAvailable && !hasOpenCommentForm,
-              enableLineSelection: reviewCommentsAvailable && !hasOpenCommentForm,
-              onGutterUtilityClick: setSelectedRange,
-              onLineSelectionChange: setSelectedRange,
-              onLineSelectionEnd: handleLineSelectionEnd,
-              overflow: wordWrap ? "wrap" : "scroll",
-              theme: workspaceEditorTheme(resolvedTheme),
-              themeType: resolvedTheme,
-              unsafeCSS: EDITABLE_FILE_UNSAFE_CSS,
-              onPostRender: handlePostRender,
-            }}
+            options={fileOptions}
             selectedLines={selectedRange}
             lineAnnotations={lineAnnotations}
             renderAnnotation={(annotation) => (
@@ -620,7 +694,6 @@ function EditableFileSurface({
                 ))}
               </div>
             )}
-            className="min-h-full"
             contentEditable
           />
         </Virtualizer>
@@ -637,7 +710,12 @@ function RenderedMarkdownSurface({
   threadRef,
 }: Omit<
   EditableFileSurfaceProps,
-  "resolvedTheme" | "composerDraftTarget" | "revealRequestId" | "wordWrap" | "onPostRender"
+  | "resolvedTheme"
+  | "composerDraftTarget"
+  | "revealTarget"
+  | "revealRequestId"
+  | "wordWrap"
+  | "onPostRender"
 > & {
   threadRef: ScopedThreadRef;
 }) {
@@ -840,6 +918,8 @@ function ConflictComparisonSurface({
               overflow: "scroll",
               theme: workspaceEditorTheme(resolvedTheme),
               themeType: resolvedTheme,
+              tokenizeMaxLineLength: WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
+              useTokenTransformer: true,
               unsafeCSS: WORKSPACE_FILE_UNSAFE_CSS,
             }}
           />
@@ -893,16 +973,17 @@ function useFileExplorerSplitLayout() {
   return { containerRef, maxExplorerWidth };
 }
 
-export default function FilePreviewPanel({
+function FilePreviewPanelContent({
   environmentId,
   cwd,
   projectName,
+  layoutMode,
   relativePath,
   threadRef,
   composerDraftTarget,
   keybindings,
   availableEditors,
-  revealLine,
+  revealTarget,
   revealRequestId,
   onOpenFile,
   pendingSurfaceIds,
@@ -911,6 +992,10 @@ export default function FilePreviewPanel({
 }: FilePreviewPanelProps) {
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
+  const fileExplorerPosition = useClientSettings((settings) => settings.fileExplorerPosition);
+  const updateClientSettings = useUpdateClientSettings();
+  const explorerSplitLayout = resolveFileExplorerSplitLayout(fileExplorerPosition);
+  const explorerPaneLayout = resolveFileExplorerPaneLayout(layoutMode, relativePath !== null);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environment = useEnvironment(environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
@@ -938,7 +1023,7 @@ export default function FilePreviewPanel({
     defaultWidth: FILE_EXPLORER_DEFAULT_WIDTH,
     minWidth: FILE_EXPLORER_MIN_WIDTH,
     maxWidth: maxExplorerWidth,
-    edge: "right",
+    edge: explorerSplitLayout.resizeEdge,
   });
   const [showConflictComparison, setShowConflictComparison] = useState(false);
   const [retryingFileRead, setRetryingFileRead] = useState(false);
@@ -951,7 +1036,7 @@ export default function FilePreviewPanel({
   const renderMarkdown =
     isMarkdown &&
     markdownView.path === relativePath &&
-    (revealLine === null || markdownView.revealRequestId === revealRequestId);
+    (revealTarget === null || markdownView.revealRequestId === revealRequestId);
   const canOpenInBrowser =
     relativePath !== null && isPreviewSupportedInRuntime() && isBrowserPreviewFile(relativePath);
   const absolutePath = relativePath ? resolvePathLinkTarget(relativePath, cwd) : null;
@@ -959,9 +1044,9 @@ export default function FilePreviewPanel({
     () => (relativePath ? fileBreadcrumbs(projectName, relativePath) : []),
     [projectName, relativePath],
   );
-  const onFilePostRender = useFileLineReveal(
+  const onFilePostRender = useFileReveal(
     relativePath,
-    revealLine,
+    revealTarget,
     revealRequestId,
     fileSnapshot?.contents ?? "",
   );
@@ -1168,130 +1253,151 @@ export default function FilePreviewPanel({
         />
       ) : null}
       <div ref={fileSplitContainerRef} className="flex min-h-0 flex-1 overflow-hidden">
-        <div
-          className="workspace-file-editor order-last flex min-w-0 flex-1 flex-col overflow-hidden"
-          style={{
-            ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
-          }}
-        >
-          {relativePath && fileError && fileData === null ? (
-            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-xs leading-relaxed text-destructive">
-              <p>{fileError}</p>
-              {fileDocument ? (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={retryingFileRead}
-                  onClick={() => {
-                    setRetryingFileRead(true);
-                    void fileDocument.refresh().finally(() => setRetryingFileRead(false));
+        {explorerPaneLayout.showEditorPane ? (
+          <div
+            className={cn(
+              "workspace-file-editor flex min-w-0 flex-1 flex-col overflow-hidden",
+              explorerSplitLayout.editorOrderClassName,
+            )}
+            style={{
+              ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
+            }}
+          >
+            {relativePath && fileError && fileData === null ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-xs leading-relaxed text-destructive">
+                <p>{fileError}</p>
+                {fileDocument ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={retryingFileRead}
+                    onClick={() => {
+                      setRetryingFileRead(true);
+                      void fileDocument.refresh().finally(() => setRetryingFileRead(false));
+                    }}
+                  >
+                    {retryingFileRead ? "Retrying…" : "Retry"}
+                  </Button>
+                ) : null}
+              </div>
+            ) : relativePath && fileData === null ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
+                <LoaderCircle className="size-5 animate-spin" />
+              </div>
+            ) : relativePath && fileData && fileSnapshot && fileDocument ? (
+              showConflictComparison ? (
+                <ConflictComparisonSurface
+                  relativePath={relativePath}
+                  snapshot={fileSnapshot}
+                  resolvedTheme={resolvedTheme}
+                  onClose={() => setShowConflictComparison(false)}
+                />
+              ) : isMarkdown && renderMarkdown ? (
+                <RenderedMarkdownSurface
+                  cwd={cwd}
+                  relativePath={relativePath}
+                  threadRef={threadRef}
+                  contents={fileData.contents}
+                  documentHandle={fileDocument}
+                />
+              ) : fileData.truncated ? (
+                <Virtualizer
+                  key={`${relativePath}:${resolvedTheme}:${fileData.byteLength}`}
+                  className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
+                  config={{
+                    overscrollSize: 600,
+                    intersectionObserverMargin: 1200,
                   }}
                 >
-                  {retryingFileRead ? "Retrying…" : "Retry"}
-                </Button>
-              ) : null}
-            </div>
-          ) : relativePath && fileData === null ? (
-            <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-              <LoaderCircle className="size-5 animate-spin" />
-            </div>
-          ) : relativePath && fileData && fileSnapshot && fileDocument ? (
-            showConflictComparison ? (
-              <ConflictComparisonSurface
-                relativePath={relativePath}
-                snapshot={fileSnapshot}
-                resolvedTheme={resolvedTheme}
-                onClose={() => setShowConflictComparison(false)}
-              />
-            ) : isMarkdown && renderMarkdown ? (
-              <RenderedMarkdownSurface
-                cwd={cwd}
-                relativePath={relativePath}
-                threadRef={threadRef}
-                contents={fileData.contents}
-                documentHandle={fileDocument}
-              />
-            ) : fileData.truncated ? (
-              <Virtualizer
-                key={`${relativePath}:${resolvedTheme}:${fileData.byteLength}`}
-                className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
-                config={{
-                  overscrollSize: 600,
-                  intersectionObserverMargin: 1200,
-                }}
-              >
-                <File
-                  file={{
-                    name: relativePath,
-                    contents: fileData.contents,
-                    cacheKey: projectFileCacheKey(cwd, relativePath, fileData.contents),
-                  }}
-                  options={{
-                    disableFileHeader: true,
-                    overflow: wordWrap ? "wrap" : "scroll",
-                    theme: workspaceEditorTheme(resolvedTheme),
-                    themeType: resolvedTheme,
-                    unsafeCSS: WORKSPACE_FILE_UNSAFE_CSS,
-                    onPostRender: onFilePostRender,
-                  }}
-                  className="min-h-full"
+                  <File
+                    file={{
+                      name: relativePath,
+                      contents: fileData.contents,
+                      cacheKey: projectFileCacheKey(cwd, relativePath, fileData.contents),
+                    }}
+                    options={{
+                      disableFileHeader: true,
+                      overflow: wordWrap ? "wrap" : "scroll",
+                      theme: workspaceEditorTheme(resolvedTheme),
+                      themeType: resolvedTheme,
+                      tokenizeMaxLineLength: WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
+                      useTokenTransformer: true,
+                      unsafeCSS: WORKSPACE_FILE_UNSAFE_CSS,
+                      onPostRender: onFilePostRender,
+                    }}
+                  />
+                </Virtualizer>
+              ) : (
+                <EditableFileSurface
+                  key={relativePath}
+                  cwd={cwd}
+                  relativePath={relativePath}
+                  composerDraftTarget={composerDraftTarget}
+                  contents={fileData.contents}
+                  documentHandle={fileDocument}
+                  resolvedTheme={resolvedTheme}
+                  revealTarget={revealTarget}
+                  revealRequestId={revealRequestId}
+                  wordWrap={wordWrap}
+                  onPostRender={onFilePostRender}
                 />
-              </Virtualizer>
+              )
             ) : (
-              <EditableFileSurface
-                key={relativePath}
-                cwd={cwd}
-                relativePath={relativePath}
-                composerDraftTarget={composerDraftTarget}
-                contents={fileData.contents}
-                documentHandle={fileDocument}
-                resolvedTheme={resolvedTheme}
-                revealRequestId={revealRequestId}
-                wordWrap={wordWrap}
-                onPostRender={onFilePostRender}
-              />
-            )
-          ) : (
-            <div className="min-h-0 flex-1" aria-label="Empty file editor" />
-          )}
-        </div>
+              <div className="min-h-0 flex-1" aria-label="Empty file editor" />
+            )}
+          </div>
+        ) : null}
         {explorerOpen || relativePath === null ? (
           <aside
-            className="order-first relative flex min-h-0 min-w-60 shrink-0 border-r border-border/60 bg-background"
-            style={{ width: `${explorerWidth}px` }}
+            className={cn(
+              "relative flex min-h-0 bg-background",
+              explorerPaneLayout.explorerOnly
+                ? "order-first min-w-0 flex-1"
+                : cn("min-w-60 shrink-0 border-border/60", explorerSplitLayout.explorerClassName),
+            )}
+            style={explorerPaneLayout.explorerOnly ? undefined : { width: `${explorerWidth}px` }}
           >
-            <div
-              role="separator"
-              aria-label="Resize file explorer"
-              aria-orientation="vertical"
-              aria-valuemin={FILE_EXPLORER_MIN_WIDTH}
-              aria-valuemax={maxExplorerWidth}
-              aria-valuenow={explorerWidth}
-              tabIndex={0}
-              className="group absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize select-none focus-visible:outline-2 focus-visible:outline-primary"
-              onDoubleClick={resetExplorerWidth}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowLeft") {
-                  event.preventDefault();
-                  setExplorerWidth(explorerWidth - 16);
-                } else if (event.key === "ArrowRight") {
-                  event.preventDefault();
-                  setExplorerWidth(explorerWidth + 16);
-                } else if (event.key === "Home") {
-                  event.preventDefault();
-                  setExplorerWidth(FILE_EXPLORER_MIN_WIDTH);
-                } else if (event.key === "End") {
-                  event.preventDefault();
-                  setExplorerWidth(maxExplorerWidth);
-                }
-              }}
-              {...explorerResizeHandlers}
-            >
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border group-focus-visible:bg-primary/70 group-active:bg-primary/70"
-              />
-            </div>
+            {!explorerPaneLayout.explorerOnly ? (
+              <div
+                role="separator"
+                aria-label="Resize file explorer"
+                aria-orientation="vertical"
+                aria-valuemin={FILE_EXPLORER_MIN_WIDTH}
+                aria-valuemax={maxExplorerWidth}
+                aria-valuenow={explorerWidth}
+                tabIndex={0}
+                className={cn(
+                  "group absolute inset-y-0 z-20 w-2 cursor-col-resize select-none focus-visible:outline-2 focus-visible:outline-primary",
+                  explorerSplitLayout.resizeHandleClassName,
+                )}
+                onDoubleClick={resetExplorerWidth}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    setExplorerWidth(
+                      explorerWidth + explorerSplitLayout.keyboardWidthDelta.ArrowLeft,
+                    );
+                  } else if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    setExplorerWidth(
+                      explorerWidth + explorerSplitLayout.keyboardWidthDelta.ArrowRight,
+                    );
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    setExplorerWidth(FILE_EXPLORER_MIN_WIDTH);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    setExplorerWidth(maxExplorerWidth);
+                  }
+                }}
+                {...explorerResizeHandlers}
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border group-focus-visible:bg-primary/70 group-active:bg-primary/70"
+                />
+              </div>
+            ) : null}
             <WorkspaceExplorerSidebar
               environmentId={environmentId}
               cwd={cwd}
@@ -1300,11 +1406,29 @@ export default function FilePreviewPanel({
               threadRef={threadRef}
               pendingSurfaceIds={pendingSurfaceIds ?? EMPTY_PENDING_SURFACE_IDS}
               onOpenFile={onOpenFile}
+              fileExplorerPosition={fileExplorerPosition}
+              onFileExplorerPositionChange={(position) => {
+                updateClientSettings({ fileExplorerPosition: position });
+              }}
               {...(onCloseFile && onCloseAllFiles ? { onCloseFile, onCloseAllFiles } : {})}
             />
           </aside>
         ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * Workspace files use their own shared highlighter pool so changing the editor
+ * to VS Code themes cannot mutate the app-wide pool used by chat code blocks
+ * and the diff panel. The module-scoped provider also gives each popout realm
+ * an independent lifecycle while sharing one pool across file surfaces there.
+ */
+export default function FilePreviewPanel(props: FilePreviewPanelProps) {
+  return (
+    <WorkspaceEditorWorkerPoolProvider>
+      <FilePreviewPanelContent {...props} />
+    </WorkspaceEditorWorkerPoolProvider>
   );
 }
