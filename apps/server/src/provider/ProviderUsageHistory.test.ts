@@ -348,6 +348,17 @@ layer("ProviderUsageHistory", (it) => {
             weekly: { usedPercent: 5, windowMinutes: 10_080, resetsAt: null },
             updatedAt: base,
           }),
+          snapshot({
+            provider: "grok",
+            session: null,
+            weekly: {
+              label: "Monthly allowance",
+              usedPercent: 25,
+              windowMinutes: 44_640,
+              resetsAt: null,
+            },
+            updatedAt: base,
+          }),
         ),
       );
       yield* history.record(
@@ -366,6 +377,7 @@ layer("ProviderUsageHistory", (it) => {
 
       const claudeDays = result.days.filter((day) => day.provider === "claude");
       const codexDays = result.days.filter((day) => day.provider === "codex");
+      const grokDays = result.days.filter((day) => day.provider === "grok");
       // Both samples land within a minute, so at most two local days are hit
       // (midnight edge); peak must surface the 80% sample either way.
       assert.ok(claudeDays.length >= 1 && claudeDays.length <= 2);
@@ -376,6 +388,8 @@ layer("ProviderUsageHistory", (it) => {
       );
       assert.strictEqual(codexDays.length, 1);
       assert.strictEqual(codexDays[0]!.peakSessionPercent, 15);
+      assert.strictEqual(grokDays.length, 1);
+      assert.strictEqual(grokDays[0]!.peakWeeklyPercent, 25);
     }),
   );
 

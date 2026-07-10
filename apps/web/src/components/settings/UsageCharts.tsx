@@ -5,7 +5,7 @@
  * responsive SVGs that follow the project's dataviz conventions: 2px lines,
  * ~14%-opacity area fills, hairline recessive gridlines, a crosshair +
  * single tooltip listing every series, and identity carried by the fixed
- * per-subscription hue (orange = Claude, sky = Codex) rather than by text.
+ * per-subscription hue rather than by text.
  *
  * Geometry is computed in real pixels from a measured container width so
  * text and circular markers never distort (as they would under a stretched
@@ -22,13 +22,14 @@ import { cn } from "../../lib/utils";
 export const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "claude",
   "codex",
+  "grok",
   "opencode",
 ];
 
 type TokenValues = Record<ProviderTokenActivityKind, number>;
 
 function emptyTokenValues(): TokenValues {
-  return { claude: 0, codex: 0, opencode: 0 };
+  return { claude: 0, codex: 0, grok: 0, opencode: 0 };
 }
 
 function sumValues(values: TokenValues): number {

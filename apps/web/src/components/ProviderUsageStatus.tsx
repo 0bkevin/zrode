@@ -34,7 +34,7 @@ import { Skeleton } from "./ui/skeleton";
 /** Providers whose rate-limit windows zrode can meter server-side. */
 type UsageProviderKind = ProviderUsageSnapshot["provider"];
 /** Providers zrode integrates but whose vendors expose no usage API yet. */
-type UnmeteredProviderKind = "cursor" | "devin" | "grok" | "opencode";
+type UnmeteredProviderKind = "cursor" | "devin" | "opencode";
 type AnyUsageProviderKind = UsageProviderKind | UnmeteredProviderKind;
 
 /** An enabled provider without a usage API that is usable on this machine. */
@@ -61,7 +61,7 @@ const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   codex: "https://chatgpt.com/codex/settings/usage",
   cursor: "https://cursor.com/dashboard",
   devin: "https://app.devin.ai",
-  grok: "https://accounts.x.ai",
+  grok: "https://grok.com/?_s=usage",
   opencode: "https://opencode.ai",
 };
 
@@ -426,12 +426,20 @@ function ProviderUsagePopoverContent({
 
       {snapshot.status === "ok" && hasWindows ? (
         <>
-          <UsageWindowRow title="Session" window={snapshot.session} nowMs={nowMs} />
-          <UsageWindowRow title="Weekly (all models)" window={snapshot.weekly} nowMs={nowMs} />
+          <UsageWindowRow
+            title={snapshot.session?.label ?? "Session"}
+            window={snapshot.session}
+            nowMs={nowMs}
+          />
+          <UsageWindowRow
+            title={snapshot.weekly?.label ?? "Weekly (all models)"}
+            window={snapshot.weekly}
+            nowMs={nowMs}
+          />
           {snapshot.extraLimits.length > 0 ? (
             <div className="flex flex-col gap-1.5 border-t pt-1.5">
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/50">
-                Model limits
+                {snapshot.provider === "grok" ? "Usage breakdown" : "Model limits"}
               </div>
               {snapshot.extraLimits.map((limit) => (
                 <ExtraLimitRow key={limit.label} limit={limit} nowMs={nowMs} />
@@ -448,9 +456,12 @@ function ProviderUsagePopoverContent({
               </span>
             </div>
           ) : null}
-          {snapshot.credits && (snapshot.credits.hasCredits || snapshot.credits.unlimited) ? (
+          {snapshot.credits &&
+          (snapshot.provider === "grok" ||
+            snapshot.credits.hasCredits ||
+            snapshot.credits.unlimited) ? (
             <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[11px] text-muted-foreground">
-              <span>Credits</span>
+              <span>{snapshot.provider === "grok" ? "Extra Usage Credits" : "Credits"}</span>
               <span className="tabular-nums text-muted-foreground/70">
                 {snapshot.credits.unlimited
                   ? "Unlimited"
@@ -537,7 +548,7 @@ function useUnmeteredProviders(): ReadonlyArray<UnmeteredProvider> {
     const byKind = new Map<UnmeteredProviderKind, UnmeteredProvider>();
     for (const provider of providers) {
       const kind = DRIVER_TO_USAGE_KIND[provider.driver];
-      if (kind !== "cursor" && kind !== "devin" && kind !== "grok" && kind !== "opencode") {
+      if (kind !== "cursor" && kind !== "devin" && kind !== "opencode") {
         continue;
       }
       if (byKind.has(kind) || !isUnmeteredProviderEligible(provider)) {
@@ -563,14 +574,18 @@ function useMeteredProviderContext(): MeteredProviderContext {
     const keyParts: Array<unknown> = [];
     for (const provider of providers) {
       const kind = DRIVER_TO_USAGE_KIND[provider.driver];
-      if (kind !== "claude" && kind !== "codex") {
+      if (kind !== "claude" && kind !== "codex" && kind !== "grok") {
         continue;
       }
       if (!isDefaultProviderInstance(provider) || seen.has(kind)) {
         continue;
       }
       const providerSettings =
-        kind === "claude" ? settings.providers.claudeAgent : settings.providers.codex;
+        kind === "claude"
+          ? settings.providers.claudeAgent
+          : kind === "codex"
+            ? settings.providers.codex
+            : settings.providers.grok;
       keyParts.push([
         kind,
         provider.instanceId,
@@ -590,7 +605,12 @@ function useMeteredProviderContext(): MeteredProviderContext {
     }
     keyParts.sort((left, right) => String(left).localeCompare(String(right)));
     return { providers: result, key: JSON.stringify(keyParts) };
-  }, [providers, settings.providers.claudeAgent, settings.providers.codex]);
+  }, [
+    providers,
+    settings.providers.claudeAgent,
+    settings.providers.codex,
+    settings.providers.grok,
+  ]);
 }
 
 function UnmeteredProviderPill({ provider }: { provider: UnmeteredProvider }) {
@@ -863,8 +883,8 @@ function ProviderUsagePill({
  * (one pill: icon + micro-bar + % used of the most constrained window),
  * switchable via the popover's provider selector. Outside a thread it shows
  * a general overview — one compact pill per active subscription, including
- * icon-only tiles for providers without a usage API (Cursor, Grok,
- * OpenCode) that link out to the vendor's dashboard. The popover details
+ * icon-only tiles for providers without a usage API (Cursor and OpenCode)
+ * that link out to the vendor's dashboard. The popover details
  * session/weekly windows, model-scoped limits, credits, and Codex
  * rate-limit resets.
  */
@@ -978,7 +998,7 @@ export function ProviderUsageStatus() {
 
   if (data === null) {
     const pinnedMetered =
-      threadProvider === "claude" || threadProvider === "codex"
+      threadProvider === "claude" || threadProvider === "codex" || threadProvider === "grok"
         ? meteredProviders.includes(threadProvider)
           ? threadProvider
           : undefined

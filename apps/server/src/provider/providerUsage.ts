@@ -2,7 +2,7 @@
  * Provider subscription usage (rate-limit windows).
  *
  * Fetches how much of the session (~5h) and weekly (~7d) rate-limit windows
- * remain for the locally-authenticated Claude Code and Codex accounts:
+ * remain for the locally-authenticated Claude Code, Codex, and Grok accounts:
  *
  * - Claude: `GET https://api.anthropic.com/api/oauth/usage` using the OAuth
  *   access token Claude Code stores in `~/.claude/.credentials.json` (or the
@@ -14,6 +14,12 @@
  *   CLI itself uses — plus the ChatGPT backend's rate-limit reset-credit
  *   endpoints (the "Reset now" feature) authenticated via
  *   `$CODEX_HOME/auth.json`.
+ * - Grok: `GET /v1/billing?format=credits` on the Grok CLI chat proxy using the token in
+ *   `$GROK_HOME/auth.json`. The endpoint reports either Grok Build's legacy
+ *   monthly allowance or the unified weekly pool used by grok.com, including
+ *   per-product utilization, reset boundary, and Extra Usage Credits. Expired
+ *   credentials are refreshed by the installed CLI itself before the request,
+ *   preserving Grok's OIDC and external-auth behavior.
  *
  * Results are cached in module state with a short TTL and coalesced across
  * concurrent callers, so any number of connected clients polling the usage
@@ -21,7 +27,8 @@
  * HTTP round-trip per endpoint) per TTL window.
  *
  * Usage currently targets the legacy singleton provider settings
- * (`settings.providers.codex` / `settings.providers.claudeAgent`); custom
+ * (`settings.providers.codex` / `settings.providers.claudeAgent` /
+ * `settings.providers.grok`); custom
  * `providerInstances` with separate accounts are not yet reflected here.
  *
  * Per-provider failures never fail the RPC; they fold into the snapshot's
@@ -32,6 +39,7 @@
 import type {
   ClaudeSettings,
   CodexSettings,
+  GrokSettings,
   ProviderUsageExtraLimit,
   ProviderUsageProviderKind,
   ProviderUsageResetCredits,
@@ -42,6 +50,7 @@ import type {
   ServerProviderUsageResult,
   ServerSettings,
 } from "@t3tools/contracts";
+import * as NodeOS from "node:os";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as DateTime from "effect/DateTime";
@@ -51,6 +60,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
@@ -79,6 +89,8 @@ const CODEX_APP_SERVER_USAGE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`;
 const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
+const GROK_DEFAULT_API_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+const GROK_AUTH_REFRESH_TIMEOUT = "15 seconds" as const;
 const CLAUDE_USAGE_RATE_LIMIT_MESSAGE =
   "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.";
 
@@ -261,6 +273,7 @@ let usageGeneration = new Map<ProviderUsageProviderKind, number>();
 const PROVIDER_USAGE_KINDS = [
   "claude",
   "codex",
+  "grok",
 ] as const satisfies ReadonlyArray<ProviderUsageProviderKind>;
 
 function providerUsageFetchResult(
@@ -303,6 +316,7 @@ export function usageSettingsKey(settings: ServerSettings): string {
   return JSON.stringify([
     claudeUsageSettingsKey(settings.providers.claudeAgent),
     codexUsageSettingsKey(settings.providers.codex),
+    grokUsageSettingsKey(settings.providers.grok),
   ]);
 }
 
@@ -319,13 +333,28 @@ function codexUsageSettingsKey(settings: CodexSettings): string {
   ]);
 }
 
+function grokUsageSettingsKey(settings: GrokSettings): string {
+  return JSON.stringify([
+    settings.enabled,
+    settings.binaryPath,
+    process.env.GROK_HOME?.trim() ?? "",
+    process.env.GROK_CLI_CHAT_PROXY_BASE_URL?.trim() ?? "",
+    Boolean(process.env.GROK_CODE_XAI_API_KEY?.trim()),
+  ]);
+}
+
 export function providerUsageSettingsKey(
   provider: ProviderUsageProviderKind,
   settings: ServerSettings,
 ): string {
-  return provider === "claude"
-    ? claudeUsageSettingsKey(settings.providers.claudeAgent)
-    : codexUsageSettingsKey(settings.providers.codex);
+  switch (provider) {
+    case "claude":
+      return claudeUsageSettingsKey(settings.providers.claudeAgent);
+    case "codex":
+      return codexUsageSettingsKey(settings.providers.codex);
+    case "grok":
+      return grokUsageSettingsKey(settings.providers.grok);
+  }
 }
 
 // ── Claude ───────────────────────────────────────────────────────────
@@ -679,7 +708,416 @@ export const fetchClaudeUsage = Effect.fn("fetchClaudeUsage")(function* (setting
   return (yield* fetchClaudeUsageResult(settings)).snapshot;
 });
 
-// ── Codex ────────────────────────────────────────────────────────────
+// ── Grok ────────────────────────────────────────────────────────────
+
+// Grok reports one shared allowance rather than the session/weekly pair
+// exposed by Claude and Codex. Older Grok Build accounts use a monthly pool;
+// unified consumer subscriptions use a weekly pool across Grok products.
+export interface GrokAuthCredentials {
+  readonly accessToken: string;
+  readonly expiresAt: number | null;
+  readonly accountLabel: string | null;
+  readonly source: "api-key" | "auth-file";
+}
+
+interface GrokAuthEntry {
+  readonly key?: unknown;
+  readonly expires_at?: unknown;
+  readonly create_time?: unknown;
+  readonly email?: unknown;
+}
+
+export function parseGrokAuthCredentials(raw: string): GrokAuthCredentials | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const candidates = Object.values(parsed as Record<string, unknown>)
+      .flatMap((entry): Array<{ credentials: GrokAuthCredentials; createdAt: number }> => {
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return [];
+        const auth = entry as GrokAuthEntry;
+        if (typeof auth.key !== "string" || auth.key.trim().length === 0) return [];
+        return [
+          {
+            credentials: {
+              accessToken: auth.key,
+              expiresAt: normalizeResetsAt(auth.expires_at),
+              accountLabel:
+                typeof auth.email === "string" && auth.email.trim().length > 0
+                  ? auth.email.trim()
+                  : null,
+              source: "auth-file",
+            },
+            createdAt: normalizeResetsAt(auth.create_time) ?? 0,
+          },
+        ];
+      })
+      .toSorted((left, right) => right.createdAt - left.createdAt);
+    return candidates[0]?.credentials ?? null;
+  } catch {
+    return null;
+  }
+}
+
+interface GrokBillingPayload {
+  readonly config?: {
+    readonly creditUsagePercent?: unknown;
+    readonly currentPeriod?: {
+      readonly type?: unknown;
+      readonly start?: unknown;
+      readonly end?: unknown;
+    } | null;
+    readonly productUsage?: ReadonlyArray<{
+      readonly product?: unknown;
+      readonly usagePercent?: unknown;
+    }> | null;
+    readonly prepaidBalance?: { readonly val?: unknown } | null;
+    readonly onDemandUsed?: { readonly val?: unknown } | null;
+    readonly monthlyLimit?: { readonly val?: unknown } | null;
+    readonly used?: { readonly val?: unknown } | null;
+    readonly onDemandCap?: { readonly val?: unknown } | null;
+    readonly billingPeriodStart?: unknown;
+    readonly billingPeriodEnd?: unknown;
+  } | null;
+}
+
+function nonNegativeFiniteNumber(raw: unknown): number | null {
+  const value = typeof raw === "string" && raw.trim().length > 0 ? Number(raw) : raw;
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : null;
+}
+
+function normalizeGrokTimestamp(raw: unknown): number | null {
+  if (raw !== null && typeof raw === "object") {
+    const timestamp = raw as { readonly seconds?: unknown; readonly nanos?: unknown };
+    const seconds = nonNegativeFiniteNumber(timestamp.seconds);
+    if (seconds !== null) {
+      const nanos = nonNegativeFiniteNumber(timestamp.nanos) ?? 0;
+      return seconds * 1000 + Math.floor(nanos / 1_000_000);
+    }
+  }
+  return normalizeResetsAt(raw);
+}
+
+function grokUsagePeriodLabel(raw: unknown): string {
+  if (raw === 2 || (typeof raw === "string" && raw.toLowerCase().includes("weekly"))) {
+    return "Weekly allowance";
+  }
+  if (raw === 1 || (typeof raw === "string" && raw.toLowerCase().includes("monthly"))) {
+    return "Monthly allowance";
+  }
+  return "Usage allowance";
+}
+
+function grokProductLabel(raw: unknown): string | null {
+  const normalized = typeof raw === "string" ? raw.toUpperCase().replaceAll(/[^A-Z0-9]/g, "") : raw;
+  switch (normalized) {
+    case 1:
+    case "API":
+    case "PRODUCTAPI":
+      return "API";
+    case 2:
+    case "GROKBUILD":
+    case "PRODUCTGROKBUILD":
+      return "Grok Build";
+    case 3:
+    case "GROKPLUGINS":
+    case "PRODUCTGROKPLUGINS":
+      return "Plugins";
+    case 4:
+    case "GROKCHAT":
+    case "PRODUCTGROKCHAT":
+      return "Chat";
+    case 5:
+    case "GROKIMAGINE":
+    case "PRODUCTGROKIMAGINE":
+      return "Imagine";
+    case 6:
+    case "GROKVOICE":
+    case "PRODUCTGROKVOICE":
+      return "Voice";
+    default:
+      return null;
+  }
+}
+
+function formatUsdCents(cents: number): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
+}
+
+export function parseGrokBilling(payload: unknown): {
+  readonly window: ProviderUsageWindow;
+  readonly extraLimits: ReadonlyArray<ProviderUsageExtraLimit>;
+  readonly extraUsage: ProviderUsageSnapshot["extraUsage"];
+  readonly credits: ProviderUsageSnapshot["credits"];
+} | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const config = (payload as GrokBillingPayload).config;
+  if (!config) return null;
+  const unifiedPercent = nonNegativeFiniteNumber(config.creditUsagePercent);
+  if (unifiedPercent !== null) {
+    const startsAt = normalizeGrokTimestamp(config.currentPeriod?.start);
+    const resetsAt = normalizeGrokTimestamp(config.currentPeriod?.end);
+    const windowMinutes =
+      startsAt !== null && resetsAt !== null && resetsAt > startsAt
+        ? Math.round((resetsAt - startsAt) / 60_000)
+        : null;
+    const window = {
+      label: grokUsagePeriodLabel(config.currentPeriod?.type),
+      usedPercent: clampPercent(unifiedPercent),
+      windowMinutes,
+      resetsAt,
+    } satisfies ProviderUsageWindow;
+    const seenLabels = new Map<string, number>();
+    const extraLimits = (Array.isArray(config.productUsage) ? config.productUsage : []).flatMap(
+      (product): Array<ProviderUsageExtraLimit> => {
+        const label = grokProductLabel(product.product);
+        const usedPercent = nonNegativeFiniteNumber(product.usagePercent);
+        if (label === null || usedPercent === null) return [];
+        return [
+          {
+            label: uniquifyLimitLabel(label, seenLabels),
+            session: null,
+            weekly: {
+              usedPercent: clampPercent(usedPercent),
+              windowMinutes,
+              resetsAt,
+            },
+          },
+        ];
+      },
+    );
+    const prepaidBalance = nonNegativeFiniteNumber(config.prepaidBalance?.val);
+    const onDemandCap = nonNegativeFiniteNumber(config.onDemandCap?.val) ?? 0;
+    const onDemandUsed = nonNegativeFiniteNumber(config.onDemandUsed?.val) ?? 0;
+    return {
+      window,
+      extraLimits,
+      extraUsage:
+        onDemandCap > 0
+          ? {
+              enabled: true,
+              utilization: clampPercent((onDemandUsed / onDemandCap) * 100),
+            }
+          : null,
+      credits:
+        prepaidBalance !== null
+          ? {
+              balance: formatUsdCents(prepaidBalance),
+              hasCredits: prepaidBalance > 0,
+              unlimited: false,
+            }
+          : null,
+    };
+  }
+  const limit = nonNegativeFiniteNumber(config.monthlyLimit?.val);
+  const used = nonNegativeFiniteNumber(config.used?.val);
+  if (limit === null || limit <= 0 || used === null) return null;
+  const startsAt = normalizeGrokTimestamp(config.billingPeriodStart);
+  const resetsAt = normalizeGrokTimestamp(config.billingPeriodEnd);
+  const windowMinutes =
+    startsAt !== null && resetsAt !== null && resetsAt > startsAt
+      ? Math.round((resetsAt - startsAt) / 60_000)
+      : null;
+  const onDemandCap = nonNegativeFiniteNumber(config.onDemandCap?.val) ?? 0;
+  const onDemandUsed =
+    nonNegativeFiniteNumber(config.onDemandUsed?.val) ?? Math.max(0, used - limit);
+  return {
+    window: {
+      label: "Monthly allowance",
+      usedPercent: clampPercent((used / limit) * 100),
+      windowMinutes,
+      resetsAt,
+    },
+    extraLimits: [],
+    extraUsage:
+      onDemandCap > 0
+        ? {
+            enabled: true,
+            utilization: clampPercent((onDemandUsed / onDemandCap) * 100),
+          }
+        : null,
+    credits: null,
+  };
+}
+
+const resolveGrokHomePath = Effect.fn("resolveGrokHomePath")(function* () {
+  const configured = process.env.GROK_HOME?.trim();
+  if (configured && configured.length > 0) return configured;
+  const path = yield* Path.Path;
+  return path.join(NodeOS.homedir(), ".grok");
+});
+
+function grokBillingUrl(): string {
+  const configured = process.env.GROK_CLI_CHAT_PROXY_BASE_URL?.trim();
+  const base = configured && configured.length > 0 ? configured : GROK_DEFAULT_API_BASE_URL;
+  // `format=credits` selects the unified weekly usage pool also shown on
+  // grok.com. The unqualified legacy route reports only Grok Build's old
+  // monthly allowance, which is a different denominator and can diverge
+  // significantly from the consumer usage page.
+  return `${base.replace(/\/+$/, "")}/billing?format=credits`;
+}
+
+const readGrokAuthCredentials = Effect.fn("readGrokAuthCredentials")(function* () {
+  const apiKey = process.env.GROK_CODE_XAI_API_KEY?.trim();
+  if (apiKey && apiKey.length > 0) {
+    return {
+      accessToken: apiKey,
+      expiresAt: null,
+      accountLabel: "API key",
+      source: "api-key",
+    } satisfies GrokAuthCredentials;
+  }
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* resolveGrokHomePath();
+  return yield* fileSystem.readFileString(path.join(home, "auth.json")).pipe(
+    Effect.map(parseGrokAuthCredentials),
+    Effect.orElseSucceed(() => null),
+  );
+});
+
+const refreshGrokAuthCredentials = Effect.fn("refreshGrokAuthCredentials")(function* (
+  settings: GrokSettings,
+) {
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const result = yield* processRunner
+    .run({
+      command: settings.binaryPath || "grok",
+      args: ["models"],
+      timeout: GROK_AUTH_REFRESH_TIMEOUT,
+      maxOutputBytes: 64 * 1024,
+      outputMode: "truncate",
+      env: process.env,
+    })
+    .pipe(Effect.orElseSucceed(() => null));
+  return result !== null && !result.timedOut && result.code === 0;
+});
+
+const resolveGrokAuthCredentials = Effect.fn("resolveGrokAuthCredentials")(function* (
+  settings: GrokSettings,
+) {
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const credentials = yield* readGrokAuthCredentials();
+  if (
+    credentials === null ||
+    credentials.source === "api-key" ||
+    credentials.expiresAt === null ||
+    credentials.expiresAt > now + 60_000
+  ) {
+    return credentials;
+  }
+  yield* refreshGrokAuthCredentials(settings);
+  const refreshed = yield* readGrokAuthCredentials();
+  if (
+    refreshed?.expiresAt !== null &&
+    refreshed?.expiresAt !== undefined &&
+    refreshed.expiresAt <= now
+  ) {
+    return null;
+  }
+  return refreshed;
+});
+
+const fetchGrokBillingResponse = Effect.fn("fetchGrokBillingResponse")(function* (
+  credentials: GrokAuthCredentials,
+) {
+  const request = HttpClientRequest.get(grokBillingUrl()).pipe(
+    HttpClientRequest.setHeaders({
+      Authorization: `Bearer ${credentials.accessToken}`,
+      Accept: "application/json",
+    }),
+  );
+  return yield* fetchJsonWithTimeout(request);
+});
+
+const fetchGrokUsageResult = Effect.fn("fetchGrokUsageResult")(function* (settings: GrokSettings) {
+  const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (!settings.enabled) {
+    return providerUsageFetchResult(
+      usageSnapshot("grok", "unavailable", "Grok is disabled in Zrode settings.", startedAt),
+    );
+  }
+  let credentials = yield* resolveGrokAuthCredentials(settings);
+  if (credentials === null) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "grok",
+        "unauthenticated",
+        "No Grok CLI credentials found. Sign in with `grok login` first.",
+        startedAt,
+      ),
+    );
+  }
+  let response = yield* fetchGrokBillingResponse(credentials);
+  if (
+    response !== null &&
+    (response.status === 401 || response.status === 403) &&
+    credentials.source === "auth-file"
+  ) {
+    yield* refreshGrokAuthCredentials(settings);
+    const refreshed = yield* readGrokAuthCredentials();
+    if (refreshed !== null) {
+      credentials = refreshed;
+      response = yield* fetchGrokBillingResponse(refreshed);
+    }
+  }
+  const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (response === null) {
+    return providerUsageFetchResult(
+      usageSnapshot("grok", "error", "Failed to reach the Grok usage API.", updatedAt),
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "grok",
+        "unauthenticated",
+        "The Grok CLI session has expired. Run `grok login` and try again.",
+        updatedAt,
+      ),
+    );
+  }
+  if (response.status === 429 || (response.status === 503 && response.retryAfterMs !== null)) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "grok",
+        "error",
+        "Grok usage is temporarily rate limited — data will refresh automatically.",
+        updatedAt,
+      ),
+      { mainBackoffTtlMs: rateLimitTtlMs(response.retryAfterMs) },
+    );
+  }
+  const billing = parseGrokBilling(response.payload);
+  if (response.status < 200 || response.status >= 300 || billing === null) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "grok",
+        "error",
+        `Grok usage API returned an unexpected response (HTTP ${response.status}).`,
+        updatedAt,
+      ),
+    );
+  }
+  return providerUsageFetchResult({
+    provider: "grok",
+    status: "ok",
+    session: null,
+    weekly: billing.window,
+    extraLimits: billing.extraLimits,
+    planLabel: credentials.accountLabel ?? "Grok Build",
+    extraUsage: billing.extraUsage,
+    credits: billing.credits,
+    resetCredits: null,
+    message: null,
+    updatedAt,
+  } satisfies ProviderUsageSnapshot);
+});
+
+export const fetchGrokUsage = Effect.fn("fetchGrokUsage")(function* (settings: GrokSettings) {
+  return (yield* fetchGrokUsageResult(settings)).snapshot;
+});
+
+// ── Codex ────────────────────────────────────────────────────────────────
 
 /** Auth lives in the shadow home when configured; matches session resolution. */
 const resolveCodexAuthHomePath = Effect.fn("resolveCodexAuthHomePath")(function* (
@@ -1341,6 +1779,11 @@ export const getProviderUsage = Effect.fn("getProviderUsage")(function* (setting
         codexUsageSettingsKey(settings.providers.codex),
         foldProviderDefects("codex", fetchCodexUsageResult(settings.providers.codex)),
       ),
+      getProviderUsageSnapshot(
+        "grok",
+        grokUsageSettingsKey(settings.providers.grok),
+        foldProviderDefects("grok", fetchGrokUsageResult(settings.providers.grok)),
+      ),
     ],
     { concurrency: "unbounded" },
   );
@@ -1356,6 +1799,7 @@ export const providerUsageUnavailable = Effect.fn("providerUsageUnavailable")(fu
     usage: [
       usageSnapshot("claude", "error", message, updatedAt),
       usageSnapshot("codex", "error", message, updatedAt),
+      usageSnapshot("grok", "error", message, updatedAt),
     ],
   } satisfies ServerProviderUsageResult;
 });

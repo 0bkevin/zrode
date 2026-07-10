@@ -20,6 +20,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import {
   __testing,
   consumeCodexResetCredit,
+  fetchGrokUsage,
   getProviderUsage,
   invalidateProviderUsageCache,
   mapCodexExtraLimits,
@@ -28,6 +29,8 @@ import {
   parseClaudeOAuthCredentials,
   parseCodexBackendAuth,
   parseCodexResetCredits,
+  parseGrokAuthCredentials,
+  parseGrokBilling,
   parseRetryAfterMs,
   providerUsageSettingsKey,
   resetProviderUsageStateForTests,
@@ -48,6 +51,7 @@ const DISABLED_SETTINGS: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS.providers,
     claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+    grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
   },
 };
 
@@ -144,6 +148,203 @@ describe("parseClaudeOAuthCredentials", () => {
       parseClaudeOAuthCredentials(JSON.stringify({ claudeAiOauth: { accessToken: "" } })),
     ).toBeNull();
     expect(parseClaudeOAuthCredentials("not json")).toBeNull();
+  });
+});
+
+describe("parseGrokAuthCredentials", () => {
+  it("selects the newest usable Grok CLI credential", () => {
+    expect(
+      parseGrokAuthCredentials(
+        JSON.stringify({
+          older: {
+            key: "older-token",
+            email: "old@example.com",
+            create_time: "2026-06-01T00:00:00Z",
+          },
+          current: {
+            key: "current-token",
+            email: "current@example.com",
+            create_time: "2026-07-01T00:00:00Z",
+            expires_at: "2026-07-10T18:00:00Z",
+          },
+        }),
+      ),
+    ).toEqual({
+      accessToken: "current-token",
+      expiresAt: Date.parse("2026-07-10T18:00:00Z"),
+      accountLabel: "current@example.com",
+      source: "auth-file",
+    });
+  });
+
+  it("rejects malformed Grok auth files", () => {
+    expect(parseGrokAuthCredentials("not json")).toBeNull();
+    expect(parseGrokAuthCredentials(JSON.stringify({ account: { key: "" } }))).toBeNull();
+  });
+});
+
+describe("parseGrokBilling", () => {
+  it("maps Grok Build credits into a monthly allowance window", () => {
+    const parsed = parseGrokBilling({
+      config: {
+        monthlyLimit: { val: 4_000 },
+        used: { val: 1_000 },
+        onDemandCap: { val: 0 },
+        billingPeriodStart: "2026-07-01T00:00:00Z",
+        billingPeriodEnd: "2026-08-01T00:00:00Z",
+      },
+    });
+    expect(parsed).toEqual({
+      window: {
+        label: "Monthly allowance",
+        usedPercent: 25,
+        windowMinutes: 44_640,
+        resetsAt: Date.parse("2026-08-01T00:00:00Z"),
+      },
+      extraLimits: [],
+      extraUsage: null,
+      credits: null,
+    });
+  });
+
+  it("maps the unified weekly pool, product breakdown, and prepaid credits", () => {
+    const start = Date.parse("2026-07-06T12:00:00Z") / 1_000;
+    const end = Date.parse("2026-07-13T12:00:00Z") / 1_000;
+    const parsed = parseGrokBilling({
+      config: {
+        creditUsagePercent: 42.5,
+        currentPeriod: {
+          type: "USAGE_PERIOD_TYPE_WEEKLY",
+          start: { seconds: String(start) },
+          end: { seconds: String(end) },
+        },
+        productUsage: [
+          { product: "GrokBuild", usagePercent: 25 },
+          { product: "GrokChat", usagePercent: 10 },
+        ],
+        prepaidBalance: { val: "1234" },
+        onDemandCap: { val: "1000" },
+        onDemandUsed: { val: "250" },
+      },
+    });
+
+    expect(parsed).toEqual({
+      window: {
+        label: "Weekly allowance",
+        usedPercent: 42.5,
+        windowMinutes: WEEKLY_WINDOW_MINUTES,
+        resetsAt: Date.parse("2026-07-13T12:00:00Z"),
+      },
+      extraLimits: [
+        {
+          label: "Grok Build",
+          session: null,
+          weekly: {
+            usedPercent: 25,
+            windowMinutes: WEEKLY_WINDOW_MINUTES,
+            resetsAt: Date.parse("2026-07-13T12:00:00Z"),
+          },
+        },
+        {
+          label: "Chat",
+          session: null,
+          weekly: {
+            usedPercent: 10,
+            windowMinutes: WEEKLY_WINDOW_MINUTES,
+            resetsAt: Date.parse("2026-07-13T12:00:00Z"),
+          },
+        },
+      ],
+      extraUsage: { enabled: true, utilization: 25 },
+      credits: { balance: "$12.34", hasCredits: true, unlimited: false },
+    });
+  });
+
+  it("reports utilization above the included allowance against on-demand capacity", () => {
+    const parsed = parseGrokBilling({
+      config: {
+        monthlyLimit: { val: "4000" },
+        used: { val: "4500" },
+        onDemandCap: { val: "2000" },
+      },
+    });
+    expect(parsed?.window.usedPercent).toBe(100);
+    expect(parsed?.extraUsage).toEqual({ enabled: true, utilization: 25 });
+  });
+
+  it("rejects responses without a positive allowance", () => {
+    expect(parseGrokBilling({ config: { monthlyLimit: { val: 0 }, used: { val: 0 } } })).toBeNull();
+    expect(parseGrokBilling({})).toBeNull();
+  });
+});
+
+describe("fetchGrokUsage", () => {
+  effectIt.live("reads the CLI credential and fetches the Grok usage allowance", () => {
+    let authorization: string | undefined;
+    let requestUrl: string | undefined;
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        authorization = request.headers.authorization;
+        requestUrl = request.url;
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              config: {
+                monthlyLimit: { val: 4_000 },
+                used: { val: 1_000 },
+                onDemandCap: { val: 0 },
+                billingPeriodStart: "2026-07-01T00:00:00Z",
+                billingPeriodEnd: "2026-08-01T00:00:00Z",
+              },
+            }),
+          ),
+        );
+      }),
+    );
+    const processRunnerLayer = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({
+        run: () => Effect.die("Grok credential refresh should not run for a valid token"),
+      }),
+    );
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "zrode-grok-usage-" });
+        yield* fileSystem.writeFileString(
+          path.join(home, "auth.json"),
+          '{"account":{"key":"grok-token","email":"person@example.com","expires_at":"2099-01-01T00:00:00Z"}}',
+        );
+        const previousHome = process.env.GROK_HOME;
+        const previousApiKey = process.env.GROK_CODE_XAI_API_KEY;
+        process.env.GROK_HOME = home;
+        delete process.env.GROK_CODE_XAI_API_KEY;
+        const result = yield* fetchGrokUsage({
+          ...DEFAULT_SERVER_SETTINGS.providers.grok,
+          enabled: true,
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (previousHome === undefined) delete process.env.GROK_HOME;
+              else process.env.GROK_HOME = previousHome;
+              if (previousApiKey === undefined) delete process.env.GROK_CODE_XAI_API_KEY;
+              else process.env.GROK_CODE_XAI_API_KEY = previousApiKey;
+            }),
+          ),
+        );
+
+        expect(authorization).toBe("Bearer grok-token");
+        expect(requestUrl).toBe("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+        expect(result.status).toBe("ok");
+        expect(result.planLabel).toBe("person@example.com");
+        expect(result.weekly?.label).toBe("Monthly allowance");
+        expect(result.weekly?.usedPercent).toBe(25);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, processRunnerLayer, httpLayer)));
   });
 });
 
@@ -473,6 +674,7 @@ describe("getProviderUsage caching", () => {
       expect(result.usage.map((snapshot) => snapshot.status)).toEqual([
         "unavailable",
         "unavailable",
+        "unavailable",
       ]);
     }).pipe(Effect.provide(TestLayer)),
   );
@@ -483,6 +685,7 @@ describe("getProviderUsage caching", () => {
       const second = yield* getProviderUsage(DISABLED_SETTINGS);
       expect(second.usage[0]).toBe(first.usage[0]);
       expect(second.usage[1]).toBe(first.usage[1]);
+      expect(second.usage[2]).toBe(first.usage[2]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -493,6 +696,7 @@ describe("getProviderUsage caching", () => {
       const second = yield* getProviderUsage(DISABLED_SETTINGS);
       expect(second.usage[0]).not.toBe(first.usage[0]);
       expect(second.usage[1]).not.toBe(first.usage[1]);
+      expect(second.usage[2]).not.toBe(first.usage[2]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -510,6 +714,8 @@ describe("getProviderUsage caching", () => {
       expect(second.usage[1]).toBe(first.usage[1]);
       expect(third.usage[0]).toBe(first.usage[0]);
       expect(third.usage[1]).toBe(first.usage[1]);
+      expect(second.usage[2]).toBe(first.usage[2]);
+      expect(third.usage[2]).toBe(first.usage[2]);
     }).pipe(Effect.provide(TestLayer)),
   );
 

@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 // surfaced in the client status UI as "session" (~5h) and "weekly" (~7d)
 // meters.
 
-export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex"]);
+export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex", "grok"]);
 export type ProviderUsageProviderKind = typeof ProviderUsageProviderKind.Type;
 
 export const ProviderUsageStatus = Schema.Literals([
@@ -20,6 +20,8 @@ export const ProviderUsageStatus = Schema.Literals([
 export type ProviderUsageStatus = typeof ProviderUsageStatus.Type;
 
 export const ProviderUsageWindow = Schema.Struct({
+  /** Provider-specific display label when the window is not a session/weekly bucket. */
+  label: Schema.optional(Schema.String),
   /** 0–100. Percentage of the window's quota already consumed. */
   usedPercent: Schema.Number,
   /** Window length in minutes when the provider reports it (300 = 5h, 10080 = 7d). */
@@ -122,14 +124,11 @@ export const ProviderUsageHistoryDay = Schema.Struct({
 export type ProviderUsageHistoryDay = typeof ProviderUsageHistoryDay.Type;
 
 /**
- * Providers whose per-message token usage zrode can backfill from local
- * session logs on disk. A superset of the metered (live-usage) providers:
- * Claude Code transcripts, Codex rollouts, and OpenCode's message store all
- * record per-message token counts, so their history reaches back before zrode
- * started sampling. (Cursor and Grok keep no local token usage — only code
- * stats / a system-prompt size — so they are absent here by design.)
+ * Providers that can appear in the usage-history UI. Claude Code, Codex, and
+ * OpenCode have backfillable token activity; Grok contributes live allowance
+ * samples only because its local sessions do not persist per-message tokens.
  */
-export const ProviderTokenActivityKind = Schema.Literals(["claude", "codex", "opencode"]);
+export const ProviderTokenActivityKind = Schema.Literals(["claude", "codex", "grok", "opencode"]);
 export type ProviderTokenActivityKind = typeof ProviderTokenActivityKind.Type;
 
 /**

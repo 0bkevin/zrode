@@ -66,6 +66,7 @@ const HISTORY_FETCH_DAYS = 371;
 const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
   claude: "var(--color-orange-600)",
   codex: "var(--color-sky-600)",
+  grok: "var(--color-violet-600)",
   opencode: "var(--color-emerald-600)",
 };
 
@@ -77,17 +78,24 @@ const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
 const PROVIDER_SHARE_HEX: Record<ProviderTokenActivityKind, string> = {
   claude: "#ea580c",
   codex: "#0284c7",
+  grok: "#7c3aed",
   opencode: "#059669",
 };
 
 const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
   claude: "Claude",
   codex: "Codex",
+  grok: "Grok",
   opencode: "OpenCode",
 };
 
 /** Providers with backfillable local token history, in a fixed display order. */
-const HISTORY_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = ["claude", "codex", "opencode"];
+const HISTORY_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
+  "claude",
+  "codex",
+  "grok",
+  "opencode",
+];
 
 function ProviderIcon({
   provider,
@@ -101,6 +109,8 @@ function ProviderIcon({
       return <ClaudeAI className={className} />;
     case "codex":
       return <OpenAI className={className} />;
+    case "grok":
+      return <GrokIcon className={className} />;
     case "opencode":
       return <OpenCodeIcon className={className} />;
   }
@@ -173,12 +183,11 @@ function formatPercent(value: number): string {
 // only hold a constant system-prompt size), so there is nothing to backfill. We
 // still surface them honestly with a link to the vendor's own dashboard.
 
-type UnmeteredKind = "cursor" | "devin" | "grok";
+type UnmeteredKind = "cursor" | "devin";
 
 const UNMETERED_DRIVER_TO_KIND: Readonly<Record<string, UnmeteredKind>> = {
   cursor: "cursor",
   devin: "devin",
-  grok: "grok",
 };
 
 const UNMETERED_META: Record<
@@ -187,7 +196,6 @@ const UNMETERED_META: Record<
 > = {
   cursor: { label: "Cursor", dashboardUrl: "https://cursor.com/dashboard", icon: CursorIcon },
   devin: { label: "Devin", dashboardUrl: "https://app.devin.ai", icon: DevinIcon },
-  grok: { label: "Grok", dashboardUrl: "https://accounts.x.ai", icon: GrokIcon },
 };
 
 function openDashboard(url: string): void {
@@ -1038,7 +1046,7 @@ export function UsageSettingsPanel() {
     [visibleByDay],
   );
 
-  // Enabled Cursor/Grok/Devin subscriptions — shown with a dashboard link
+  // Enabled Cursor/Devin subscriptions — shown with a dashboard link
   // since they expose no local usage to chart.
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const unmeteredSubs = useMemo(() => {
@@ -1177,7 +1185,7 @@ export function UsageSettingsPanel() {
           tokenMode === "cumulative" ? toCumulativeSeries(providerDaily) : providerDaily;
         const providerDayLabels = providerPoints.map((point) => formatDayLabel(point.day));
         const providerTokenChart: ReadonlyArray<ChartSeries> =
-          stats.activeDays > 0
+          stats.totalTokens > 0
             ? [
                 {
                   key: provider,
@@ -1187,23 +1195,26 @@ export function UsageSettingsPanel() {
                 },
               ]
             : [];
-        // Peak session utilization over the range, aligned to the token axis.
-        const sampleByDay = new Map<string, number | null>();
+        // Peak allowance utilization over the range, aligned to the token axis.
+        const sampleByDay = new Map<string, number>();
         for (const sample of historyData?.days ?? []) {
           if (
             sample.provider === provider &&
             sample.day >= calendar.startKey &&
             sample.day <= todayKey
           ) {
-            sampleByDay.set(sample.day, sample.peakSessionPercent);
+            sampleByDay.set(
+              sample.day,
+              Math.max(sample.peakSessionPercent ?? 0, sample.peakWeeklyPercent ?? 0),
+            );
           }
         }
-        const sampledDayCount = [...sampleByDay.values()].filter((value) => value !== null).length;
+        const sampledDayCount = sampleByDay.size;
         const pressureDayLabels = providerDaily.map((point) => formatDayLabel(point.day));
         const pressureSeries: ReadonlyArray<ChartSeries> = [
           {
             key: provider,
-            label: "Peak session",
+            label: "Peak allowance",
             colorVar: PROVIDER_HUE[provider],
             values: providerDaily.map((point) => sampleByDay.get(point.day) ?? 0),
           },
@@ -1468,14 +1479,14 @@ export function UsageSettingsPanel() {
                         Rate-limit pressure
                       </span>
                       <span className="text-[11px] text-muted-foreground/70">
-                        Peak session-window utilization sampled while Zrode was running.
+                        Peak allowance utilization sampled while Zrode was running.
                       </span>
                       <UsageAreaChart
                         dayLabels={pressureDayLabels}
                         series={pressureSeries}
                         formatValue={formatPercent}
                         maxValueOverride={100}
-                        ariaLabel={`${PROVIDER_LABEL[provider]} peak session utilization over time`}
+                        ariaLabel={`${PROVIDER_LABEL[provider]} peak allowance utilization over time`}
                       />
                     </div>
                   ) : null}
