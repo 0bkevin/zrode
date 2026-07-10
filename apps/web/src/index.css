@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+.workspace-file-editor,
+.workspace-file-editor .file-preview-virtualizer,
+.workspace-file-editor .file-preview-virtualizer > div {
+  background-color: var(--workspace-editor-background) !important;
+}
+
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));

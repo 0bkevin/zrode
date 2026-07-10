@@ -96,6 +96,7 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -497,6 +498,7 @@ const buildAppUnderTest = (options?: {
     const workspaceAndProjectServicesLayer = Layer.mergeAll(
       WorkspacePaths.layer,
       workspaceEntriesLayer,
+      WorkspaceContentSearch.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       WorkspaceFileSystem.layer.pipe(
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(workspaceEntriesLayer),
@@ -4463,6 +4465,78 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             .update("export const answer = 42;\n")
             .digest("hex")}:26`,
         ),
+      });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("routes websocket rpc projects.createDirectory and projects.searchText", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-content-search-",
+      });
+      yield* fs.makeDirectory(path.join(workspaceDir, "src"));
+      yield* fs.writeFileString(path.join(workspaceDir, "src", "index.ts"), "😀é needle\n");
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const directory = yield* client[WS_METHODS.projectsCreateDirectory]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+            });
+            const directoryCollision = yield* client[WS_METHODS.projectsCreateDirectory]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+            }).pipe(Effect.result);
+            const searchEvents = yield* client[WS_METHODS.projectsSearchText]({
+              cwd: workspaceDir,
+              query: "needle",
+              isRegex: false,
+              matchCase: true,
+              wholeWord: true,
+              includes: ["src/**"],
+              excludes: [],
+              limit: 100,
+            }).pipe(Stream.runCollect);
+            return { directory, directoryCollision, searchEvents: Array.from(searchEvents) };
+          }),
+        ),
+      );
+
+      assert.deepEqual(response.directory, {
+        relativePath: "src/features",
+      });
+      assert.equal((yield* fs.stat(path.join(workspaceDir, "src/features"))).type, "Directory");
+      if (
+        response.directoryCollision._tag !== "Failure" ||
+        response.directoryCollision.failure._tag !== "ProjectCreateDirectoryError"
+      ) {
+        assert.fail("Expected a ProjectCreateDirectoryError");
+      }
+      assert.equal(response.directoryCollision.failure.failure, "path_already_exists");
+      assert.deepInclude(response.searchEvents[0], {
+        type: "matches",
+        matches: [
+          {
+            relativePath: "src/index.ts",
+            line: 1,
+            column: 5,
+            endColumn: 11,
+            lineTextStartColumn: 1,
+            lineText: "😀é needle",
+            matchText: "needle",
+          },
+        ],
+      });
+      assert.deepEqual(response.searchEvents.at(-1), {
+        type: "complete",
+        matchCount: 1,
+        fileCount: 1,
+        truncated: false,
       });
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );

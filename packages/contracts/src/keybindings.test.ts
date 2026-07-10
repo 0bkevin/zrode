@@ -59,6 +59,13 @@ it.effect("parses keybinding rules", () =>
     });
     assert.strictEqual(parsedCommandPalette.command, "commandPalette.toggle");
 
+    const parsedWorkspaceSearch = yield* decode(KeybindingRule, {
+      key: "mod+shift+f",
+      command: "workspaceSearch.focus",
+      when: "!terminalFocus",
+    });
+    assert.strictEqual(parsedWorkspaceSearch.command, "workspaceSearch.focus");
+
     const parsedLocal = yield* decode(KeybindingRule, {
       key: "mod+shift+n",
       command: "chat.newLocal",

@@ -2,15 +2,21 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
   ProjectFileDiskRevision,
   ProjectReadFileError,
   ProjectFileEvent,
   ProjectSearchEntriesError,
+  ProjectSearchTextEvent,
+  ProjectSearchTextInput,
   ProjectWriteFileError,
   ProjectWriteFileInput,
 } from "./project.ts";
 
 const decodeProjectFileDiskRevision = Schema.decodeUnknownSync(ProjectFileDiskRevision);
+const decodeProjectCreateDirectoryInput = Schema.decodeUnknownSync(ProjectCreateDirectoryInput);
+const decodeProjectCreateDirectoryResult = Schema.decodeUnknownSync(ProjectCreateDirectoryResult);
 
 describe("project RPC errors", () => {
   it("derives stable messages from structured request context while retaining causes", () => {
@@ -122,6 +128,67 @@ describe("project file events", () => {
         cwd: "/workspace",
         contentPaths: Array.from({ length: 257 }, (_, index) => `file-${index}.ts`),
         structuralPaths: [],
+      }),
+    ).toThrow();
+  });
+});
+
+describe("project workspace editing contracts", () => {
+  it("decodes directory creation inputs and results", () => {
+    expect(
+      decodeProjectCreateDirectoryInput({
+        cwd: "/workspace",
+        relativePath: "src/features",
+      }),
+    ).toEqual({ cwd: "/workspace", relativePath: "src/features" });
+    expect(
+      decodeProjectCreateDirectoryResult({
+        relativePath: "src/features",
+      }),
+    ).toEqual({ relativePath: "src/features" });
+  });
+
+  it("bounds text searches and exposes streamed matches with UTF-16 columns", () => {
+    const decodeInput = Schema.decodeUnknownSync(ProjectSearchTextInput);
+    const decodeEvent = Schema.decodeUnknownSync(ProjectSearchTextEvent);
+    expect(
+      decodeInput({
+        cwd: "/workspace",
+        query: "needle",
+        isRegex: false,
+        matchCase: false,
+        wholeWord: true,
+        includes: ["src/**"],
+        excludes: ["**/*.test.ts"],
+        limit: 200,
+      }).wholeWord,
+    ).toBe(true);
+    expect(
+      decodeEvent({
+        type: "matches",
+        matches: [
+          {
+            relativePath: "src/index.ts",
+            line: 1,
+            column: 5,
+            endColumn: 11,
+            lineTextStartColumn: 1,
+            lineText: "😀é needle",
+            matchText: "needle",
+          },
+        ],
+      }),
+    ).toMatchObject({ type: "matches" });
+    expect(() =>
+      decodeInput({
+        cwd: "/workspace",
+        query: "needle",
+        isRegex: false,
+        matchCase: false,
+        wholeWord: false,
+        includes: [],
+        excludes: [],
+        limit: 2_001,
       }),
     ).toThrow();
   });

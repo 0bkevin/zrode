@@ -30,7 +30,6 @@ import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
-import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
 import { isPopoutWindow } from "~/lib/windowScope";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
@@ -52,7 +51,8 @@ import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-import FileBrowserPanel from "./FileBrowserPanel";
+import type { RightPanelSurface } from "~/rightPanelStore";
+import WorkspaceExplorerSidebar from "./WorkspaceExplorerSidebar";
 import {
   FILE_EXPLORER_DEFAULT_WIDTH,
   FILE_EXPLORER_MAX_WIDTH,
@@ -76,6 +76,11 @@ import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
 import { fileDocumentErrorMessage, useFileDocument } from "./fileDocumentRuntime";
 import type { FileDocumentHandle, FileDocumentSnapshot } from "./fileDocumentStore";
+import {
+  WORKSPACE_EDITOR_UNSAFE_CSS,
+  workspaceEditorBackground,
+  workspaceEditorTheme,
+} from "./workspaceEditorPresentation";
 
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
@@ -88,11 +93,15 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
-  onOpenFile: (relativePath: string) => void;
+  pendingSurfaceIds?: ReadonlySet<string>;
+  onOpenFile: (relativePath: string, line?: number) => void;
+  onCloseFile?: (surface: Extract<RightPanelSurface, { kind: "file" }>) => void;
+  onCloseAllFiles?: () => void;
 }
 
 const FILE_EXPLORER_STORAGE_KEY = "zrode.fileExplorerOpen";
 const FILE_EXPLORER_WIDTH_STORAGE_KEY = "zrode:file-explorer-width";
+const EMPTY_PENDING_SURFACE_IDS: ReadonlySet<string> = new Set();
 // Whether review-comment annotations reach the chat composer from this
 // window; constant for the window's lifetime.
 const reviewCommentsAvailable = !isPopoutWindow();
@@ -162,7 +171,8 @@ const EDITABLE_GUTTER_BUTTON_CSS = `
     height: 10px;
   }
 `;
-const EDITABLE_FILE_UNSAFE_CSS = `${FILE_LINK_REVEAL_UNSAFE_CSS}${EDITABLE_GUTTER_BUTTON_CSS}`;
+const WORKSPACE_FILE_UNSAFE_CSS = `${WORKSPACE_EDITOR_UNSAFE_CSS}${FILE_LINK_REVEAL_UNSAFE_CSS}`;
+const EDITABLE_FILE_UNSAFE_CSS = `${WORKSPACE_FILE_UNSAFE_CSS}${EDITABLE_GUTTER_BUTTON_CSS}`;
 type FilePostRender = NonNullable<FileOptions<unknown>["onPostRender"]>;
 
 function clampFileLine(contents: string, requestedLine: number): number {
@@ -233,16 +243,15 @@ function useFileLineReveal(
         latestRequestIdsByPath.set(relativePath, revealRequestId);
       }
 
-      if (targetLine === null) {
-        fileContainer.style.minHeight = "";
-        return;
-      }
-
       const scrollContainer = fileContainer.closest<HTMLElement>(".file-preview-virtualizer");
       if (!scrollContainer) return;
+      // A short Pierre host must still cover the editor viewport. This also
+      // keeps its gutter/background continuous below the final source line.
       fileContainer.style.minHeight = `${Math.ceil(
         Math.max(instance.height, scrollContainer.clientHeight),
       )}px`;
+
+      if (targetLine === null) return;
 
       if (
         handledRequestIdsByPath.get(relativePath) === revealRequestId ||
@@ -561,7 +570,13 @@ function EditableFileSurface({
 
   return (
     <EditorProvider editor={editor}>
-      <div ref={surfaceRef} className="flex min-h-0 flex-1">
+      <div
+        ref={surfaceRef}
+        className="workspace-file-editor flex min-h-0 flex-1"
+        style={{
+          ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
+        }}
+      >
         <Virtualizer
           className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
           config={{
@@ -583,7 +598,7 @@ function EditableFileSurface({
               onLineSelectionChange: setSelectedRange,
               onLineSelectionEnd: handleLineSelectionEnd,
               overflow: wordWrap ? "wrap" : "scroll",
-              theme: resolveDiffThemeName(resolvedTheme),
+              theme: workspaceEditorTheme(resolvedTheme),
               themeType: resolvedTheme,
               unsafeCSS: EDITABLE_FILE_UNSAFE_CSS,
               onPostRender: handlePostRender,
@@ -795,7 +810,13 @@ function ConflictComparisonSurface({
   }, [relativePath, remoteContents, snapshot.contents]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" aria-label={`Compare ${relativePath}`}>
+    <div
+      className="workspace-file-editor flex min-h-0 flex-1 flex-col"
+      style={{
+        ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
+      }}
+      aria-label={`Compare ${relativePath}`}
+    >
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-3 py-2 text-xs">
         <div className="min-w-0">
           <div className="font-medium text-foreground">Disk version ↔ Your unsaved version</div>
@@ -817,8 +838,9 @@ function ConflictComparisonSurface({
               disableFileHeader: true,
               diffStyle: "split",
               overflow: "scroll",
-              theme: resolveDiffThemeName(resolvedTheme),
+              theme: workspaceEditorTheme(resolvedTheme),
               themeType: resolvedTheme,
+              unsafeCSS: WORKSPACE_FILE_UNSAFE_CSS,
             }}
           />
         ) : (
@@ -883,6 +905,9 @@ export default function FilePreviewPanel({
   revealLine,
   revealRequestId,
   onOpenFile,
+  pendingSurfaceIds,
+  onCloseFile,
+  onCloseAllFiles,
 }: FilePreviewPanelProps) {
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
@@ -913,7 +938,7 @@ export default function FilePreviewPanel({
     defaultWidth: FILE_EXPLORER_DEFAULT_WIDTH,
     minWidth: FILE_EXPLORER_MIN_WIDTH,
     maxWidth: maxExplorerWidth,
-    edge: "left",
+    edge: "right",
   });
   const [showConflictComparison, setShowConflictComparison] = useState(false);
   const [retryingFileRead, setRetryingFileRead] = useState(false);
@@ -1144,10 +1169,10 @@ export default function FilePreviewPanel({
       ) : null}
       <div ref={fileSplitContainerRef} className="flex min-h-0 flex-1 overflow-hidden">
         <div
-          className={cn(
-            "min-w-0 flex-1 flex-col overflow-hidden",
-            relativePath ? "flex" : "hidden",
-          )}
+          className="workspace-file-editor order-last flex min-w-0 flex-1 flex-col overflow-hidden"
+          style={{
+            ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
+          }}
         >
           {relativePath && fileError && fileData === null ? (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-xs leading-relaxed text-destructive">
@@ -1204,9 +1229,9 @@ export default function FilePreviewPanel({
                   options={{
                     disableFileHeader: true,
                     overflow: wordWrap ? "wrap" : "scroll",
-                    theme: resolveDiffThemeName(resolvedTheme),
+                    theme: workspaceEditorTheme(resolvedTheme),
                     themeType: resolvedTheme,
-                    unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+                    unsafeCSS: WORKSPACE_FILE_UNSAFE_CSS,
                     onPostRender: onFilePostRender,
                   }}
                   className="min-h-full"
@@ -1226,57 +1251,56 @@ export default function FilePreviewPanel({
                 onPostRender={onFilePostRender}
               />
             )
-          ) : null}
+          ) : (
+            <div className="min-h-0 flex-1" aria-label="Empty file editor" />
+          )}
         </div>
         {explorerOpen || relativePath === null ? (
           <aside
-            className={cn(
-              "relative flex min-h-0 shrink-0 bg-background",
-              relativePath ? "min-w-60 border-l border-border/60" : "min-w-0 flex-1",
-            )}
-            style={relativePath ? { width: `${explorerWidth}px` } : undefined}
+            className="order-first relative flex min-h-0 min-w-60 shrink-0 border-r border-border/60 bg-background"
+            style={{ width: `${explorerWidth}px` }}
           >
-            {relativePath ? (
-              <div
-                role="separator"
-                aria-label="Resize file explorer"
-                aria-orientation="vertical"
-                aria-valuemin={FILE_EXPLORER_MIN_WIDTH}
-                aria-valuemax={maxExplorerWidth}
-                aria-valuenow={explorerWidth}
-                tabIndex={0}
-                className="group absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize select-none focus-visible:outline-2 focus-visible:outline-primary"
-                onDoubleClick={resetExplorerWidth}
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowLeft") {
-                    event.preventDefault();
-                    setExplorerWidth(explorerWidth + 16);
-                  } else if (event.key === "ArrowRight") {
-                    event.preventDefault();
-                    setExplorerWidth(explorerWidth - 16);
-                  } else if (event.key === "Home") {
-                    event.preventDefault();
-                    setExplorerWidth(FILE_EXPLORER_MIN_WIDTH);
-                  } else if (event.key === "End") {
-                    event.preventDefault();
-                    setExplorerWidth(maxExplorerWidth);
-                  }
-                }}
-                {...explorerResizeHandlers}
-              >
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border group-focus-visible:bg-primary/70 group-active:bg-primary/70"
-                />
-              </div>
-            ) : null}
-            <FileBrowserPanel
-              key={`${environmentId}:${cwd}`}
+            <div
+              role="separator"
+              aria-label="Resize file explorer"
+              aria-orientation="vertical"
+              aria-valuemin={FILE_EXPLORER_MIN_WIDTH}
+              aria-valuemax={maxExplorerWidth}
+              aria-valuenow={explorerWidth}
+              tabIndex={0}
+              className="group absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize select-none focus-visible:outline-2 focus-visible:outline-primary"
+              onDoubleClick={resetExplorerWidth}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  setExplorerWidth(explorerWidth - 16);
+                } else if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  setExplorerWidth(explorerWidth + 16);
+                } else if (event.key === "Home") {
+                  event.preventDefault();
+                  setExplorerWidth(FILE_EXPLORER_MIN_WIDTH);
+                } else if (event.key === "End") {
+                  event.preventDefault();
+                  setExplorerWidth(maxExplorerWidth);
+                }
+              }}
+              {...explorerResizeHandlers}
+            >
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border group-focus-visible:bg-primary/70 group-active:bg-primary/70"
+              />
+            </div>
+            <WorkspaceExplorerSidebar
               environmentId={environmentId}
               cwd={cwd}
               projectName={projectName}
               activeRelativePath={relativePath}
+              threadRef={threadRef}
+              pendingSurfaceIds={pendingSurfaceIds ?? EMPTY_PENDING_SURFACE_IDS}
               onOpenFile={onOpenFile}
+              {...(onCloseFile && onCloseAllFiles ? { onCloseFile, onCloseAllFiles } : {})}
             />
           </aside>
         ) : null}

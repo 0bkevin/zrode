@@ -11,6 +11,8 @@ import * as NodeFSP from "node:fs/promises";
 import {
   ProjectFileDiskRevision,
   ProjectWriteFilePrecondition,
+  type ProjectCreateDirectoryInput,
+  type ProjectCreateDirectoryResult,
   type ProjectReadFileInput,
   type ProjectReadFileResult,
   type ProjectWriteFileInput,
@@ -18,17 +20,56 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import { appendBoundedBytes, decodeBoundedBytes } from "../process/boundedOutput.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 const REVISION_READ_BUFFER_BYTES = 64 * 1024;
+const CREATE_DIRECTORY_STDERR_MAX_BYTES = 4_096;
+const CREATE_DIRECTORY_EXIT_ALREADY_EXISTS = ChildProcessSpawner.ExitCode(17);
+const CREATE_DIRECTORY_EXIT_PARENT_CHANGED = ChildProcessSpawner.ExitCode(18);
+const CREATE_DIRECTORY_HELPER_SOURCE = String.raw`
+import * as fs from "node:fs/promises";
+
+const [basename, expectedDevice, expectedInode] = process.argv.slice(-3);
+const fail = (code, message) => {
+  process.stderr.write(String(message).slice(0, 512));
+  process.exitCode = code;
+};
+
+if (!basename || basename === "." || basename === ".." || basename.includes("/") || basename.includes("\\")) {
+  fail(19, "INVALID_BASENAME");
+} else {
+  try {
+    const parent = await fs.stat(".", { bigint: true });
+    if (!parent.isDirectory() || parent.dev.toString() !== expectedDevice || parent.ino.toString() !== expectedInode) {
+      fail(18, "PARENT_IDENTITY_MISMATCH");
+    } else {
+      try {
+        await fs.mkdir(basename);
+      } catch (cause) {
+        if (cause && typeof cause === "object" && cause.code === "EEXIST") {
+          fail(17, "EEXIST");
+        } else {
+          fail(20, cause && typeof cause === "object" && "code" in cause ? cause.code : "MKDIR_FAILED");
+        }
+      }
+    }
+  } catch (cause) {
+    fail(20, cause && typeof cause === "object" && "code" in cause ? cause.code : "STAT_FAILED");
+  }
+}
+`;
 const READ_NO_FOLLOW_FLAGS =
   NodeFS.constants.O_RDONLY |
   (NodeFS.constants.O_NOFOLLOW === undefined ? 0 : NodeFS.constants.O_NOFOLLOW);
@@ -85,6 +126,46 @@ export class WorkspacePathNotFileError extends Schema.TaggedErrorClass<Workspace
   }
 }
 
+export class WorkspacePathNotDirectoryError extends Schema.TaggedErrorClass<WorkspacePathNotDirectoryError>()(
+  "WorkspacePathNotDirectoryError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace path '${this.relativePath}' in '${this.workspaceRoot}' is not a directory: ${this.resolvedPath}`;
+  }
+}
+
+export class WorkspacePathAlreadyExistsError extends Schema.TaggedErrorClass<WorkspacePathAlreadyExistsError>()(
+  "WorkspacePathAlreadyExistsError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace path '${this.relativePath}' already exists in '${this.workspaceRoot}': ${this.resolvedPath}`;
+  }
+}
+
+export class WorkspaceDirectoryParentChangedError extends Schema.TaggedErrorClass<WorkspaceDirectoryParentChangedError>()(
+  "WorkspaceDirectoryParentChangedError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    initialParentPath: Schema.String,
+    currentParentPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace directory parent changed while creating '${this.relativePath}' in '${this.workspaceRoot}'.`;
+  }
+}
+
 export class WorkspaceBinaryFileError extends Schema.TaggedErrorClass<WorkspaceBinaryFileError>()(
   "WorkspaceBinaryFileError",
   {
@@ -132,6 +213,9 @@ export const WorkspaceFileOperationError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
+  WorkspacePathNotDirectoryError,
+  WorkspacePathAlreadyExistsError,
+  WorkspaceDirectoryParentChangedError,
   WorkspaceBinaryFileError,
 ]);
 export type WorkspaceFileOperationError = typeof WorkspaceFileOperationError.Type;
@@ -140,6 +224,9 @@ export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
+  WorkspacePathNotDirectoryError,
+  WorkspacePathAlreadyExistsError,
+  WorkspaceDirectoryParentChangedError,
   WorkspaceBinaryFileError,
   WorkspaceFileRevisionConflictError,
   WorkspaceFileContentsTooLargeError,
@@ -150,6 +237,13 @@ export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 export class WorkspaceFileSystem extends Context.Service<
   WorkspaceFileSystem,
   {
+    /** Create a directory relative to the workspace root. */
+    readonly createDirectory: (
+      input: ProjectCreateDirectoryInput,
+    ) => Effect.Effect<
+      ProjectCreateDirectoryResult,
+      WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
     /** Read a UTF-8 text file relative to the workspace root. */
     readonly readFile: (
       input: ProjectReadFileInput,
@@ -192,6 +286,11 @@ type CanonicalWriteTarget = {
   readonly canonicalTargetPath: string;
 };
 
+type WorkspaceMutationTargetInput = {
+  readonly cwd: string;
+  readonly relativePath: string;
+};
+
 type PreparedWriteTarget = CanonicalWriteTarget & {
   readonly canonicalTargetDirectory: string;
   readonly directoryDevice: bigint;
@@ -206,6 +305,18 @@ type PreparedAtomicWrite = {
 export interface WorkspaceFileSystemMakeOptions {
   /** Test-only publication barrier, invoked after the temporary file is durable. */
   readonly beforePublish?: (input: {
+    readonly cwd: string;
+    readonly relativePath: string;
+    readonly canonicalTargetPath: string;
+  }) => Effect.Effect<void>;
+  /** Test-only race barrier, invoked before the directory parent is revalidated. */
+  readonly beforeCreateDirectory?: (input: {
+    readonly cwd: string;
+    readonly relativePath: string;
+    readonly canonicalTargetPath: string;
+  }) => Effect.Effect<void>;
+  /** Test-only race barrier, invoked after parent identity validation and before child spawn. */
+  readonly afterCreateDirectoryValidation?: (input: {
     readonly cwd: string;
     readonly relativePath: string;
     readonly canonicalTargetPath: string;
@@ -227,6 +338,7 @@ type WriteTargetLock = {
 export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
     const writeTargetLocksRef = yield* Ref.make<ReadonlyMap<string, WriteTargetLock>>(new Map());
@@ -276,7 +388,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
     /** Resolve existing targets, or the nearest existing ancestor for new targets. */
     const resolveCanonicalWriteTarget = Effect.fn(
       "WorkspaceFileSystem.resolveCanonicalWriteTarget",
-    )(function* (input: ProjectWriteFileInput, absolutePath: string) {
+    )(function* (input: WorkspaceMutationTargetInput, absolutePath: string) {
       const resolvedWorkspaceRoot = yield* realWorkspaceRoot({
         workspaceRoot: input.cwd,
         relativePath: input.relativePath,
@@ -554,6 +666,254 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       Effect.scoped(
         Effect.flatMap(acquireWriteTargetLock(key), (semaphore) => semaphore.withPermit(effect)),
       );
+
+    type CanonicalDirectoryParent = {
+      readonly requestedParentPath: string;
+      readonly canonicalParentPath: string;
+      readonly canonicalTargetPath: string;
+      readonly device: bigint;
+      readonly inode: bigint;
+    };
+
+    const canonicalDirectoryParent = Effect.fn("WorkspaceFileSystem.canonicalDirectoryParent")(
+      function* (input: ProjectCreateDirectoryInput, absoluteTargetPath: string, root: string) {
+        const requestedParentPath = path.dirname(absoluteTargetPath);
+        const canonicalParentPath = yield* Effect.tryPromise({
+          try: () => NodeFSP.realpath(requestedParentPath),
+          catch: (cause) =>
+            operationError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: absoluteTargetPath,
+              operationPath: requestedParentPath,
+              operation: "realpath-target",
+              cause,
+            }),
+        });
+        yield* assertWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          realWorkspaceRoot: root,
+          resolvedPath: canonicalParentPath,
+        });
+        const parentStat = yield* Effect.tryPromise({
+          try: () => NodeFSP.stat(canonicalParentPath, { bigint: true }),
+          catch: (cause) =>
+            operationError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: absoluteTargetPath,
+              operationPath: canonicalParentPath,
+              operation: "stat",
+              cause,
+            }),
+        });
+        if (!parentStat.isDirectory()) {
+          return yield* new WorkspacePathNotDirectoryError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: canonicalParentPath,
+          });
+        }
+        const canonicalTargetPath = path.join(
+          canonicalParentPath,
+          path.basename(absoluteTargetPath),
+        );
+        yield* assertWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          realWorkspaceRoot: root,
+          resolvedPath: canonicalTargetPath,
+        });
+        return {
+          requestedParentPath,
+          canonicalParentPath,
+          canonicalTargetPath,
+          device: parentStat.dev,
+          inode: parentStat.ino,
+        } satisfies CanonicalDirectoryParent;
+      },
+    );
+
+    const createDirectoryRelativeToPinnedParent = Effect.fn(
+      "WorkspaceFileSystem.createDirectoryRelativeToPinnedParent",
+    )(function* (input: ProjectCreateDirectoryInput, parent: CanonicalDirectoryParent) {
+      const handle = yield* spawner
+        .spawn(
+          ChildProcess.make(
+            process.execPath,
+            [
+              "--input-type=module",
+              "--eval",
+              CREATE_DIRECTORY_HELPER_SOURCE,
+              "--",
+              path.basename(parent.canonicalTargetPath),
+              parent.device.toString(),
+              parent.inode.toString(),
+            ],
+            {
+              cwd: parent.canonicalParentPath,
+              env: { ELECTRON_RUN_AS_NODE: "1" },
+              extendEnv: true,
+            },
+          ),
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            operationError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: parent.canonicalTargetPath,
+              operationPath: parent.canonicalParentPath,
+              operation: "make-directory",
+              cause,
+            }),
+          ),
+        );
+      yield* Effect.addFinalizer(() =>
+        handle.isRunning.pipe(
+          Effect.flatMap((running) => (running ? handle.kill() : Effect.void)),
+          Effect.ignore,
+        ),
+      );
+
+      const stderrRef = yield* Ref.make<Uint8Array>(new Uint8Array(0));
+      const stderrFiber = yield* handle.stderr.pipe(
+        Stream.runForEach((chunk) =>
+          Ref.update(stderrRef, (current) =>
+            appendBoundedBytes(current, chunk, CREATE_DIRECTORY_STDERR_MAX_BYTES),
+          ),
+        ),
+        Effect.ignore,
+        Effect.forkScoped,
+      );
+      const stdoutFiber = yield* handle.stdout.pipe(
+        Stream.runDrain,
+        Effect.ignore,
+        Effect.forkScoped,
+      );
+      const exitCode = yield* handle.exitCode.pipe(
+        Effect.mapError((cause) =>
+          operationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: parent.canonicalTargetPath,
+            operationPath: parent.canonicalParentPath,
+            operation: "make-directory",
+            cause,
+          }),
+        ),
+      );
+      yield* Effect.all([Fiber.join(stderrFiber), Fiber.join(stdoutFiber)], {
+        concurrency: "unbounded",
+        discard: true,
+      }).pipe(Effect.ignore);
+
+      if (exitCode === ChildProcessSpawner.ExitCode(0)) return;
+      if (exitCode === CREATE_DIRECTORY_EXIT_ALREADY_EXISTS) {
+        return yield* new WorkspacePathAlreadyExistsError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: parent.canonicalTargetPath,
+        });
+      }
+      if (exitCode === CREATE_DIRECTORY_EXIT_PARENT_CHANGED) {
+        return yield* new WorkspaceDirectoryParentChangedError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          initialParentPath: parent.canonicalParentPath,
+          currentParentPath: parent.canonicalParentPath,
+        });
+      }
+      const detail = decodeBoundedBytes(yield* Ref.get(stderrRef)).trim();
+      return yield* operationError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedPath: parent.canonicalTargetPath,
+        operationPath: parent.canonicalParentPath,
+        operation: "make-directory",
+        cause: new Error(detail || `Directory helper exited with code ${exitCode}.`),
+      });
+    });
+
+    const createDirectory: WorkspaceFileSystem["Service"]["createDirectory"] = Effect.fn(
+      "WorkspaceFileSystem.createDirectory",
+    )(function* (input) {
+      const requestedTarget = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+      });
+      const initialTarget = yield* resolveCanonicalWriteTarget(input, requestedTarget.absolutePath);
+
+      return yield* withWriteTargetLock(
+        initialTarget.canonicalTargetPath,
+        Effect.gen(function* () {
+          const root = yield* realWorkspaceRoot({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: requestedTarget.absolutePath,
+          });
+          const initialParent = yield* canonicalDirectoryParent(
+            input,
+            requestedTarget.absolutePath,
+            root,
+          );
+
+          yield* (
+            options.beforeCreateDirectory?.({
+              cwd: input.cwd,
+              relativePath: requestedTarget.relativePath,
+              canonicalTargetPath: initialParent.canonicalTargetPath,
+            }) ?? Effect.void
+          );
+
+          // Resolve and identify the parent again immediately before the only
+          // mutation. A parent swapped to a symlink outside the root is rejected
+          // by canonicalDirectoryParent; an in-root replacement is rejected by
+          // the identity comparison.
+          const finalParent = yield* canonicalDirectoryParent(
+            input,
+            requestedTarget.absolutePath,
+            root,
+          );
+          if (
+            finalParent.canonicalParentPath !== initialParent.canonicalParentPath ||
+            finalParent.device !== initialParent.device ||
+            finalParent.inode !== initialParent.inode
+          ) {
+            return yield* new WorkspaceDirectoryParentChangedError({
+              workspaceRoot: input.cwd,
+              relativePath: requestedTarget.relativePath,
+              initialParentPath: initialParent.canonicalParentPath,
+              currentParentPath: finalParent.canonicalParentPath,
+            });
+          }
+
+          yield* (
+            options.afterCreateDirectoryValidation?.({
+              cwd: input.cwd,
+              relativePath: requestedTarget.relativePath,
+              canonicalTargetPath: finalParent.canonicalTargetPath,
+            }) ?? Effect.void
+          );
+
+          // The child opens `canonicalParentPath` as its cwd, verifies the
+          // pinned directory's dev+ino via stat("."), then performs one
+          // non-recursive mkdir(basename). A path swapped to an outside symlink
+          // before spawn therefore fails identity validation, while a swap
+          // after spawn cannot redirect the relative mkdir through that path.
+          // Residual platform risk: Node exposes no mkdirat(dirfd), so an actor
+          // able to rename the already-pinned parent inode itself can move that
+          // inode elsewhere while the child still creates inside the same inode.
+          yield* Effect.scoped(createDirectoryRelativeToPinnedParent(input, finalParent));
+
+          yield* workspaceEntries
+            .refresh(input.cwd)
+            .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach({ startImmediately: true }));
+          return { relativePath: requestedTarget.relativePath };
+        }),
+      );
+    });
 
     const prepareTargetDirectory = Effect.fn("WorkspaceFileSystem.prepareTargetDirectory")(
       function* (input: ProjectWriteFileInput, target: CanonicalWriteTarget) {
@@ -1052,7 +1412,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       );
     });
 
-    return WorkspaceFileSystem.of({ readFile, writeFile });
+    return WorkspaceFileSystem.of({ createDirectory, readFile, writeFile });
   });
 
 export const make = makeWithOptions();

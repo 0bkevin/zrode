@@ -61,6 +61,209 @@ function diskRevision(contents: string): string {
 }
 
 it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
+  describe("createDirectory", () => {
+    it.effect("creates one directory under an existing parent and rejects an existing target", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "src"));
+
+        const created = yield* workspaceFileSystem.createDirectory({
+          cwd,
+          relativePath: "src/features",
+        });
+        const collision = yield* workspaceFileSystem
+          .createDirectory({
+            cwd,
+            relativePath: "src/features",
+          })
+          .pipe(Effect.flip);
+
+        expect(created).toEqual({ relativePath: "src/features" });
+        expect(collision).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathAlreadyExistsError);
+        expect((yield* fileSystem.stat(path.join(cwd, "src/features"))).type).toBe("Directory");
+      }),
+    );
+
+    it.effect("treats a leading-dash directory basename as data, not a Node option", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const relativePath = "--import=zrode-must-not-load";
+
+        const created = yield* workspaceFileSystem.createDirectory({ cwd, relativePath });
+
+        expect(created).toEqual({ relativePath });
+        expect((yield* fileSystem.stat(path.join(cwd, relativePath))).type).toBe("Directory");
+      }),
+    );
+
+    it.effect("does not create missing parent directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "missing/child" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+        expect(error).toMatchObject({ operation: "realpath-target" });
+        expect(yield* fileSystem.exists(path.join(cwd, "missing"))).toBe(false);
+      }),
+    );
+
+    it.effect("revalidates a swapped parent before creating anything outside the workspace", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        const parent = path.join(cwd, "parent");
+        yield* fileSystem.makeDirectory(parent);
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeCreateDirectory: () =>
+            Effect.promise(async () => {
+              await NodeFSP.rename(parent, path.join(cwd, "parent-original"));
+              await NodeFSP.symlink(outside, parent);
+            }),
+        });
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "parent/escaped" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(yield* fileSystem.exists(path.join(outside, "escaped"))).toBe(false);
+      }),
+    );
+
+    it.effect("pins parent identity after validation so a final symlink swap cannot escape", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        const parent = path.join(cwd, "parent");
+        const originalParent = path.join(cwd, "parent-original");
+        yield* fileSystem.makeDirectory(parent);
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          afterCreateDirectoryValidation: () =>
+            Effect.promise(async () => {
+              await NodeFSP.rename(parent, originalParent);
+              await NodeFSP.symlink(outside, parent);
+            }),
+        });
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "parent/escaped" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceDirectoryParentChangedError);
+        expect(yield* fileSystem.exists(path.join(outside, "escaped"))).toBe(false);
+        expect(yield* fileSystem.exists(path.join(originalParent, "escaped"))).toBe(false);
+      }),
+    );
+
+    it.effect("rejects an in-workspace parent replacement by filesystem identity", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const parent = path.join(cwd, "parent");
+        const originalParent = path.join(cwd, "parent-original");
+        yield* fileSystem.makeDirectory(parent);
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeCreateDirectory: () =>
+            Effect.promise(async () => {
+              await NodeFSP.rename(parent, originalParent);
+              await NodeFSP.mkdir(parent);
+            }),
+        });
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "parent/child" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceDirectoryParentChangedError);
+        expect(yield* fileSystem.exists(path.join(parent, "child"))).toBe(false);
+        expect(yield* fileSystem.exists(path.join(originalParent, "child"))).toBe(false);
+      }),
+    );
+
+    it.effect("rejects traversal and symlinks that resolve outside the workspace", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        yield* fileSystem.symlink(outside, path.join(cwd, "outside-link"));
+
+        const traversalError = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "../escape" })
+          .pipe(Effect.flip);
+        const symlinkError = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "outside-link/escape" })
+          .pipe(Effect.flip);
+
+        expect(traversalError).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        expect(symlinkError).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(
+          yield* fileSystem
+            .stat(path.join(outside, "escape"))
+            .pipe(Effect.orElseSucceed(() => null)),
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("rejects a file at the requested directory path", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "occupied", "file\n");
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "occupied" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathAlreadyExistsError);
+      }),
+    );
+
+    it.effect("serializes concurrent creation of the same target", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "shared"));
+
+        const outcomes = yield* Effect.all(
+          [1, 2].map(() =>
+            workspaceFileSystem
+              .createDirectory({ cwd, relativePath: "shared/directory" })
+              .pipe(Effect.result),
+          ),
+          { concurrency: "unbounded" },
+        );
+
+        expect(outcomes.filter((outcome) => outcome._tag === "Success")).toHaveLength(1);
+        const failures = outcomes.filter((outcome) => outcome._tag === "Failure");
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.failure).toBeInstanceOf(
+          WorkspaceFileSystem.WorkspacePathAlreadyExistsError,
+        );
+      }),
+    );
+  });
+
   describe("readFile", () => {
     it.effect("reads UTF-8 files relative to the workspace root", () =>
       Effect.gen(function* () {

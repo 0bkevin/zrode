@@ -462,6 +462,9 @@ importers:
       '@pierre/diffs':
         specifier: 'catalog:'
         version: 1.3.0-beta.5(patch_hash=7cb6da88544119adda056b2f46f43956f99326227732da0b345081e285a6c53a)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      '@vscode/ripgrep-universal':
+        specifier: ^1.18.0
+        version: 1.18.0
       chokidar:
         specifier: ^4.0.3
         version: 4.0.3
@@ -5147,6 +5150,9 @@ packages:
 
   '@vscode/l10n@0.0.18':
     resolution: {integrity: sha512-KYSIHVmslkaCDyw013pphY+d7x1qV8IZupYfeIfzNA+nsaWHbn5uPuQRvdRFsa9zFzGeudPuoGoZ1Op4jrJXIQ==}
+
+  '@vscode/ripgrep-universal@1.18.0':
+    resolution: {integrity: sha512-kgrAVy1L/v/8erAjo+I720ifTf7o4rvYUwgsuEu97XAEBtPT9sk3HhcSgFpxMydvNmwdJtXo9/AVee7JjocTrg==}
 
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
@@ -14703,6 +14709,8 @@ snapshots:
       vscode-uri: 3.1.0
 
   '@vscode/l10n@0.0.18': {}
+
+  '@vscode/ripgrep-universal@1.18.0': {}
 
   '@xmldom/xmldom@0.8.13': {}
 

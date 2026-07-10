@@ -2,6 +2,10 @@ import * as Schema from "effect/Schema";
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROJECT_SEARCH_ENTRIES_MAX_LIMIT = 200;
+const PROJECT_SEARCH_TEXT_MAX_LIMIT = 2_000;
+const PROJECT_SEARCH_TEXT_MAX_PATTERNS = 64;
+const PROJECT_SEARCH_TEXT_QUERY_MAX_LENGTH = 512;
+const PROJECT_SEARCH_TEXT_PREVIEW_MAX_LENGTH = 4_096;
 const PROJECT_WRITE_FILE_PATH_MAX_LENGTH = 512;
 const PROJECT_READ_FILE_PATH_MAX_LENGTH = 512;
 const PROJECT_FILE_DISK_REVISION_MAX_LENGTH = 96;
@@ -27,6 +31,97 @@ export const ProjectSearchEntriesResult = Schema.Struct({
   truncated: Schema.Boolean,
 });
 export type ProjectSearchEntriesResult = typeof ProjectSearchEntriesResult.Type;
+
+const ProjectSearchTextGlob = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+export const ProjectSearchTextInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  query: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(PROJECT_SEARCH_TEXT_QUERY_MAX_LENGTH),
+  ),
+  isRegex: Schema.Boolean,
+  matchCase: Schema.Boolean,
+  wholeWord: Schema.Boolean,
+  includes: Schema.Array(ProjectSearchTextGlob).check(
+    Schema.isMaxLength(PROJECT_SEARCH_TEXT_MAX_PATTERNS),
+  ),
+  excludes: Schema.Array(ProjectSearchTextGlob).check(
+    Schema.isMaxLength(PROJECT_SEARCH_TEXT_MAX_PATTERNS),
+  ),
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_SEARCH_TEXT_MAX_LIMIT)),
+});
+export type ProjectSearchTextInput = typeof ProjectSearchTextInput.Type;
+
+/**
+ * A single ripgrep match. Columns are one-based UTF-16 code-unit offsets.
+ * `lineText` may be a bounded preview that begins at `lineTextStartColumn`.
+ */
+export const ProjectSearchTextMatch = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  line: PositiveInt,
+  column: PositiveInt,
+  endColumn: PositiveInt,
+  lineTextStartColumn: PositiveInt,
+  lineText: Schema.String.check(Schema.isMaxLength(PROJECT_SEARCH_TEXT_PREVIEW_MAX_LENGTH)),
+  matchText: Schema.String.check(Schema.isMaxLength(PROJECT_SEARCH_TEXT_PREVIEW_MAX_LENGTH)),
+});
+export type ProjectSearchTextMatch = typeof ProjectSearchTextMatch.Type;
+
+export const ProjectSearchTextEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("matches"),
+    matches: Schema.Array(ProjectSearchTextMatch).check(Schema.isMinLength(1)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("complete"),
+    matchCount: NonNegativeInt,
+    fileCount: NonNegativeInt,
+    truncated: Schema.Boolean,
+  }),
+]);
+export type ProjectSearchTextEvent = typeof ProjectSearchTextEvent.Type;
+
+export const ProjectSearchTextFailure = Schema.Literals([
+  "workspace_root_not_found",
+  "workspace_root_create_failed",
+  "workspace_root_stat_failed",
+  "workspace_root_not_directory",
+  "spawn_failed",
+  "output_parse_failed",
+  "output_limit_exceeded",
+  "timed_out",
+  "command_failed",
+]);
+export type ProjectSearchTextFailure = typeof ProjectSearchTextFailure.Type;
+
+export class ProjectSearchTextError extends Schema.TaggedErrorClass<ProjectSearchTextError>()(
+  "ProjectSearchTextError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    queryLength: Schema.optional(NonNegativeInt),
+    failure: Schema.optional(ProjectSearchTextFailure),
+    detail: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: {
+    readonly cwd: string;
+    readonly queryLength: number;
+    readonly failure: ProjectSearchTextFailure;
+    readonly detail?: string;
+    readonly cause?: unknown;
+    readonly message?: string;
+  }) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ?? `Failed to search workspace text in '${props.cwd}'.`,
+    } as any);
+  }
+}
 
 export const ProjectListEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
@@ -188,6 +283,17 @@ export const ProjectReadFileInput = Schema.Struct({
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
+export const ProjectCreateDirectoryInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+});
+export type ProjectCreateDirectoryInput = typeof ProjectCreateDirectoryInput.Type;
+
+export const ProjectCreateDirectoryResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectCreateDirectoryResult = typeof ProjectCreateDirectoryResult.Type;
+
 /**
  * An opaque, content-addressed version of a workspace file on disk.
  *
@@ -213,7 +319,10 @@ export const ProjectFileFailure = Schema.Literals([
   "workspace_path_outside_root",
   "resolved_path_outside_root",
   "path_not_found",
+  "path_already_exists",
+  "directory_parent_changed",
   "path_not_file",
+  "path_not_directory",
   "binary_file",
   "contents_too_large",
   "operation_failed",
@@ -268,6 +377,31 @@ export class ProjectReadFileError extends Schema.TaggedErrorClass<ProjectReadFil
       message:
         decodedProjectErrorMessage(props) ??
         `Failed to read workspace file '${props.relativePath}' in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+export class ProjectCreateDirectoryError extends Schema.TaggedErrorClass<ProjectCreateDirectoryError>()(
+  "ProjectCreateDirectoryError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    relativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: ProjectFileFailureContext) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to create workspace directory '${props.relativePath}' in '${props.cwd}'.`,
     } as any);
   }
 }

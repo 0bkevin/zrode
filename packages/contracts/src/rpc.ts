@@ -65,6 +65,9 @@ import {
   RelayClientStatusSchema,
 } from "./relayClient.ts";
 import {
+  ProjectCreateDirectoryError,
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
@@ -75,6 +78,9 @@ import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
+  ProjectSearchTextError,
+  ProjectSearchTextEvent,
+  ProjectSearchTextInput,
   ProjectWriteFileConflictError,
   ProjectWriteFileError,
   ProjectWriteFileInput,
@@ -160,8 +166,10 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
+  projectsCreateDirectory: "projects.createDirectory",
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
+  projectsSearchText: "projects.searchText",
   projectsWriteFile: "projects.writeFile",
   projectsWatchFiles: "projects.watchFiles",
 
@@ -409,10 +417,23 @@ export const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries,
   error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
 });
 
+export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
+  payload: ProjectCreateDirectoryInput,
+  success: ProjectCreateDirectoryResult,
+  error: Schema.Union([ProjectCreateDirectoryError, EnvironmentAuthorizationError]),
+});
+
 export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   payload: ProjectReadFileInput,
   success: ProjectReadFileResult,
   error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsSearchTextRpc = Rpc.make(WS_METHODS.projectsSearchText, {
+  payload: ProjectSearchTextInput,
+  success: ProjectSearchTextEvent,
+  error: Schema.Union([ProjectSearchTextError, EnvironmentAuthorizationError]),
+  stream: true,
 });
 
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
@@ -757,8 +778,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
   WsProjectsListEntriesRpc,
+  WsProjectsCreateDirectoryRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
+  WsProjectsSearchTextRpc,
   WsProjectsWriteFileRpc,
   WsProjectsWatchFilesRpc,
   WsShellOpenInEditorRpc,

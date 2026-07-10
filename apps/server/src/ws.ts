@@ -37,9 +37,12 @@ import {
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
+  ProjectCreateDirectoryError,
   ProjectListEntriesError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
+  ProjectSearchTextError,
+  type ProjectSearchTextFailure,
   ProjectWriteFileConflictError,
   ProjectWriteFileError,
   ProjectWatchFilesError,
@@ -93,6 +96,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -246,6 +250,12 @@ function projectFileFailureContext(
       };
     case "WorkspacePathNotFileError":
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
+    case "WorkspacePathAlreadyExistsError":
+      return { failure: "path_already_exists", resolvedPath: error.resolvedPath };
+    case "WorkspaceDirectoryParentChangedError":
+      return { failure: "directory_parent_changed" };
+    case "WorkspacePathNotDirectoryError":
+      return { failure: "path_not_directory", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
     case "WorkspaceFileContentsTooLargeError":
@@ -254,6 +264,36 @@ function projectFileFailureContext(
         byteLength: error.byteLength,
         maxByteLength: error.maxByteLength,
       };
+    default:
+      return unexpectedCompatibilityError(error);
+  }
+}
+
+function projectSearchTextFailureContext(
+  error: WorkspaceContentSearch.WorkspaceContentSearchError,
+): { readonly failure: ProjectSearchTextFailure; readonly detail?: string } {
+  switch (error._tag) {
+    case "WorkspaceRootNotExistsError":
+      return { failure: "workspace_root_not_found" };
+    case "WorkspaceRootCreateFailedError":
+      return { failure: "workspace_root_create_failed" };
+    case "WorkspaceRootStatFailedError":
+      return { failure: "workspace_root_stat_failed", detail: error.phase };
+    case "WorkspaceRootNotDirectoryError":
+      return { failure: "workspace_root_not_directory" };
+    case "WorkspaceContentSearchProcessError":
+      return { failure: "spawn_failed", detail: error.operation };
+    case "WorkspaceContentSearchOutputParseError":
+      return { failure: "output_parse_failed", detail: error.detail };
+    case "WorkspaceContentSearchOutputLimitError":
+      return {
+        failure: "output_limit_exceeded",
+        detail: `${error.observed} bytes (limit ${error.limit})`,
+      };
+    case "WorkspaceContentSearchTimeoutError":
+      return { failure: "timed_out", detail: `${error.timeoutMillis}ms` };
+    case "WorkspaceContentSearchCommandError":
+      return { failure: "command_failed", detail: error.detail };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -325,8 +365,10 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.sourceControlCloneRepository, AuthOrchestrationOperateScope],
   [WS_METHODS.sourceControlPublishRepository, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsListEntries, AuthOrchestrationReadScope],
+  [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
+  [WS_METHODS.projectsSearchText, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsWatchFiles, AuthOrchestrationReadScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
@@ -438,6 +480,7 @@ const makeWsRpcLayer = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+      const workspaceContentSearch = yield* WorkspaceContentSearch.WorkspaceContentSearch;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
       const workspaceFileEvents = yield* WorkspaceFileEvents.WorkspaceFileEvents;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -1433,6 +1476,21 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.projectsCreateDirectory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateDirectory,
+            workspaceFileSystem.createDirectory(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectCreateDirectoryError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
         [WS_METHODS.projectsReadFile]: (input) =>
           observeRpcEffect(
             WS_METHODS.projectsReadFile,
@@ -1442,6 +1500,22 @@ const makeWsRpcLayer = (
                   new ProjectReadFileError({
                     ...input,
                     ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsSearchText]: (input) =>
+          observeRpcStream(
+            WS_METHODS.projectsSearchText,
+            workspaceContentSearch.search(input).pipe(
+              Stream.mapError(
+                (cause) =>
+                  new ProjectSearchTextError({
+                    cwd: input.cwd,
+                    queryLength: input.query.length,
+                    ...projectSearchTextFailureContext(cause),
                     cause,
                   }),
               ),

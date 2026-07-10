@@ -1,5 +1,10 @@
-import { WS_METHODS } from "@t3tools/contracts";
+import {
+  WS_METHODS,
+  type ProjectSearchTextEvent,
+  type ProjectSearchTextMatch,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Stream from "effect/Stream";
 import { Atom } from "effect/unstable/reactivity";
 
 import {
@@ -7,6 +12,7 @@ import {
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcStreamQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 import {
@@ -18,6 +24,38 @@ import {
   updateProject,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+
+export interface ProjectSearchTextSnapshot {
+  readonly matches: ReadonlyArray<ProjectSearchTextMatch>;
+  readonly matchCount: number;
+  readonly fileCount: number;
+  readonly truncated: boolean;
+  readonly complete: boolean;
+}
+
+export const EMPTY_PROJECT_SEARCH_TEXT_SNAPSHOT: ProjectSearchTextSnapshot = Object.freeze({
+  matches: [],
+  matchCount: 0,
+  fileCount: 0,
+  truncated: false,
+  complete: false,
+});
+
+export function applyProjectSearchTextEvent(
+  current: ProjectSearchTextSnapshot,
+  event: ProjectSearchTextEvent,
+): ProjectSearchTextSnapshot {
+  if (event.type === "matches") {
+    return { ...current, matches: [...current.matches, ...event.matches] };
+  }
+  return {
+    ...current,
+    matchCount: event.matchCount,
+    fileCount: event.fileCount,
+    truncated: event.truncated,
+    complete: true,
+  };
+}
 
 export type {
   CreateProjectInput,
@@ -41,6 +79,13 @@ export function createProjectEnvironmentAtoms<R, E>(
       tag: WS_METHODS.projectsSearchEntries,
       staleTimeMs: 15_000,
     }),
+    searchText: createEnvironmentRpcStreamQueryAtomFamily(runtime, {
+      label: "environment-data:projects:search-text",
+      tag: WS_METHODS.projectsSearchText,
+      idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(Stream.scan(EMPTY_PROJECT_SEARCH_TEXT_SNAPSHOT, applyProjectSearchTextEvent)),
+    }),
     listEntries: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:projects:list-entries",
       tag: WS_METHODS.projectsListEntries,
@@ -57,6 +102,16 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:projects:file-events",
       tag: WS_METHODS.projectsWatchFiles,
       idleTtlMs: 1_000,
+    }),
+    createDirectory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:create-directory",
+      tag: WS_METHODS.projectsCreateDirectory,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
     }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:create",

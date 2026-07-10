@@ -122,10 +122,15 @@ import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
+  selectOrderedFileSurfaces,
   selectThreadRightPanelState,
   type RightPanelSurface,
   useRightPanelStore,
 } from "../rightPanelStore";
+import {
+  capturedFileDocumentsAreSafe,
+  fileDocumentNeedsCloseProtection,
+} from "./files/workspaceFileCloseSafety";
 import {
   isPreviewSupportedInRuntime,
   setActivePreviewTab,
@@ -3086,9 +3091,9 @@ function ChatViewContent(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
   const openFileSurface = useCallback(
-    (relativePath: string) => {
+    (relativePath: string, line?: number) => {
       if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
+      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, line);
     },
     [activeProject, activeThreadRef],
   );
@@ -3307,11 +3312,7 @@ function ChatViewContent(props: ChatViewProps) {
           relativePath: surface.relativePath,
         };
         const snapshot = fileDocumentStore.getSnapshot(key);
-        if (
-          !snapshot?.isDirty &&
-          snapshot?.status !== "saving" &&
-          snapshot?.status !== "retrying"
-        ) {
+        if (!fileDocumentNeedsCloseProtection(snapshot)) {
           continue;
         }
         useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
@@ -3334,7 +3335,11 @@ function ChatViewContent(props: ChatViewProps) {
       void (async () => {
         if (!(await prepareFileSurfacesForRemoval([surface]))) return;
         cleanupRightPanelSurfaces([surface]);
-        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        if (surface.kind === "file") {
+          useRightPanelStore.getState().closeFileSurfaces(activeThreadRef, [surface.id]);
+        } else {
+          useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        }
         syncActivePreviewSurface();
       })();
     },
@@ -3469,6 +3474,44 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeThreadRef,
     cleanupRightPanelSurfaces,
+    prepareFileSurfacesForRemoval,
+    rightPanelState.surfaces,
+  ]);
+  const closeAllFileSurfaces = useCallback(() => {
+    if (!activeThreadRef) return;
+    const fileSurfaces = selectOrderedFileSurfaces(rightPanelState.surfaces);
+    if (fileSurfaces.length === 0) return;
+    const capturedSurfaceIds = fileSurfaces.map((surface) => surface.id);
+    void (async () => {
+      // Prepare the complete set before one atomic store mutation. Canceling
+      // any prompt therefore leaves every editor surface open.
+      if (!(await prepareFileSurfacesForRemoval(fileSurfaces))) return;
+      const capturedDocumentsAreSafe =
+        !activeProject || !activeWorkspaceRoot
+          ? true
+          : capturedFileDocumentsAreSafe(fileSurfaces, (relativePath) =>
+              fileDocumentStore.getSnapshot({
+                environmentId: activeProject.environmentId,
+                cwd: activeWorkspaceRoot,
+                relativePath,
+              }),
+            );
+      if (!capturedDocumentsAreSafe) {
+        toastManager.add({
+          type: "warning",
+          title: "Editors kept open",
+          description: "A file changed while Close All was being confirmed. Try again.",
+        });
+        return;
+      }
+      // No awaits are allowed between the synchronous safety recheck and this
+      // captured-ID mutation. Files opened while prompts were visible survive.
+      useRightPanelStore.getState().closeFileSurfaces(activeThreadRef, capturedSurfaceIds);
+    })();
+  }, [
+    activeProject,
+    activeThreadRef,
+    activeWorkspaceRoot,
     prepareFileSurfacesForRemoval,
     rightPanelState.surfaces,
   ]);
@@ -4365,6 +4408,15 @@ function ChatViewContent(props: ChatViewProps) {
         event.preventDefault();
         event.stopPropagation();
         toggleRightPanel();
+        return;
+      }
+
+      if (command === "workspaceSearch.focus") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeThreadRef && activeProject) {
+          useRightPanelStore.getState().showWorkspaceSearch(activeThreadRef);
+        }
         return;
       }
 
@@ -6183,7 +6235,10 @@ function ChatViewContent(props: ChatViewProps) {
           }
           revealLine={activeFileSurface?.revealLine ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
+          pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}
+          onCloseFile={closeRightPanelSurface}
+          onCloseAllFiles={closeAllFileSurfaces}
         />
       </Suspense>
     ) : null
