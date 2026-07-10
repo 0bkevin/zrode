@@ -15,7 +15,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   const message = normalizeProviderErrorMessage(error);
   if (!message) return null;
   return (
-    <div className="pointer-events-auto w-full max-w-3xl">
+    <div className="pointer-events-auto w-fit max-w-full sm:max-w-2xl">
       <Alert variant="error" className="bg-background/70 shadow-lg/5 backdrop-blur-md">
         <CircleAlertIcon />
         <AlertDescription className="min-w-0">

@@ -1,8 +1,9 @@
 import { type ServerProvider } from "@t3tools/contracts";
 import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect } from "react";
 import { InfoIcon, XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import { useNotificationDismissalStore } from "../../notificationDismissalStore";
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -12,14 +13,26 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
 }: {
   status: ServerProvider | null;
 }) {
-  // Dismissal is keyed on the banner content so a new status/message shows again.
-  const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+  const providerInstanceId = status?.instanceId ?? null;
+  const dismissedKey = useNotificationDismissalStore((store) =>
+    providerInstanceId === null
+      ? null
+      : (store.providerStatusByInstanceId[providerInstanceId] ?? null),
+  );
+  const dismissProviderStatus = useNotificationDismissalStore(
+    (store) => store.dismissProviderStatus,
+  );
+  const clearProviderStatusDismissal = useNotificationDismissalStore(
+    (store) => store.clearProviderStatusDismissal,
+  );
   const isHidden = !status || status.status === "ready" || status.status === "disabled";
   // Reset the dismissal once the provider recovers, so a later recurrence with identical
   // content isn't permanently suppressed by a stale content key.
   useEffect(() => {
-    if (isHidden) setDismissedKey(null);
-  }, [isHidden]);
+    if (isHidden && providerInstanceId !== null) {
+      clearProviderStatusDismissal(providerInstanceId);
+    }
+  }, [clearProviderStatusDismissal, isHidden, providerInstanceId]);
 
   if (isHidden) {
     return null;
@@ -70,7 +83,11 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         <Button
           aria-label="Dismiss notification"
           className="shrink-0 self-center"
-          onClick={() => setDismissedKey(bannerKey)}
+          onClick={() => {
+            if (providerInstanceId !== null) {
+              dismissProviderStatus(providerInstanceId, bannerKey);
+            }
+          }}
           size="icon-xs"
           variant="ghost"
         >

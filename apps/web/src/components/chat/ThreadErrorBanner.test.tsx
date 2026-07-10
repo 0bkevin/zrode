@@ -16,6 +16,8 @@ describe("ThreadErrorBanner", () => {
     expect(descriptionSlotIndex).toBeGreaterThanOrEqual(0);
     expect(errorTextIndex).toBeGreaterThan(descriptionSlotIndex);
     expect(actionSlotIndex).toBe(-1);
+    expect(markup).toContain("w-fit max-w-full sm:max-w-2xl");
+    expect(markup).not.toContain("w-full max-w-3xl");
   });
 
   it("normalizes provider-native diagnostics before rendering", () => {
