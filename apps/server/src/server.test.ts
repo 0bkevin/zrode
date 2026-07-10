@@ -23,6 +23,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type PreviewEvent,
   ProjectId,
+  ProjectFileDiskRevision,
   ProviderDriverKind,
   ProviderInstanceId,
   ResolvedKeybindingRule,
@@ -96,6 +97,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
@@ -499,6 +501,7 @@ const buildAppUnderTest = (options?: {
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(workspaceEntriesLayer),
       ),
+      WorkspaceFileEvents.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       ProjectFaviconResolver.layer.pipe(Layer.provide(WorkspacePaths.layer)),
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
@@ -4455,7 +4458,47 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         contents: "export const answer = 42;\n",
         byteLength: 26,
         truncated: false,
+        diskRevision: ProjectFileDiskRevision.make(
+          `sha256:${NodeCrypto.createHash("sha256")
+            .update("export const answer = 42;\n")
+            .digest("hex")}:26`,
+        ),
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("streams workspace file invalidations over websocket rpc", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-watch-",
+      });
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const events = Array.from(
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.projectsWatchFiles]({ cwd: workspaceDir }).pipe(
+              Stream.tap((event) =>
+                event.type === "ready"
+                  ? fs.writeFileString(path.join(workspaceDir, "streamed.txt"), "changed\n")
+                  : Effect.void,
+              ),
+              Stream.take(2),
+              Stream.runCollect,
+              Effect.timeout("5 seconds"),
+            ),
+          ),
+        ),
+      );
+
+      assert.deepInclude(events[0], { version: 1, sequence: 0, type: "ready", cwd: workspaceDir });
+      assert.equal(events[1]?.type, "changed");
+      if (events[1]?.type === "changed") {
+        assert.include(events[1].structuralPaths, "streamed.txt");
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
@@ -4675,6 +4718,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             cwd: workspaceDir,
             relativePath: "nested/created.txt",
             contents: "written-by-rpc",
+            precondition: { _tag: "must-not-exist" },
           }),
         ),
       );
@@ -4733,6 +4777,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             cwd: workspaceDir,
             relativePath: "../escape.txt",
             contents: "nope",
+            precondition: { _tag: "unconditional" },
           }),
         ).pipe(Effect.result),
       );
@@ -4750,6 +4795,82 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(writeError.failure, "workspace_path_outside_root");
       assert.isDefined(writeError.cause);
       assert.notProperty(writeError, "contents");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns a typed error for oversized websocket file writes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-write-" });
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsWriteFile]({
+            cwd: workspaceDir,
+            relativePath: "nested/large.txt",
+            contents: "a".repeat(1024 * 1024 + 1),
+            precondition: { _tag: "must-not-exist" },
+          }),
+        ).pipe(Effect.result),
+      );
+
+      if (result._tag !== "Failure" || result.failure._tag !== "ProjectWriteFileError") {
+        assert.fail("Expected a ProjectWriteFileError");
+      }
+      assert.equal(result.failure.failure, "contents_too_large");
+      assert.equal(result.failure.byteLength, 1024 * 1024 + 1);
+      assert.equal(result.failure.maxByteLength, 1024 * 1024);
+      assert.isFalse(yield* fs.exists(path.join(workspaceDir, "nested")));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket project write revision conflicts distinctly", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-write-conflict-",
+      });
+      const filePath = path.join(workspaceDir, "shared.txt");
+      yield* fs.writeFileString(filePath, "base\n");
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const base = yield* client[WS_METHODS.projectsReadFile]({
+              cwd: workspaceDir,
+              relativePath: "shared.txt",
+            });
+            yield* fs.writeFileString(filePath, "external\n");
+            return yield* client[WS_METHODS.projectsWriteFile]({
+              cwd: workspaceDir,
+              relativePath: "shared.txt",
+              contents: "local\n",
+              precondition: { _tag: "match", diskRevision: base.diskRevision! },
+            });
+          }),
+        ).pipe(Effect.result),
+      );
+
+      if (result._tag !== "Failure" || result.failure._tag !== "ProjectWriteFileConflictError") {
+        assert.fail("Expected a ProjectWriteFileConflictError");
+      }
+      assert.equal(result.failure.relativePath, "shared.txt");
+      assert.equal(result.failure.actualExists, true);
+      assert.equal(
+        result.failure.actualDiskRevision,
+        ProjectFileDiskRevision.make(
+          `sha256:${NodeCrypto.createHash("sha256").update("external\n").digest("hex")}:9`,
+        ),
+      );
+      assert.notProperty(result.failure, "cause");
+      assert.equal(yield* fs.readFileString(filePath), "external\n");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

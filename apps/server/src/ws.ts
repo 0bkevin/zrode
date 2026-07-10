@@ -40,7 +40,9 @@ import {
   ProjectListEntriesError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
+  ProjectWriteFileConflictError,
   ProjectWriteFileError,
+  ProjectWatchFilesError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   OrchestrationReplayEventsError,
@@ -92,6 +94,7 @@ import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -210,7 +213,8 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
 
 function projectFileFailureContext(
   error:
-    | WorkspaceFileSystem.WorkspaceFileSystemError
+    | WorkspaceFileSystem.WorkspaceFileOperationError
+    | WorkspaceFileSystem.WorkspaceFileContentsTooLargeError
     | WorkspacePaths.WorkspacePathOutsideRootError,
 ): {
   readonly failure: ProjectFileFailure;
@@ -218,13 +222,18 @@ function projectFileFailureContext(
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
+  readonly byteLength?: number;
+  readonly maxByteLength?: number;
 } {
   switch (error._tag) {
     case "WorkspacePathOutsideRootError":
       return { failure: "workspace_path_outside_root" };
     case "WorkspaceFileSystemOperationError":
       return {
-        failure: "operation_failed",
+        failure:
+          error.cause instanceof Error && (error.cause as NodeJS.ErrnoException).code === "ENOENT"
+            ? "path_not_found"
+            : "operation_failed",
         resolvedPath: error.resolvedPath,
         operation: error.operation,
         operationPath: error.operationPath,
@@ -239,6 +248,12 @@ function projectFileFailureContext(
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceFileContentsTooLargeError":
+      return {
+        failure: "contents_too_large",
+        byteLength: error.byteLength,
+        maxByteLength: error.maxByteLength,
+      };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -313,6 +328,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsWatchFiles, AuthOrchestrationReadScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
@@ -423,6 +439,7 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const workspaceFileEvents = yield* WorkspaceFileEvents.WorkspaceFileEvents;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -1435,12 +1452,35 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.projectsWriteFile,
             workspaceFileSystem.writeFile(input).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProjectWriteFileError({
+              Effect.mapError((cause) => {
+                if (cause._tag === "WorkspaceFileRevisionConflictError") {
+                  return new ProjectWriteFileConflictError({
                     cwd: input.cwd,
                     relativePath: input.relativePath,
-                    ...projectFileFailureContext(cause),
+                    precondition: cause.precondition,
+                    actualExists: cause.actualExists,
+                    actualDiskRevision: cause.actualDiskRevision,
+                  });
+                }
+                return new ProjectWriteFileError({
+                  cwd: input.cwd,
+                  relativePath: input.relativePath,
+                  ...projectFileFailureContext(cause),
+                  cause,
+                });
+              }),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsWatchFiles]: (input) =>
+          observeRpcStreamEffect(
+            WS_METHODS.projectsWatchFiles,
+            workspaceFileEvents.subscribe(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectWatchFilesError({
+                    ...input,
+                    ...projectEntriesFailureContext(cause),
                     cause,
                   }),
               ),

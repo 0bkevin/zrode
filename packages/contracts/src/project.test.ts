@@ -2,10 +2,15 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ProjectFileDiskRevision,
   ProjectReadFileError,
+  ProjectFileEvent,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  ProjectWriteFileInput,
 } from "./project.ts";
+
+const decodeProjectFileDiskRevision = Schema.decodeUnknownSync(ProjectFileDiskRevision);
 
 describe("project RPC errors", () => {
   it("derives stable messages from structured request context while retaining causes", () => {
@@ -63,5 +68,61 @@ describe("project RPC errors", () => {
     expect(writeError.message).toBe("Legacy project write failure.");
     expect(writeError.relativePath).toBeUndefined();
     expect(writeError.failure).toBeUndefined();
+  });
+});
+
+describe("project file revisions", () => {
+  const revision = `sha256:${"a".repeat(64)}:42`;
+
+  it("accepts bounded, content-addressed disk revision tokens", () => {
+    expect(decodeProjectFileDiskRevision(revision)).toBe(revision);
+    expect(() => decodeProjectFileDiskRevision("mtime:42")).toThrow();
+  });
+
+  it("requires an explicit write precondition", () => {
+    const decode = Schema.decodeUnknownSync(ProjectWriteFileInput);
+
+    expect(
+      decode({
+        cwd: "/workspace",
+        relativePath: "src/index.ts",
+        contents: "export {};\n",
+        precondition: { _tag: "match", diskRevision: revision },
+      }).precondition,
+    ).toEqual({ _tag: "match", diskRevision: revision });
+    expect(() =>
+      decode({
+        cwd: "/workspace",
+        relativePath: "src/index.ts",
+        contents: "export {};\n",
+      }),
+    ).toThrow();
+  });
+});
+
+describe("project file events", () => {
+  const decode = Schema.decodeUnknownSync(ProjectFileEvent);
+
+  it("keeps path changes explicitly lossy and bounded", () => {
+    expect(
+      decode({
+        version: 1,
+        sequence: 2,
+        type: "changed",
+        cwd: "/workspace",
+        contentPaths: ["src/index.ts", " leading and trailing .ts "],
+        structuralPaths: ["src/renamed.ts"],
+      }),
+    ).toMatchObject({ type: "changed", sequence: 2 });
+    expect(() =>
+      decode({
+        version: 1,
+        sequence: 3,
+        type: "changed",
+        cwd: "/workspace",
+        contentPaths: Array.from({ length: 257 }, (_, index) => `file-${index}.ts`),
+        structuralPaths: [],
+      }),
+    ).toThrow();
   });
 });

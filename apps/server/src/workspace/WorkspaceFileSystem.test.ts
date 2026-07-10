@@ -1,4 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import { ProjectFileDiskRevision } from "@t3tools/contracts";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -51,6 +55,11 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
 
+function diskRevision(contents: string): string {
+  const bytes = Buffer.from(contents, "utf8");
+  return `sha256:${NodeCrypto.createHash("sha256").update(bytes).digest("hex")}:${bytes.byteLength}`;
+}
+
 it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("readFile", () => {
     it.effect("reads UTF-8 files relative to the workspace root", () =>
@@ -69,6 +78,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "export const answer = 42;\n",
           byteLength: 26,
           truncated: false,
+          diskRevision: diskRevision("export const answer = 42;\n"),
         });
       }),
     );
@@ -166,6 +176,50 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("rejects malformed UTF-8 instead of replacing bytes before an edit", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.writeFile(
+          path.join(cwd, "legacy.txt"),
+          Uint8Array.from([0x66, 0x6f, 0x80, 0x6f]),
+        );
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "legacy.txt" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceBinaryFileError);
+        expect("contents" in error).toBe(false);
+      }),
+    );
+
+    it.effect("keeps a UTF-8 BOM and preserves exact bytes across a no-op save", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const absolutePath = path.join(cwd, "bom.txt");
+        yield* fileSystem.writeFile(absolutePath, Uint8Array.from([0xef, 0xbb, 0xbf, 0x61]));
+
+        const before = yield* workspaceFileSystem.readFile({ cwd, relativePath: "bom.txt" });
+        expect(before.contents).toBe("\uFEFFa");
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "bom.txt",
+          contents: before.contents,
+          precondition: { _tag: "match", diskRevision: before.diskRevision! },
+        });
+        expect(Array.from(yield* fileSystem.readFile(absolutePath))).toEqual([
+          0xef, 0xbb, 0xbf, 0x61,
+        ]);
+      }),
+    );
+
     it.effect("preserves the real cause and path for I/O failures", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -189,9 +243,162 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         expect((error.cause as NodeJS.ErrnoException).code).toBe("ENOENT");
       }),
     );
+
+    it.effect("omits disk revisions for truncated previews", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "large.txt", "a".repeat(1024 * 1024 + 1));
+
+        const result = yield* workspaceFileSystem.readFile({ cwd, relativePath: "large.txt" });
+
+        expect(result.truncated).toBe(true);
+        expect(result.diskRevision).toBeNull();
+      }),
+    );
+
+    it.effect("detects same-size changes even when the mtime is restored", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const absolutePath = path.join(cwd, "same-size.txt");
+        yield* writeTextFile(cwd, "same-size.txt", "first\n");
+        const before = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "same-size.txt",
+        });
+        const originalStat = yield* Effect.promise(() => NodeFSP.stat(absolutePath));
+
+        yield* Effect.promise(() => NodeFSP.writeFile(absolutePath, "other\n", "utf8"));
+        yield* Effect.promise(() =>
+          NodeFSP.utimes(absolutePath, originalStat.atime, originalStat.mtime),
+        );
+        const after = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "same-size.txt",
+        });
+
+        expect(after.byteLength).toBe(before.byteLength);
+        expect(after.diskRevision).not.toBe(before.diskRevision);
+        expect(after.diskRevision).toBe(diskRevision("other\n"));
+      }),
+    );
+
+    it.effect("does not reject a truncated preview ending inside a UTF-8 code point", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const prefix = "a".repeat(1024 * 1024 - 1);
+        yield* writeTextFile(cwd, "unicode-large.txt", `${prefix}€`);
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "unicode-large.txt",
+        });
+
+        expect(result.truncated).toBe(true);
+        expect(result.contents).toBe(prefix);
+      }),
+    );
   });
 
   describe("writeFile", () => {
+    it.effect("rejects oversized UTF-8 contents before creating target directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "new/large.txt",
+            contents: "é".repeat(512 * 1024 + 1),
+            precondition: { _tag: "must-not-exist" },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileContentsTooLargeError);
+        expect(error).toMatchObject({
+          byteLength: 1024 * 1024 + 2,
+          maxByteLength: 1024 * 1024,
+        });
+        expect(
+          yield* fileSystem.stat(path.join(cwd, "new")).pipe(Effect.orElseSucceed(() => null)),
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("allows a small explicit replacement of an oversized target", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "large.txt", "a".repeat(1024 * 1024 + 1));
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "large.txt",
+          contents: "small\n",
+          precondition: { _tag: "unconditional" },
+        });
+
+        expect(yield* fileSystem.readFileString(path.join(cwd, "large.txt"))).toBe("small\n");
+      }),
+    );
+
+    it.effect("does not create missing parents for a failed matching save", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "missing/child.txt",
+            contents: "local\n",
+            precondition: {
+              _tag: "match",
+              diskRevision: ProjectFileDiskRevision.make(diskRevision("base\n")),
+            },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({ actualExists: false, actualDiskRevision: null });
+        expect(
+          yield* fileSystem.stat(path.join(cwd, "missing")).pipe(Effect.orElseSucceed(() => null)),
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("reports a directory collision as must-not-exist conflict", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "plan.md"));
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "plan.md",
+            contents: "plan\n",
+            precondition: { _tag: "must-not-exist" },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({ actualExists: true, actualDiskRevision: null });
+      }),
+    );
+
     it.effect("writes files relative to the workspace root", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -202,17 +409,22 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           cwd,
           relativePath: "plans/effect-rpc.md",
           contents: "# Plan\n",
+          precondition: { _tag: "must-not-exist" },
         });
         const saved = yield* fileSystem
           .readFileString(path.join(cwd, "plans/effect-rpc.md"))
           .pipe(Effect.orDie);
 
-        expect(result).toEqual({ relativePath: "plans/effect-rpc.md" });
+        expect(result).toEqual({
+          relativePath: "plans/effect-rpc.md",
+          diskRevision: diskRevision("# Plan\n"),
+          created: true,
+        });
         expect(saved).toBe("# Plan\n");
       }),
     );
 
-    it.effect("invalidates workspace entry search cache after writes", () =>
+    it.effect("makes newly-created entries visible on the next index refresh", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -228,7 +440,12 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           cwd,
           relativePath: "plans/effect-rpc.md",
           contents: "# Plan\n",
+          precondition: { _tag: "must-not-exist" },
         });
+        // Creation schedules this refresh in the background in production.
+        // Run it explicitly here so the assertion does not depend on fiber
+        // scheduling or native watcher timing.
+        yield* workspaceEntries.refresh(cwd);
 
         const afterWrite = yield* workspaceEntries.list({ cwd });
         expect(afterWrite.entries).toEqual(
@@ -250,6 +467,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             cwd,
             relativePath: "../escape.md",
             contents: "# nope\n",
+            precondition: { _tag: "unconditional" },
           })
           .pipe(Effect.flip);
 
@@ -262,6 +480,370 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           .stat(escapedPath)
           .pipe(Effect.orElseSucceed(() => null));
         expect(escapedStat).toBeNull();
+      }),
+    );
+
+    it.effect("rejects a stale matching revision without changing disk", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/index.ts", "base\n");
+        const base = yield* workspaceFileSystem.readFile({ cwd, relativePath: "src/index.ts" });
+        yield* writeTextFile(cwd, "src/index.ts", "external\n");
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "src/index.ts",
+            contents: "local\n",
+            precondition: { _tag: "match", diskRevision: base.diskRevision! },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({
+          precondition: { _tag: "match", diskRevision: base.diskRevision },
+          actualExists: true,
+          actualDiskRevision: diskRevision("external\n"),
+        });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "src/index.ts"))).toBe("external\n");
+      }),
+    );
+
+    it.effect("accepts a matching revision and returns the new revision", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "matched.txt", "before\n");
+        const before = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "matched.txt",
+        });
+
+        const result = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "matched.txt",
+          contents: "after\n",
+          precondition: { _tag: "match", diskRevision: before.diskRevision! },
+        });
+        const after = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "matched.txt",
+        });
+
+        expect(result).toEqual({
+          relativePath: "matched.txt",
+          diskRevision: diskRevision("after\n"),
+          created: false,
+        });
+        expect(after.diskRevision).toBe(result.diskRevision);
+        expect(after.contents).toBe("after\n");
+      }),
+    );
+
+    it.effect("enforces must-not-exist and supports explicit unconditional writes", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "notes.md", "existing\n");
+
+        const conflict = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "notes.md",
+            contents: "must not win\n",
+            precondition: { _tag: "must-not-exist" },
+          })
+          .pipe(Effect.flip);
+        expect(conflict).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        if (conflict._tag !== "WorkspaceFileRevisionConflictError") {
+          return yield* Effect.die("Expected a workspace file revision conflict");
+        }
+        expect(conflict.actualExists).toBe(true);
+        expect(conflict.actualDiskRevision).toBe(diskRevision("existing\n"));
+
+        const result = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "notes.md",
+          contents: "overwritten\n",
+          precondition: { _tag: "unconditional" },
+        });
+        expect(result).toEqual({
+          relativePath: "notes.md",
+          diskRevision: diskRevision("overwritten\n"),
+          created: false,
+        });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "notes.md"))).toBe("overwritten\n");
+      }),
+    );
+
+    it.effect("rechecks a matching target after the temporary file is durable", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const absolutePath = path.join(cwd, "race.txt");
+        yield* writeTextFile(cwd, "race.txt", "base\n");
+        let observedDurableTemp = false;
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforePublish: ({ canonicalTargetPath }) =>
+            Effect.promise(async () => {
+              const entries = await NodeFSP.readdir(path.dirname(canonicalTargetPath));
+              observedDurableTemp = entries.some(
+                (entry) => entry.startsWith(".race.txt.") && entry.endsWith(".tmp"),
+              );
+              await NodeFSP.writeFile(canonicalTargetPath, "external\n", "utf8");
+            }),
+        });
+        const base = yield* workspaceFileSystem.readFile({ cwd, relativePath: "race.txt" });
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "race.txt",
+            contents: "local\n",
+            precondition: { _tag: "match", diskRevision: base.diskRevision! },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({
+          actualExists: true,
+          actualDiskRevision: diskRevision("external\n"),
+        });
+        expect(observedDurableTemp).toBe(true);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(absolutePath, "utf8"))).toBe(
+          "external\n",
+        );
+        expect(
+          (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some(
+            (entry) => entry.startsWith(".race.txt.") && entry.endsWith(".tmp"),
+          ),
+        ).toBe(false);
+      }),
+    );
+
+    it.effect("does not hash an oversized target while checking a match", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const contents = "a".repeat(1024 * 1024 + 1);
+        yield* writeTextFile(cwd, "oversized.txt", contents);
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "oversized.txt",
+            contents: "must not replace the large file\n",
+            precondition: {
+              _tag: "match",
+              diskRevision: ProjectFileDiskRevision.make(diskRevision("unrelated\n")),
+            },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({
+          actualExists: true,
+          actualDiskRevision: null,
+        });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "oversized.txt"))).toBe(contents);
+      }),
+    );
+
+    it.effect("does not overwrite a file created after temporary-file preparation", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const absolutePath = path.join(cwd, "created-during-save.txt");
+        let observedDurableTemp = false;
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforePublish: ({ canonicalTargetPath }) =>
+            Effect.promise(async () => {
+              const entries = await NodeFSP.readdir(path.dirname(canonicalTargetPath));
+              observedDurableTemp = entries.some(
+                (entry) => entry.startsWith(".created-during-save.txt.") && entry.endsWith(".tmp"),
+              );
+              await NodeFSP.writeFile(canonicalTargetPath, "external creator\n", {
+                encoding: "utf8",
+                flag: "wx",
+              });
+            }),
+        });
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "created-during-save.txt",
+            contents: "local creator\n",
+            precondition: { _tag: "must-not-exist" },
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileRevisionConflictError);
+        expect(error).toMatchObject({
+          actualExists: true,
+          actualDiskRevision: diskRevision("external creator\n"),
+        });
+        expect(observedDurableTemp).toBe(true);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(absolutePath, "utf8"))).toBe(
+          "external creator\n",
+        );
+        expect(
+          (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some(
+            (entry) => entry.startsWith(".created-during-save.txt.") && entry.endsWith(".tmp"),
+          ),
+        ).toBe(false);
+      }),
+    );
+
+    it.effect("rejects target and parent symlinks that escape the workspace", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outsideDir = yield* makeTempDir;
+        yield* writeTextFile(outsideDir, "secret.txt", "outside\n");
+        yield* fileSystem.symlink(
+          path.join(outsideDir, "secret.txt"),
+          path.join(cwd, "target-link.txt"),
+        );
+        yield* fileSystem.symlink(outsideDir, path.join(cwd, "parent-link"));
+
+        const targetError = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "target-link.txt",
+            contents: "nope\n",
+            precondition: { _tag: "unconditional" },
+          })
+          .pipe(Effect.flip);
+        const parentError = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "parent-link/created.txt",
+            contents: "nope\n",
+            precondition: { _tag: "must-not-exist" },
+          })
+          .pipe(Effect.flip);
+
+        expect(targetError).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(parentError).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(yield* fileSystem.readFileString(path.join(outsideDir, "secret.txt"))).toBe(
+          "outside\n",
+        );
+        expect(
+          yield* fileSystem
+            .stat(path.join(outsideDir, "created.txt"))
+            .pipe(Effect.orElseSucceed(() => null)),
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("follows in-root symlinks without replacing the symlink", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "actual/target.txt", "before\n");
+        yield* fileSystem.symlink(
+          path.join(cwd, "actual", "target.txt"),
+          path.join(cwd, "linked.txt"),
+        );
+        yield* fileSystem.symlink(path.join(cwd, "actual"), path.join(cwd, "linked-directory"));
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "linked.txt",
+          contents: "after\n",
+          precondition: { _tag: "unconditional" },
+        });
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "linked-directory/created.txt",
+          contents: "created through directory link\n",
+          precondition: { _tag: "must-not-exist" },
+        });
+
+        expect(yield* fileSystem.readFileString(path.join(cwd, "actual", "target.txt"))).toBe(
+          "after\n",
+        );
+        expect(
+          (yield* Effect.promise(() =>
+            NodeFSP.lstat(path.join(cwd, "linked.txt")),
+          )).isSymbolicLink(),
+        ).toBe(true);
+        expect(yield* fileSystem.readFileString(path.join(cwd, "actual", "created.txt"))).toBe(
+          "created through directory link\n",
+        );
+        expect(
+          (yield* Effect.promise(() =>
+            NodeFSP.lstat(path.join(cwd, "linked-directory")),
+          )).isSymbolicLink(),
+        ).toBe(true);
+      }),
+    );
+
+    it.effect("preserves the mode of an overwritten file", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const absolutePath = path.join(cwd, "script.sh");
+        yield* writeTextFile(cwd, "script.sh", "#!/bin/sh\nexit 0\n");
+        yield* Effect.promise(() => NodeFSP.chmod(absolutePath, 0o6751));
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "script.sh",
+          contents: "#!/bin/sh\nexit 1\n",
+          precondition: { _tag: "unconditional" },
+        });
+
+        const stat = yield* Effect.promise(() => NodeFSP.stat(absolutePath));
+        expect(stat.mode & 0o7777).toBe(0o6751);
+      }),
+    );
+
+    it.effect("allows exactly one concurrent writer for a shared matching revision", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "shared.txt", "base\n");
+        const base = yield* workspaceFileSystem.readFile({ cwd, relativePath: "shared.txt" });
+
+        const outcomes = yield* Effect.all(
+          ["writer-a\n", "writer-b\n"].map((contents) =>
+            workspaceFileSystem
+              .writeFile({
+                cwd,
+                relativePath: "shared.txt",
+                contents,
+                precondition: { _tag: "match", diskRevision: base.diskRevision! },
+              })
+              .pipe(Effect.result),
+          ),
+          { concurrency: "unbounded" },
+        );
+
+        expect(outcomes.filter((outcome) => outcome._tag === "Success")).toHaveLength(1);
+        const failures = outcomes.filter((outcome) => outcome._tag === "Failure");
+        expect(failures).toHaveLength(1);
+        expect(failures[0]?.failure).toBeInstanceOf(
+          WorkspaceFileSystem.WorkspaceFileRevisionConflictError,
+        );
+        expect(["writer-a\n", "writer-b\n"]).toContain(
+          yield* fileSystem.readFileString(path.join(cwd, "shared.txt")),
+        );
       }),
     );
   });

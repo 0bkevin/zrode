@@ -1,4 +1,4 @@
-import { type EnvironmentId, type ProjectReadFileResult, WS_METHODS } from "@t3tools/contracts";
+import { WS_METHODS } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import { Atom } from "effect/unstable/reactivity";
 
@@ -7,6 +7,7 @@ import {
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 import {
   type CreateProjectInput,
@@ -24,31 +25,11 @@ export type {
   UpdateProjectInput,
 } from "../operations/commands.ts";
 
-export interface OptimisticProjectFile {
-  readonly data: ProjectReadFileResult;
-  readonly confirmedAgainst: object | null | undefined;
-}
-
-export interface OptimisticProjectFileTarget {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-  readonly relativePath: string;
-}
-
-function optimisticProjectFileKey(target: OptimisticProjectFileTarget): string {
-  return JSON.stringify([target.environmentId, target.cwd, target.relativePath]);
-}
-
 export function createProjectEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
 ) {
   const projectScheduler = createAtomCommandScheduler();
   const fileScheduler = createAtomCommandScheduler();
-  const optimisticFileFamily = Atom.family((key: string) =>
-    Atom.make<OptimisticProjectFile | null>(null).pipe(
-      Atom.withLabel(`environment-data:projects:optimistic-file:${key}`),
-    ),
-  );
   const projectConcurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { projectId: string } }) =>
@@ -72,8 +53,11 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
-    optimisticFile: (target: OptimisticProjectFileTarget) =>
-      optimisticFileFamily(optimisticProjectFileKey(target)),
+    fileEvents: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:projects:file-events",
+      tag: WS_METHODS.projectsWatchFiles,
+      idleTtlMs: 1_000,
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:create",
       execute: (input: CreateProjectInput) => createProject(input),

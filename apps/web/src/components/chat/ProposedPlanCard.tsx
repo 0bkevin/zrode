@@ -32,6 +32,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { projectEnvironment } from "~/state/projects";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { saveProjectFileWithReplaceConfirmation } from "../files/saveProjectFileWithConfirmation";
 
 export const ProposedPlanCard = memo(function ProposedPlanCard({
   planMarkdown,
@@ -114,26 +115,28 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
 
     setIsSavingToWorkspace(true);
     void (async () => {
-      const result = await writeProjectFile({
+      const outcome = await saveProjectFileWithReplaceConfirmation({
         environmentId,
-        input: {
+        file: {
           cwd: workspaceRoot,
           relativePath,
           contents: saveContents,
         },
+        write: writeProjectFile,
+        confirmReplace: (path) => window.confirm(`Replace the existing workspace file ${path}?`),
       });
       setIsSavingToWorkspace(false);
-      if (result._tag === "Success") {
+      if (outcome._tag === "Saved") {
         setIsSaveDialogOpen(false);
         toastManager.add({
           type: "success",
           title: "Plan saved to workspace",
-          description: result.value.relativePath,
+          description: outcome.value.relativePath,
         });
         return;
       }
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
+      if (outcome._tag === "Failure" && !isAtomCommandInterrupted(outcome.result)) {
+        const error = squashAtomCommandFailure(outcome.result);
         toastManager.add(
           stackedThreadToast({
             type: "error",

@@ -32,6 +32,7 @@ import { projectEnvironment } from "~/state/projects";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { saveProjectFileWithReplaceConfirmation } from "./files/saveProjectFileWithConfirmation";
 
 function stepStatusIcon(status: string): React.ReactNode {
   if (status === "completed") {
@@ -105,25 +106,28 @@ const PlanSidebar = memo(function PlanSidebar({
     const filename = buildProposedPlanMarkdownFilename(planMarkdown);
     setIsSavingToWorkspace(true);
     void (async () => {
-      const result = await writeProjectFile({
+      const outcome = await saveProjectFileWithReplaceConfirmation({
         environmentId,
-        input: {
+        file: {
           cwd: workspaceRoot,
           relativePath: filename,
           contents: normalizePlanMarkdownForExport(planMarkdown),
         },
+        write: writeProjectFile,
+        confirmReplace: (relativePath) =>
+          window.confirm(`Replace the existing workspace file ${relativePath}?`),
       });
       setIsSavingToWorkspace(false);
-      if (result._tag === "Success") {
+      if (outcome._tag === "Saved") {
         toastManager.add({
           type: "success",
           title: "Plan saved",
-          description: result.value.relativePath,
+          description: outcome.value.relativePath,
         });
         return;
       }
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
+      if (outcome._tag === "Failure" && !isAtomCommandInterrupted(outcome.result)) {
+        const error = squashAtomCommandFailure(outcome.result);
         toastManager.add(
           stackedThreadToast({
             type: "error",

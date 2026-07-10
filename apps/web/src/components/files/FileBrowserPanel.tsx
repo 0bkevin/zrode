@@ -2,18 +2,20 @@ import type { FileTreeDirectoryHandle, FileTreeItemHandle } from "@pierre/trees"
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { ChevronsDownUp, RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
 import { ZRODE_PIERRE_ICONS } from "~/pierre-icons";
 
+import { resetFileTreePathsPreservingExpansion, revealActiveFile } from "./fileBrowserTreeState";
 import { useProjectEntriesQuery } from "./projectFilesQueryState";
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
+  activeRelativePath: string | null;
   onOpenFile: (relativePath: string) => void;
 }
 
@@ -54,10 +56,11 @@ function isFileTreeDirectoryHandle(
   return item?.isDirectory() === true;
 }
 
-export default function FileBrowserPanel({
+function FileBrowserPanel({
   environmentId,
   cwd,
   projectName,
+  activeRelativePath,
   onOpenFile,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
@@ -68,9 +71,18 @@ export default function FileBrowserPanel({
     [entries],
   );
   const entryKindsRef = useRef<ReadonlyMap<string, ProjectEntry["kind"]>>(entryKinds);
+  const activeRelativePathRef = useRef(activeRelativePath);
+  const onOpenFileRef = useRef(onOpenFile);
+  const suppressSelectionChangeRef = useRef(false);
   const treePaths = useMemo(() => entries.map(treePath), [entries]);
   const directoryPaths = useMemo(() => directoryPathsForEntries(entries), [entries]);
   const previousTreePathsRef = useRef<readonly string[]>([]);
+  const previousDirectoryPathsRef = useRef<readonly string[]>([]);
+  const previousActivePathRef = useRef<string | null>(null);
+
+  entryKindsRef.current = entryKinds;
+  activeRelativePathRef.current = activeRelativePath;
+  onOpenFileRef.current = onOpenFile;
 
   const { model } = useFileTree({
     density: "compact",
@@ -79,9 +91,14 @@ export default function FileBrowserPanel({
     initialExpansion: "closed",
     icons: ZRODE_PIERRE_ICONS,
     onSelectionChange: (selectedPaths) => {
+      if (suppressSelectionChangeRef.current) return;
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
-      if (selectedPath && entryKindsRef.current.get(selectedPath) === "file") {
-        onOpenFile(selectedPath);
+      if (
+        selectedPath &&
+        selectedPath !== activeRelativePathRef.current &&
+        entryKindsRef.current.get(selectedPath) === "file"
+      ) {
+        onOpenFileRef.current(selectedPath);
       }
     },
     paths: [],
@@ -90,11 +107,27 @@ export default function FileBrowserPanel({
   });
 
   useEffect(() => {
-    if (previousTreePathsRef.current === treePaths) return;
-    entryKindsRef.current = entryKinds;
-    previousTreePathsRef.current = treePaths;
-    model.resetPaths(treePaths);
-  }, [entryKinds, model, treePaths]);
+    suppressSelectionChangeRef.current = true;
+    try {
+      const pathsChanged = resetFileTreePathsPreservingExpansion({
+        model,
+        previousDirectoryPaths: previousDirectoryPathsRef.current,
+        previousTreePaths: previousTreePathsRef.current,
+        treePaths,
+      });
+      const activePathChanged = previousActivePathRef.current !== activeRelativePath;
+
+      previousTreePathsRef.current = treePaths;
+      previousDirectoryPathsRef.current = directoryPaths;
+      previousActivePathRef.current = activeRelativePath;
+
+      if (pathsChanged || activePathChanged) {
+        revealActiveFile({ activeRelativePath, entryKinds, model });
+      }
+    } finally {
+      suppressSelectionChangeRef.current = false;
+    }
+  }, [activeRelativePath, directoryPaths, entryKinds, model, treePaths]);
 
   const collapseAllFiles = useCallback(() => {
     for (const directoryPath of directoryPaths) {
@@ -167,3 +200,5 @@ export default function FileBrowserPanel({
     </div>
   );
 }
+
+export default memo(FileBrowserPanel);

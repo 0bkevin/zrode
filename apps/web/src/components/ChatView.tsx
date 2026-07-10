@@ -283,6 +283,15 @@ import {
   resolveServerConfigVersionMismatch,
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
+import {
+  fileDocumentStore,
+  prepareFileDocumentForClose,
+  type FileDocumentCloseDecision,
+  type FileDocumentClosePrompt,
+  useFileDocumentBeforeUnloadProtection,
+  useFileDocumentStoreVersion,
+} from "./files/fileDocumentRuntime";
+import { FileDocumentCloseDialog } from "./files/FileDocumentCloseDialog";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -1421,33 +1430,6 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread ? environmentShell.stateAtom(activeThread.environmentId) : null,
   );
   const activeEnvironmentBootstrapComplete = activeEnvironmentShell.data?.snapshot._tag === "Some";
-  const activeProjectKey = activeProject
-    ? `${activeProject.environmentId}:${activeProject.workspaceRoot}`
-    : null;
-  const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
-    ReadonlyMap<string, ReadonlySet<string>>
-  >(() => new Map());
-  const pendingFileSurfaceIds = activeProjectKey
-    ? (pendingFileSurfaceIdsByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS)
-    : EMPTY_PENDING_FILE_SURFACE_IDS;
-  const handleFilePendingChange = useCallback(
-    (relativePath: string, pending: boolean) => {
-      if (!activeProjectKey) return;
-      setPendingFileSurfaceIdsByProject((currentByProject) => {
-        const current = currentByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS;
-        const surfaceId = `file:${relativePath}`;
-        if (current.has(surfaceId) === pending) return currentByProject;
-        const next = new Set(current);
-        if (pending) next.add(surfaceId);
-        else next.delete(surfaceId);
-        const nextByProject = new Map(currentByProject);
-        if (next.size === 0) nextByProject.delete(activeProjectKey);
-        else nextByProject.set(activeProjectKey, next);
-        return nextByProject;
-      });
-    },
-    [activeProjectKey],
-  );
   const configuredPreviewUrls = useMemo(
     () => getConfiguredPreviewUrls(activeProject?.scripts),
     [activeProject?.scripts],
@@ -2264,6 +2246,48 @@ function ChatViewContent(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  const fileDocumentStoreVersion = useFileDocumentStoreVersion();
+  useFileDocumentBeforeUnloadProtection();
+  const pendingFileSurfaceIds = useMemo(() => {
+    if (!activeProject || !activeWorkspaceRoot) return EMPTY_PENDING_FILE_SURFACE_IDS;
+    const pending = new Set<string>();
+    for (const snapshot of fileDocumentStore.getUnsafeSnapshots()) {
+      if (
+        snapshot.key.environmentId === activeProject.environmentId &&
+        snapshot.key.cwd === activeWorkspaceRoot
+      ) {
+        pending.add(`file:${snapshot.key.relativePath}`);
+      }
+    }
+    return pending;
+  }, [activeProject, activeWorkspaceRoot, fileDocumentStoreVersion]);
+  const [fileDocumentClosePrompt, setFileDocumentClosePrompt] =
+    useState<FileDocumentClosePrompt | null>(null);
+  const fileDocumentCloseResolverRef = useRef<
+    ((decision: FileDocumentCloseDecision) => void) | null
+  >(null);
+  const requestFileDocumentCloseDecision = useCallback(
+    (prompt: FileDocumentClosePrompt) =>
+      new Promise<FileDocumentCloseDecision>((resolve) => {
+        fileDocumentCloseResolverRef.current?.("cancel");
+        fileDocumentCloseResolverRef.current = resolve;
+        setFileDocumentClosePrompt(prompt);
+      }),
+    [],
+  );
+  const resolveFileDocumentCloseDecision = useCallback((decision: FileDocumentCloseDecision) => {
+    const resolve = fileDocumentCloseResolverRef.current;
+    fileDocumentCloseResolverRef.current = null;
+    setFileDocumentClosePrompt(null);
+    resolve?.(decision);
+  }, []);
+  useEffect(
+    () => () => {
+      fileDocumentCloseResolverRef.current?.("cancel");
+      fileDocumentCloseResolverRef.current = null;
+    },
+    [],
+  );
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -3272,14 +3296,54 @@ function ChatViewContent(props: ChatViewProps) {
       setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
     }
   }, [activeThreadRef]);
+  const prepareFileSurfacesForRemoval = useCallback(
+    async (surfaces: readonly RightPanelSurface[]): Promise<boolean> => {
+      if (!activeThreadRef || !activeProject || !activeWorkspaceRoot) return true;
+      for (const surface of surfaces) {
+        if (surface.kind !== "file") continue;
+        const key = {
+          environmentId: activeProject.environmentId,
+          cwd: activeWorkspaceRoot,
+          relativePath: surface.relativePath,
+        };
+        const snapshot = fileDocumentStore.getSnapshot(key);
+        if (
+          !snapshot?.isDirty &&
+          snapshot?.status !== "saving" &&
+          snapshot?.status !== "retrying"
+        ) {
+          continue;
+        }
+        useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
+        if (!(await prepareFileDocumentForClose(key, requestFileDocumentCloseDecision))) {
+          toastManager.add({
+            type: "warning",
+            title: "File kept open",
+            description: `Resolve or save the changes to ${surface.relativePath} before closing.`,
+          });
+          return false;
+        }
+      }
+      return true;
+    },
+    [activeProject, activeThreadRef, activeWorkspaceRoot, requestFileDocumentCloseDecision],
+  );
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
-      cleanupRightPanelSurfaces([surface]);
-      useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval([surface]))) return;
+        cleanupRightPanelSurfaces([surface]);
+        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      })();
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
+      syncActivePreviewSurface,
+    ],
   );
   const openChatInNewWindow = useCallback(() => {
     if (!activeThreadRef) return;
@@ -3329,43 +3393,47 @@ function ChatViewContent(props: ChatViewProps) {
                 }
               : null;
       if (!target) return;
-      void openPaneWindow(target)
-        .catch(() => false)
-        .then((opened) => {
-          if (!opened) {
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Unable to open window",
-                description: "The pane window could not be opened.",
-              }),
-            );
-            return;
-          }
-          // A moved preview tab counts as claimed until the new window's
-          // claim arrives, so this window neither re-adopts nor closes it.
-          if (target.kind === "preview") {
-            markPreviewTabDetaching(target.tabId);
-          }
-          // Close the tab here without terminating anything server-side — the
-          // new window reattaches to the same terminal sessions / workspace.
-          useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-          syncActivePreviewSurface();
-        });
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval([surface]))) return;
+        const opened = await openPaneWindow(target).catch(() => false);
+        if (!opened) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to open window",
+              description: "The pane window could not be opened.",
+            }),
+          );
+          return;
+        }
+        // A moved preview tab counts as claimed until the new window's
+        // claim arrives, so this window neither re-adopts nor closes it.
+        if (target.kind === "preview") {
+          markPreviewTabDetaching(target.tabId);
+        }
+        // Close the tab here without terminating anything server-side — the
+        // new window reattaches to the same terminal sessions / workspace.
+        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      })();
     },
-    [activeThreadRef, syncActivePreviewSurface],
+    [activeThreadRef, prepareFileSurfacesForRemoval, syncActivePreviewSurface],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      })();
     },
     [
       activeThreadRef,
       cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
     ],
@@ -3376,22 +3444,34 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      })();
     },
     [
       activeThreadRef,
       cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
     ],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
-    cleanupRightPanelSurfaces(rightPanelState.surfaces);
-    useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
-  }, [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces]);
+    void (async () => {
+      if (!(await prepareFileSurfacesForRemoval(rightPanelState.surfaces))) return;
+      cleanupRightPanelSurfaces(rightPanelState.surfaces);
+      useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
+    })();
+  }, [
+    activeThreadRef,
+    cleanupRightPanelSurfaces,
+    prepareFileSurfacesForRemoval,
+    rightPanelState.surfaces,
+  ]);
   const copyRightPanelFilePath = useCallback((relativePath: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -6104,7 +6184,6 @@ function ChatViewContent(props: ChatViewProps) {
           revealLine={activeFileSurface?.revealLine ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
           onOpenFile={openFileSurface}
-          onPendingChange={handleFilePendingChange}
         />
       </Suspense>
     ) : null
@@ -6476,6 +6555,11 @@ function ChatViewContent(props: ChatViewProps) {
           </RightPanelTabs>
         </RightPanelSheet>
       ) : null}
+
+      <FileDocumentCloseDialog
+        prompt={fileDocumentClosePrompt}
+        onDecision={resolveFileDocumentCloseDecision}
+      />
 
       {expandedImage && (
         <ExpandedImageDialog

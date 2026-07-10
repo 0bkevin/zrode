@@ -68,15 +68,19 @@ import {
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
+  ProjectFileEvent,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
+  ProjectWriteFileConflictError,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
+  ProjectWatchFilesError,
+  ProjectWatchFilesInput,
 } from "./project.ts";
 import {
   TerminalAttachInput,
@@ -159,6 +163,7 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsWatchFiles: "projects.watchFiles",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -413,7 +418,18 @@ export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
-  error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectWriteFileError,
+    ProjectWriteFileConflictError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+export const WsProjectsWatchFilesRpc = Rpc.make(WS_METHODS.projectsWatchFiles, {
+  payload: ProjectWatchFilesInput,
+  success: ProjectFileEvent,
+  error: Schema.Union([ProjectWatchFilesError, EnvironmentAuthorizationError]),
+  stream: true,
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -744,6 +760,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsWatchFilesRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,

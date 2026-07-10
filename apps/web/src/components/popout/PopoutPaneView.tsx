@@ -6,6 +6,7 @@ import { nextTerminalId } from "@t3tools/shared/terminalLabels";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import ChatView from "~/components/ChatView";
+import { useFileDocumentBeforeUnloadProtection } from "~/components/files/fileDocumentRuntime";
 import { ThreadTerminalPanel, type TerminalPanelSurface } from "~/components/ThreadTerminalPanel";
 import { toastManager } from "~/components/ui/toast";
 import { getConfiguredPreviewUrls } from "~/components/preview/previewEmptyStateLogic";
@@ -443,6 +444,7 @@ function PopoutFilesPane({
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: React.ComponentProps<typeof FilePreviewPanel>["availableEditors"];
 }) {
+  useFileDocumentBeforeUnloadProtection();
   const [activePath, setActivePath] = useState<string | null>(initialPath);
   const title = activePath
     ? `${activePath.slice(activePath.lastIndexOf("/") + 1)} — ${project.title}`
@@ -464,7 +466,6 @@ function PopoutFilesPane({
           revealLine={null}
           revealRequestId={0}
           onOpenFile={setActivePath}
-          onPendingChange={() => undefined}
         />
       </Suspense>
     </PopoutPaneFrame>
