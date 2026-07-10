@@ -2,8 +2,9 @@
  * In-memory PreviewManager implementation.
  *
  * Sessions are keyed by `(threadId, tabId)`; a single thread can host
- * multiple tabs (browser-style). `open` always creates a new tab — tab
- * lifecycle is owned by the renderer.
+ * multiple tabs (browser-style). `open` creates a new tab by default, while
+ * callers may opt into an atomic ensure/reuse operation for recovery and
+ * automation paths.
  *
  * Events are published via Effect's `PubSub`, so subscriber failures are
  * isolated from the publishing call (a closed WS subscriber queue cannot
@@ -69,6 +70,11 @@ interface ManagerState {
   readonly sessions: ReadonlyMap<string, PreviewSessionState>;
 }
 
+interface PreviewOpenResult {
+  readonly snapshot: PreviewSessionSnapshot;
+  readonly opened: boolean;
+}
+
 const initialState: ManagerState = { sessions: new Map() };
 
 const compositeKey = (threadId: string, tabId: string): string => `${threadId}\u0000${tabId}`;
@@ -83,6 +89,14 @@ const sessionsForThread = (
   }
   return out;
 };
+
+const latestSessionForThread = (
+  state: ManagerState,
+  threadId: string,
+): PreviewSessionState | undefined =>
+  sessionsForThread(state, threadId)
+    .toSorted((a, b) => a.snapshot.updatedAt.localeCompare(b.snapshot.updatedAt))
+    .at(-1);
 
 const normalizeUrl = (rawUrl: string): Effect.Effect<string, PreviewInvalidUrlError> =>
   Effect.try({
@@ -196,34 +210,49 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
-      const tabId = newPreviewTabId();
-      const updatedAt = yield* currentIsoTimestamp;
-      const snapshot = input.url
-        ? buildLoadingSnapshot({
-            threadId: input.threadId,
-            tabId,
-            url: yield* normalizeUrl(input.url),
-            title: "",
-            updatedAt,
-          })
-        : buildIdleSnapshot({ threadId: input.threadId, tabId, updatedAt });
-      yield* SynchronizedRef.update(stateRef, (state) => {
-        const sessions = new Map(state.sessions);
-        sessions.set(compositeKey(input.threadId, tabId), {
+      const normalizedUrl = input.url ? yield* normalizeUrl(input.url) : undefined;
+      const result = yield* SynchronizedRef.modifyEffect(
+        stateRef,
+        (state): Effect.Effect<readonly [PreviewOpenResult, ManagerState]> => {
+          if (input.reuseExistingSession) {
+            const latest = latestSessionForThread(state, input.threadId);
+            if (latest) {
+              return Effect.succeed([{ snapshot: latest.snapshot, opened: false }, state] as const);
+            }
+          }
+
+          return Effect.gen(function* PreviewManagerCreateSession() {
+            const tabId = newPreviewTabId();
+            const updatedAt = yield* currentIsoTimestamp;
+            const snapshot = normalizedUrl
+              ? buildLoadingSnapshot({
+                  threadId: input.threadId,
+                  tabId,
+                  url: normalizedUrl,
+                  title: "",
+                  updatedAt,
+                })
+              : buildIdleSnapshot({ threadId: input.threadId, tabId, updatedAt });
+            const sessions = new Map(state.sessions);
+            sessions.set(compositeKey(input.threadId, tabId), {
+              threadId: input.threadId,
+              tabId,
+              snapshot,
+            });
+            return [{ snapshot, opened: true }, { sessions }] as const;
+          });
+        },
+      );
+      if (result.opened) {
+        yield* PubSub.publish(eventsPubSub, {
+          type: "opened",
           threadId: input.threadId,
-          tabId,
-          snapshot,
+          tabId: result.snapshot.tabId,
+          createdAt: result.snapshot.updatedAt,
+          snapshot: result.snapshot,
         });
-        return { sessions };
-      });
-      yield* PubSub.publish(eventsPubSub, {
-        type: "opened",
-        threadId: input.threadId,
-        tabId,
-        createdAt: snapshot.updatedAt,
-        snapshot,
-      });
-      return snapshot;
+      }
+      return result.snapshot;
     },
   );
 

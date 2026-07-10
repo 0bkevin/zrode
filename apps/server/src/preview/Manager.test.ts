@@ -1,7 +1,8 @@
 import { it } from "@effect/vitest";
 import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
 import { PreviewUrlNormalizationError } from "@t3tools/shared/preview";
-import { Effect, PubSub } from "effect";
+import { Deferred, Effect, PubSub } from "effect";
+import { TestClock } from "effect/testing";
 import { expect } from "vite-plus/test";
 
 import * as PreviewManager from "./Manager.ts";
@@ -64,6 +65,28 @@ it.layer(PreviewManager.layer)("PreviewManager", (it) => {
       const manager = yield* PreviewManager.PreviewManager;
       const snapshot = yield* manager.open({ threadId });
       expect(snapshot.navStatus._tag).toBe("Idle");
+    }),
+  );
+
+  it.effect("commits an opened session before publishing its event", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const subscription = yield* manager.subscribeEvents;
+      const sessionsAfterEvent = yield* Deferred.make<ReadonlyArray<string>>();
+      yield* PubSub.take(subscription).pipe(
+        Effect.flatMap(() => manager.list({ threadId })),
+        Effect.flatMap((result) =>
+          Deferred.succeed(
+            sessionsAfterEvent,
+            result.sessions.map((session) => session.tabId),
+          ),
+        ),
+        Effect.forkChild,
+      );
+
+      const opened = yield* manager.open({ threadId, url: "localhost:5173" });
+      expect(yield* Deferred.await(sessionsAfterEvent)).toContain(opened.tabId);
     }),
   );
 
@@ -278,14 +301,18 @@ it.layer(PreviewManager.layer)("PreviewManager", (it) => {
     }),
   );
 
-  it.effect("open creates an independent tab on every call", () =>
+  it.effect("open keeps explicit new-tab requests independent", () =>
     Effect.gen(function* () {
       const threadId = freshThreadId();
       const manager = yield* PreviewManager.PreviewManager;
       const collector = yield* collectEvents;
 
       const a = yield* manager.open({ threadId, url: "http://localhost:5173" });
-      const b = yield* manager.open({ threadId, url: "http://localhost:3000/path" });
+      const b = yield* manager.open({
+        threadId,
+        url: "http://localhost:3000/path",
+        reuseExistingSession: false,
+      });
 
       expect(a.tabId).not.toBe(b.tabId);
       const list = yield* manager.list({ threadId });
@@ -293,6 +320,53 @@ it.layer(PreviewManager.layer)("PreviewManager", (it) => {
 
       const events = yield* collector.drain;
       expect(events.map((e) => e.type)).toEqual(["opened", "opened"]);
+    }),
+  );
+
+  it.effect("atomically reuses one session across concurrent ensure opens", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const collector = yield* collectEvents;
+
+      const opened = yield* Effect.all(
+        Array.from({ length: 8 }, () =>
+          manager.open({
+            threadId,
+            url: "http://localhost:5173",
+            reuseExistingSession: true,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      );
+
+      expect(new Set(opened.map((snapshot) => snapshot.tabId))).toHaveLength(1);
+      expect((yield* manager.list({ threadId })).sessions).toHaveLength(1);
+      expect((yield* collector.drain).filter((event) => event.type === "opened")).toHaveLength(1);
+    }),
+  );
+
+  it.effect("reuses the most recently updated session instead of the last-created session", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const manager = yield* PreviewManager.PreviewManager;
+      const first = yield* manager.open({ threadId, url: "http://localhost:5173" });
+      yield* TestClock.adjust("1 millis");
+      yield* manager.open({ threadId, url: "http://localhost:3000" });
+      yield* TestClock.adjust("1 millis");
+      yield* manager.navigate({
+        threadId,
+        tabId: first.tabId,
+        url: "http://localhost:5173/latest",
+      });
+
+      const reused = yield* manager.open({
+        threadId,
+        url: "http://localhost:4000",
+        reuseExistingSession: true,
+      });
+
+      expect(reused.tabId).toBe(first.tabId);
     }),
   );
 

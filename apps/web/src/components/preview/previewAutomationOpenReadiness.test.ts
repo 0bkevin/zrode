@@ -1,7 +1,10 @@
 import type { PreviewAutomationOpenInput, PreviewSessionSnapshot } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { previewAutomationOpenNeedsOverlay } from "./previewAutomationOpenReadiness";
+import {
+  previewAutomationOpenNeedsNavigation,
+  previewAutomationOpenNeedsOverlay,
+} from "./previewAutomationOpenReadiness";
 
 const snapshot = (navStatus: PreviewSessionSnapshot["navStatus"]): PreviewSessionSnapshot => ({
   threadId: "thread-1",
@@ -40,6 +43,44 @@ describe("preview automation open readiness", () => {
           url: "https://example.com/",
           title: "Example",
         }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("preview automation open navigation", () => {
+  const loaded = snapshot({
+    _tag: "Success",
+    url: "http://localhost:5173/",
+    title: "App",
+  });
+
+  it("does not reload a newly returned session whose normalized URL already matches", () => {
+    expect(
+      previewAutomationOpenNeedsNavigation(
+        { url: "localhost:5173" } as PreviewAutomationOpenInput,
+        loaded,
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  it("navigates a server-reused session when its URL differs", () => {
+    expect(
+      previewAutomationOpenNeedsNavigation(
+        { url: "localhost:3000" } as PreviewAutomationOpenInput,
+        loaded,
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("preserves explicit navigation for a locally selected existing tab", () => {
+    expect(
+      previewAutomationOpenNeedsNavigation(
+        { url: "localhost:5173" } as PreviewAutomationOpenInput,
+        loaded,
+        true,
       ),
     ).toBe(true);
   });

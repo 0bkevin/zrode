@@ -82,7 +82,11 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
         previewEnvironment.open,
         {
           environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, url: recoverableUrl },
+          input: {
+            threadId: threadRef.threadId,
+            url: recoverableUrl,
+            reuseExistingSession: true,
+          },
         },
         { reportDefect: false, reportFailure: false },
       ).then((openResult) => {

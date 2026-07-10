@@ -31,9 +31,11 @@ const request = (
 ): PreviewAutomationRequest => ({
   requestId,
   threadId,
+  sessionKey: "provider-session-1",
   operation: "status",
   input: {},
   timeoutMs: 15_000,
+  deadlineAt: Date.now() + 15_000,
   ...overrides,
 });
 
@@ -149,6 +151,147 @@ describe("previewAutomationRequestConsumer", () => {
       "request-2",
     ]);
     expect(responses.map((response) => response.requestId)).toEqual(["request-1", "request-2"]);
+    registry.dispose();
+  });
+
+  it("serializes one provider session and rejects expired queued work without handling it", async () => {
+    const requestsAtom = Atom.make<AsyncResult.AsyncResult<PreviewAutomationStreamEvent, Error>>(
+      AsyncResult.initial<PreviewAutomationStreamEvent, Error>(false),
+    );
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const handleRequest = vi.fn(async (value: PreviewAutomationRequest) => {
+      if (value.requestId === "request-1") await firstBlocked;
+      return value.requestId;
+    });
+    const responses: PreviewAutomationResponse[] = [];
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond: async (response) => {
+        responses.push(response);
+      },
+      label: "test:preview-automation-expired-queue",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-1")));
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-2", { timeoutMs: 1 })));
+
+    await vi.waitFor(() => expect(handleRequest).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    releaseFirst();
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+
+    expect(handleRequest.mock.calls.map(([value]) => value.requestId)).toEqual(["request-1"]);
+    expect(responses.find((response) => response.requestId === "request-2")).toMatchObject({
+      ok: false,
+      error: { _tag: "PreviewAutomationTimeoutError" },
+    });
+    registry.dispose();
+  });
+
+  it("derives ordering and deadline metadata for legacy requests", async () => {
+    const requestsAtom = Atom.make<AsyncResult.AsyncResult<PreviewAutomationStreamEvent, Error>>(
+      AsyncResult.initial<PreviewAutomationStreamEvent, Error>(false),
+    );
+    const before = Date.now();
+    const handleRequest = vi.fn(async (value: PreviewAutomationRequest) => value);
+    const respond = vi.fn(async (_response: PreviewAutomationResponse) => undefined);
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond,
+      label: "test:preview-automation-legacy-request",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+
+    registry.set(
+      requestsAtom,
+      AsyncResult.success(
+        requestEvent("request-legacy", { sessionKey: undefined, deadlineAt: undefined }),
+      ),
+    );
+
+    await vi.waitFor(() => expect(handleRequest).toHaveBeenCalledTimes(1));
+    expect(handleRequest.mock.calls[0]![0]).toMatchObject({
+      sessionKey: threadId,
+      deadlineAt: expect.any(Number),
+    });
+    expect(handleRequest.mock.calls[0]![0].deadlineAt).toBeGreaterThanOrEqual(before + 15_000);
+    registry.dispose();
+  });
+
+  it("does not execute queued work from a replaced stream", async () => {
+    const requestsAtom = Atom.make<AsyncResult.AsyncResult<PreviewAutomationStreamEvent, Error>>(
+      AsyncResult.initial<PreviewAutomationStreamEvent, Error>(false),
+    );
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const handleRequest = vi.fn(async (value: PreviewAutomationRequest) => {
+      if (value.requestId === "request-old-active") await firstBlocked;
+      return value.requestId;
+    });
+    const respond = vi.fn(async (_response: PreviewAutomationResponse) => undefined);
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond,
+      label: "test:preview-automation-replaced-queue",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-old-active")));
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-old-queued")));
+    await vi.waitFor(() => expect(handleRequest).toHaveBeenCalledTimes(1));
+
+    registry.set(
+      requestsAtom,
+      AsyncResult.success<PreviewAutomationStreamEvent, Error>({
+        type: "connected",
+        connectionId: "connection-2",
+      }),
+    );
+    registry.set(
+      requestsAtom,
+      AsyncResult.success(requestEvent("request-new", {}, "connection-2")),
+    );
+
+    await vi.waitFor(() => expect(handleRequest).toHaveBeenCalledTimes(2));
+    expect(handleRequest.mock.calls.map(([value]) => value.requestId)).toEqual([
+      "request-old-active",
+      "request-new",
+    ]);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(respond.mock.calls[0]![0]).toMatchObject({
+      connectionId: "connection-2",
+      requestId: "request-new",
+      ok: true,
+    });
+
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(handleRequest).toHaveBeenCalledTimes(2);
+    expect(respond).toHaveBeenCalledTimes(1);
     registry.dispose();
   });
 

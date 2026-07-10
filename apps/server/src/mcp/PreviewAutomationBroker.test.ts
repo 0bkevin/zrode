@@ -63,15 +63,17 @@ it.effect("atomically registers a connected host and correlates its response", (
     Effect.gen(function* () {
       const broker = yield* makeBroker;
       const requests = requestsFrom(yield* broker.connect(makeHost()));
-      yield* Stream.runForEach(requests, (request) =>
-        broker.respond({
+      const routedRequests: RoutedRequest[] = [];
+      yield* Stream.runForEach(requests, (request) => {
+        routedRequests.push(request);
+        return broker.respond({
           clientId: "client-1",
           connectionId: request.connectionId,
           requestId: request.requestId,
           ok: true,
           result: { available: true },
-        }),
-      ).pipe(Effect.forkScoped);
+        });
+      }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
 
       const result = yield* broker.invoke<{ available: boolean }>({
@@ -81,6 +83,43 @@ it.effect("atomically registers a connected host and correlates its response", (
       });
 
       expect(result).toEqual({ available: true });
+      expect(routedRequests[0]).toMatchObject({
+        sessionKey: scope.providerSessionId,
+        timeoutMs: 15_000,
+      });
+      expect(routedRequests[0]!.deadlineAt).toBe(15_000);
+    }),
+  ),
+);
+
+it.effect("clips the host-relative timeout to the provider scope expiry", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const requests = requestsFrom(yield* broker.connect(makeHost()));
+      const routedRequests: RoutedRequest[] = [];
+      yield* Stream.runForEach(requests, (request) => {
+        routedRequests.push(request);
+        return broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      yield* broker.invoke({
+        scope: { ...scope, expiresAt: 2_000 },
+        operation: "status",
+        input: {},
+        timeoutMs: 15_000,
+      });
+
+      expect(routedRequests[0]).toMatchObject({
+        timeoutMs: 2_000,
+        deadlineAt: 2_000,
+      });
     }),
   ),
 );

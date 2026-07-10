@@ -12,6 +12,7 @@ import {
   PreviewAutomationHost,
   PreviewAutomationError,
   PreviewAutomationOpenInput,
+  PreviewAutomationRequest,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationStatus,
@@ -26,6 +27,7 @@ const decodeResizeInput = Schema.decodeUnknownSync(PreviewAutomationResizeInput)
 const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
+const decodeAutomationRequest = Schema.decodeUnknownSync(PreviewAutomationRequest);
 const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
@@ -157,6 +159,33 @@ describe("PreviewAutomationHost", () => {
         supportedOperations: ["status", "resize"],
       }).supportedOperations,
     ).toEqual(["status", "resize"]);
+  });
+});
+
+describe("PreviewAutomationRequest", () => {
+  const baseRequest = {
+    requestId: "request-1",
+    threadId: "thread-1",
+    operation: "status",
+    input: {},
+    timeoutMs: 15_000,
+  } as const;
+
+  it("accepts current ordering and deadline metadata", () => {
+    expect(
+      decodeAutomationRequest({
+        ...baseRequest,
+        sessionKey: "provider-session-1",
+        deadlineAt: 1_750_000_000_000,
+      }),
+    ).toMatchObject({
+      sessionKey: "provider-session-1",
+      deadlineAt: 1_750_000_000_000,
+    });
+  });
+
+  it("accepts legacy requests with only a relative timeout", () => {
+    expect(decodeAutomationRequest(baseRequest)).toEqual(baseRequest);
   });
 });
 

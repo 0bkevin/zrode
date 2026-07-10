@@ -8,11 +8,16 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import {
   PreviewAutomationOperationError,
+  PreviewAutomationRequestExpiredError,
   type PreviewAutomationOperationContext,
   serializePreviewAutomationHostError,
 } from "./previewAutomationErrors";
 
 type AutomationStreamResult<E> = AsyncResult.AsyncResult<PreviewAutomationStreamEvent, E>;
+type RoutedPreviewAutomationRequest = PreviewAutomationRequest & {
+  readonly sessionKey: string;
+  readonly deadlineAt: number;
+};
 
 export function serializePreviewAutomationError(
   error: unknown,
@@ -42,17 +47,93 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
     let connectionExplicitlyAnnounced = false;
     let reportedConnectionId: PreviewAutomationStreamEvent["connectionId"] | null = null;
     let requestsVersion = 0;
+    const sessionQueues = new Map<string, Promise<void>>();
+
+    const execute = async (
+      request: RoutedPreviewAutomationRequest,
+      connectionId: PreviewAutomationStreamEvent["connectionId"],
+    ): Promise<void> => {
+      if (disposed || activeConnectionId !== connectionId) return;
+      let response: PreviewAutomationResponse;
+      try {
+        const remainingMs = request.deadlineAt - Date.now();
+        if (remainingMs <= 0) {
+          throw new PreviewAutomationRequestExpiredError({
+            requestId: request.requestId,
+            environmentId: options.environmentId,
+            threadId: request.threadId,
+            deadlineAt: request.deadlineAt,
+          });
+        }
+        const value = await get.once(options.requestHandlerAtom).handle({
+          ...request,
+          timeoutMs: Math.min(request.timeoutMs, remainingMs),
+        });
+        response = {
+          clientId: options.clientId,
+          connectionId,
+          requestId: request.requestId,
+          ok: true,
+          ...(value === undefined ? {} : { result: value }),
+        };
+      } catch (error) {
+        response = {
+          clientId: options.clientId,
+          connectionId,
+          requestId: request.requestId,
+          ok: false,
+          error: serializePreviewAutomationError(error, {
+            requestId: request.requestId,
+            operation: request.operation,
+            environmentId: options.environmentId,
+            threadId: request.threadId,
+            tabId: request.tabId ?? null,
+          }),
+        };
+      }
+      if (disposed || activeConnectionId !== connectionId) return;
+      await options.respond(response);
+    };
+
+    const enqueue = (
+      request: PreviewAutomationRequest,
+      connectionId: PreviewAutomationStreamEvent["connectionId"],
+    ) => {
+      if (disposed || activeConnectionId !== connectionId) return;
+      const routedRequest: RoutedPreviewAutomationRequest = {
+        ...request,
+        sessionKey: request.sessionKey ?? request.threadId,
+        // The server and desktop may run on different machines. Convert the
+        // relative wire budget to this host's clock when the request arrives.
+        deadlineAt: Date.now() + request.timeoutMs,
+      };
+      const previous = sessionQueues.get(routedRequest.sessionKey) ?? Promise.resolve();
+      const current = previous
+        .catch(() => undefined)
+        .then(() => execute(routedRequest, connectionId))
+        .catch(() => undefined)
+        .finally(() => {
+          if (sessionQueues.get(routedRequest.sessionKey) === current) {
+            sessionQueues.delete(routedRequest.sessionKey);
+          }
+        });
+      sessionQueues.set(routedRequest.sessionKey, current);
+    };
 
     const consume = (result: AutomationStreamResult<E>) => {
       if (!AsyncResult.isSuccess(result)) return;
       const event = result.value;
       if (event.type === "connected") {
+        if (activeConnectionId !== null && activeConnectionId !== event.connectionId) {
+          sessionQueues.clear();
+        }
         activeConnectionId = event.connectionId;
         connectionExplicitlyAnnounced = true;
       } else if (activeConnectionId === null) {
         activeConnectionId = event.connectionId;
       } else if (activeConnectionId !== event.connectionId) {
         if (connectionExplicitlyAnnounced) return;
+        sessionQueues.clear();
         activeConnectionId = event.connectionId;
       }
       if (reportedConnectionId !== event.connectionId) {
@@ -63,37 +144,12 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
         return;
       }
       const request = event.request;
-      void get
-        .once(options.requestHandlerAtom)
-        .handle(request)
-        .then(
-          (value) =>
-            options.respond({
-              clientId: options.clientId,
-              connectionId: event.connectionId,
-              requestId: request.requestId,
-              ok: true,
-              ...(value === undefined ? {} : { result: value }),
-            }),
-          (error) =>
-            options.respond({
-              clientId: options.clientId,
-              connectionId: event.connectionId,
-              requestId: request.requestId,
-              ok: false,
-              error: serializePreviewAutomationError(error, {
-                requestId: request.requestId,
-                operation: request.operation,
-                environmentId: options.environmentId,
-                threadId: request.threadId,
-                tabId: request.tabId ?? null,
-              }),
-            }),
-        );
+      enqueue(request, event.connectionId);
     };
 
     get.addFinalizer(() => {
       disposed = true;
+      sessionQueues.clear();
     });
     const initialRequest = get.once(options.requestsAtom);
     if (AsyncResult.isSuccess(initialRequest)) {

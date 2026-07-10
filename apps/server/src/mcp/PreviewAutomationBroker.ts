@@ -423,6 +423,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     const timeoutMs = input.timeoutMs ?? 15_000;
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
     const now = yield* Clock.currentTimeMillis;
+    const deadlineAt = Math.min(now + timeoutMs, input.scope.expiresAt);
     const route = yield* SynchronizedRef.modify(state, (current) => {
       const assignments = new Map(
         Array.from(current.assignments).filter(([, assignment]) => {
@@ -521,17 +522,24 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       return { ...next, pending };
     });
     const awaitResponse = Effect.fn("PreviewAutomationBroker.awaitResponse")(function* () {
+      const remainingBeforeOffer = deadlineAt - (yield* Clock.currentTimeMillis);
+      if (remainingBeforeOffer <= 0) {
+        return yield* new PreviewAutomationTimeoutError(requestContext);
+      }
+      const hostTimeoutMs = Math.max(1, Math.min(timeoutMs, Math.floor(remainingBeforeOffer)));
       const offered = yield* Queue.offer(connection.queue, {
         type: "request",
         connectionId: connection.connectionId,
         request: {
           requestId,
           threadId: input.scope.threadId,
+          sessionKey: input.scope.providerSessionId,
           tabId: requestContext.tabId,
           tabIdExplicit: input.tabId !== undefined,
           operation: input.operation,
           input: input.input,
-          timeoutMs,
+          timeoutMs: hostTimeoutMs,
+          deadlineAt,
         },
       });
       if (!offered) {
@@ -541,7 +549,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         }
         return yield* new PreviewAutomationRequestQueueClosedError(requestContext);
       }
-      const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(timeoutMs));
+      const remainingMs = deadlineAt - (yield* Clock.currentTimeMillis);
+      if (remainingMs <= 0) {
+        return yield* new PreviewAutomationTimeoutError(requestContext);
+      }
+      const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(remainingMs));
       return yield* Option.match(result, {
         onNone: () => Effect.fail(new PreviewAutomationTimeoutError(requestContext)),
         onSome: (value) => Effect.succeed(value as A),

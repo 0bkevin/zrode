@@ -18,6 +18,24 @@ export interface PreviewAutomationOperationContext {
   readonly tabId: Exclude<PreviewAutomationRequest["tabId"], undefined> | null;
 }
 
+export class PreviewAutomationRequestExpiredError extends Schema.TaggedErrorClass<PreviewAutomationRequestExpiredError>()(
+  "PreviewAutomationRequestExpiredError",
+  {
+    requestId: TrimmedNonEmptyString,
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    deadlineAt: Schema.Int,
+  },
+) {
+  get responseTag() {
+    return "PreviewAutomationTimeoutError" as const;
+  }
+
+  override get message(): string {
+    return `Preview automation request ${this.requestId} expired before execution on environment ${this.environmentId} thread ${this.threadId}.`;
+  }
+}
+
 export class PreviewAutomationOverlayTimeoutError extends Schema.TaggedErrorClass<PreviewAutomationOverlayTimeoutError>()(
   "PreviewAutomationOverlayTimeoutError",
   {
@@ -206,6 +224,7 @@ export class PreviewAutomationOperationError extends Schema.TaggedErrorClass<Pre
 }
 
 export const PreviewAutomationHostError = Schema.Union([
+  PreviewAutomationRequestExpiredError,
   PreviewAutomationOverlayTimeoutError,
   PreviewAutomationNavigationTimeoutError,
   PreviewAutomationViewportTimeoutError,

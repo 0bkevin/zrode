@@ -568,11 +568,22 @@ export type PreviewAutomationHostFocus = typeof PreviewAutomationHostFocus.Type;
 export const PreviewAutomationRequest = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   threadId: ThreadId,
+  /**
+   * Stable ordering key for requests from one provider browser session.
+   * Optional while older servers can still emit requests without it.
+   */
+  sessionKey: Schema.optional(TrimmedNonEmptyString),
   tabId: Schema.optional(PreviewTabId),
   tabIdExplicit: Schema.optional(Schema.Boolean),
   operation: PreviewAutomationOperation,
   input: Schema.Unknown,
   timeoutMs: Schema.Int.check(Schema.isGreaterThan(0)),
+  /**
+   * Server-clock deadline retained as optional request metadata. Hosts can run
+   * on another machine and must derive their local deadline from `timeoutMs`
+   * instead of comparing this value with their wall clock.
+   */
+  deadlineAt: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 export type PreviewAutomationRequest = typeof PreviewAutomationRequest.Type;
 

@@ -146,6 +146,12 @@ export const PreviewOpenInput = Schema.Struct({
   threadId: ThreadId,
   /** Omit to create an empty (Idle) tab the user can type into. */
   url: Schema.optional(Url),
+  /**
+   * Atomically return an existing session for the thread instead of creating
+   * another one. This is opt-in so explicit user actions keep browser-style
+   * new-tab semantics.
+   */
+  reuseExistingSession: Schema.optional(Schema.Boolean),
 });
 export type PreviewOpenInput = typeof PreviewOpenInput.Type;
 
