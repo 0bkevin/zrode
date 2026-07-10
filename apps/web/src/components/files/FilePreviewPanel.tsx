@@ -75,6 +75,12 @@ import {
 import { installFileEditorDismissal } from "./fileEditorDismissal";
 import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
+import {
+  adoptExternalEditorFileState,
+  createEditorFileState,
+  type EditorFileState,
+  updateLocalEditorContents,
+} from "./editableFileState";
 import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
 import { fileRevealTargetLine, fileRevealTargetToEditorSelection } from "./fileRevealSelection";
@@ -84,6 +90,7 @@ import {
   WORKSPACE_EDITOR_UNSAFE_CSS,
   WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
   workspaceEditorBackground,
+  workspaceEditableEditorRenderOptions,
   workspaceEditorTheme,
 } from "./workspaceEditorPresentation";
 import { WorkspaceEditorWorkerPoolProvider } from "./WorkspaceEditorWorkerPoolProvider";
@@ -312,25 +319,6 @@ interface FileSelectionOverride {
   range: SelectedLineRange | null;
 }
 
-interface EditorFileRef {
-  name: string;
-  contents: string;
-  cacheKey: string;
-}
-
-interface EditorFileState {
-  file: EditorFileRef;
-  editorContents: string;
-}
-
-function editorFileRef(cwd: string, relativePath: string, contents: string): EditorFileRef {
-  return {
-    name: relativePath,
-    contents,
-    cacheKey: projectFileCacheKey(cwd, relativePath, contents),
-  };
-}
-
 function EditableFileSurface({
   cwd,
   relativePath,
@@ -367,15 +355,11 @@ function EditableFileSurface({
   // baseline). Assumes cwd/environment changes remount this surface: FilePreviewPanel
   // is keyed by environment+cwd in ChatView, and this component by path. Theme
   // changes update Pierre's options without recreating document persistence state.
-  const [fileState, setFileState] = useState<EditorFileState>(() => ({
-    file: editorFileRef(cwd, relativePath, contents),
-    editorContents: contents,
-  }));
+  const [fileState, setFileState] = useState<EditorFileState>(() =>
+    createEditorFileState(cwd, relativePath, contents),
+  );
   if (fileState.file.name !== relativePath || contents !== fileState.editorContents) {
-    setFileState({
-      file: editorFileRef(cwd, relativePath, contents),
-      editorContents: contents,
-    });
+    setFileState(adoptExternalEditorFileState(fileState, cwd, relativePath, contents));
   }
   // Keep range reveal inputs live without making Pierre's onPostRender option
   // change on every document update. An option identity change can force a
@@ -395,11 +379,7 @@ function EditableFileSurface({
       new Editor<FileCommentAnnotationGroup>({
         onChange: (file, nextLineAnnotations) => {
           const nextContents = file.contents;
-          setFileState((current) =>
-            current.editorContents === nextContents
-              ? current
-              : { ...current, editorContents: nextContents },
-          );
+          setFileState((current) => updateLocalEditorContents(current, nextContents));
           documentHandle.edit(nextContents);
           if (nextLineAnnotations) {
             const remapped = remapFileCommentAnnotations(
@@ -641,10 +621,9 @@ function EditableFileSurface({
       onLineSelectionChange: setSelectedRange,
       onLineSelectionEnd: handleLineSelectionEnd,
       overflow: wordWrap ? "wrap" : "scroll",
-      theme: workspaceEditorTheme(resolvedTheme),
-      themeType: resolvedTheme,
-      tokenizeMaxLineLength: WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
-      useTokenTransformer: true,
+      // Keep both palettes loaded. The initial Shiki render and Pierre's
+      // incremental editor otherwise use incompatible token-color styles.
+      ...workspaceEditableEditorRenderOptions(resolvedTheme),
       unsafeCSS: EDITABLE_FILE_UNSAFE_CSS,
       onPostRender: handlePostRender,
     }),
@@ -674,6 +653,8 @@ function EditableFileSurface({
             intersectionObserverMargin: 1200,
           }}
         >
+          {/* A worker result is based on the immutable file snapshot, so keep incremental
+              editor tokens authoritative on the editable surface. */}
           <File<FileCommentAnnotationGroup>
             file={fileState.file}
             options={fileOptions}
@@ -694,6 +675,7 @@ function EditableFileSurface({
                 ))}
               </div>
             )}
+            disableWorkerPool
             contentEditable
           />
         </Virtualizer>

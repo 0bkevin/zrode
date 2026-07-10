@@ -3,9 +3,11 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   hasWorkspaceEditorRenderOptions,
   WORKSPACE_EDITOR_RENDER_OPTIONS,
+  WORKSPACE_EDITOR_THEME_NAMES,
   WORKSPACE_EDITOR_UNSAFE_CSS,
   WORKSPACE_TOKENIZE_MAX_LINE_LENGTH,
   workspaceEditorBackground,
+  workspaceEditableEditorRenderOptions,
   workspaceEditorRenderOptions,
   workspaceEditorTheme,
 } from "./workspaceEditorPresentation";
@@ -16,6 +18,21 @@ describe("workspace editor presentation", () => {
     expect(workspaceEditorTheme("light")).toBe("light-plus");
     expect(workspaceEditorBackground("dark")).toBe("#1e1e1e");
     expect(workspaceEditorBackground("light")).toBe("#ffffff");
+  });
+
+  it("keeps both syntax palettes available to incremental editor tokens", () => {
+    const darkOptions = workspaceEditableEditorRenderOptions("dark");
+    expect(darkOptions.theme).toBe(WORKSPACE_EDITOR_THEME_NAMES);
+    expect(darkOptions).toEqual({
+      theme: {
+        dark: "dark-plus",
+        light: "light-plus",
+      },
+      themeType: "dark",
+      tokenizeMaxLineLength: 20_000,
+      useTokenTransformer: true,
+    });
+    expect(workspaceEditableEditorRenderOptions("light").themeType).toBe("light");
   });
 
   it("keeps workspace worker rendering aligned with the file surface", () => {
