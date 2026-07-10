@@ -121,6 +121,7 @@ describe("Pierre editable file highlighting", () => {
     const applyDocumentChange = vi.fn();
     const markDOMDirty = vi.fn();
     const computeApproximateSize = vi.fn();
+    const reconcileHeights = vi.fn(() => false);
     const heights = new Map([[0, 20]]);
     const checkpoints = [{ lineIndex: 0, top: 0 }];
     const fixture = {
@@ -131,6 +132,7 @@ describe("Pierre editable file highlighting", () => {
       isSimpleMode: () => true,
       layoutDirty: false,
       lineAnnotations: [],
+      reconcileHeights,
       renderRange: undefined,
     };
     const document = new TextDocument<unknown>(
@@ -147,6 +149,7 @@ describe("Pierre editable file highlighting", () => {
     ]);
 
     expect(applyDocumentChange).toHaveBeenCalledWith(document);
+    expect(reconcileHeights).toHaveBeenCalledTimes(1);
     expect(markDOMDirty).not.toHaveBeenCalled();
     expect(computeApproximateSize).not.toHaveBeenCalled();
     expect(fixture.layoutDirty).toBe(false);
@@ -165,6 +168,45 @@ describe("Pierre editable file highlighting", () => {
     expect(fixture.layoutDirty).toBe(true);
     expect(heights.size).toBe(0);
     expect(checkpoints).toHaveLength(0);
+  });
+
+  it("reconciles variable-height rows after same-line edits without clearing layout caches", () => {
+    const applyDocumentChange = vi.fn();
+    const instanceChanged = vi.fn();
+    const markDOMDirty = vi.fn();
+    const reconcileHeights = vi.fn(() => true);
+    const heights = new Map([[4, 100]]);
+    const checkpoints = [{ lineIndex: 0, top: 0 }];
+    const fixture = {
+      cache: { heights, checkpoints },
+      fileRenderer: { applyDocumentChange },
+      getSimpleVirtualizer: () => ({ markDOMDirty }),
+      layoutDirty: false,
+      lineAnnotations: [],
+      reconcileHeights,
+      renderRange: undefined,
+      virtualizer: { instanceChanged },
+    };
+    const document = new TextDocument<unknown>(
+      "wrapped.ts",
+      "const shortened = true;\nreturn shortened;",
+      "typescript",
+    );
+
+    Reflect.apply(VirtualizedFile.prototype.applyDocumentChange, fixture, [
+      document,
+      undefined,
+      false,
+      false,
+    ]);
+
+    expect(applyDocumentChange).toHaveBeenCalledWith(document);
+    expect(reconcileHeights).toHaveBeenCalledTimes(1);
+    expect(markDOMDirty).toHaveBeenCalledTimes(1);
+    expect(instanceChanged).toHaveBeenCalledWith(fixture, false);
+    expect(fixture.layoutDirty).toBe(false);
+    expect(heights).toEqual(new Map([[4, 100]]));
+    expect(checkpoints).toEqual([{ lineIndex: 0, top: 0 }]);
   });
 
   it("synchronizes the live document and line cache even without a render result", () => {

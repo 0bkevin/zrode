@@ -109,8 +109,14 @@ diff --git a/dist/components/VirtualizedFile.js b/dist/components/VirtualizedFil
 @@ -284 +284 @@
 -	applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer = false) {
 +	applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer = false, shouldInvalidateLayout = true) {
-@@ -287,0 +288 @@
-+		if (!shouldInvalidateLayout) return;
+@@ -288,0 +289,7 @@
++		if (!shouldInvalidateLayout) {
++			if (this.reconcileHeights()) {
++				this.getSimpleVirtualizer()?.markDOMDirty();
++				this.virtualizer.instanceChanged(this, false);
++			}
++			return;
++		}
 diff --git a/dist/renderers/FileRenderer.js b/dist/renderers/FileRenderer.js
 index 5c34e1837..5033a6ec4 100644
 --- a/dist/renderers/FileRenderer.js
