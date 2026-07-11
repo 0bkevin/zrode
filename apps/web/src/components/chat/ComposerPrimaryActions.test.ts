@@ -1,6 +1,8 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
+import { ComposerPrimaryActions, formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
 
 describe("formatPendingPrimaryActionLabel", () => {
   it("returns 'Submitting...' while responding", () => {
@@ -89,5 +91,35 @@ describe("formatPendingPrimaryActionLabel", () => {
         questionIndex: 5,
       }),
     ).toBe("Submit answers");
+  });
+});
+
+describe("ComposerPrimaryActions", () => {
+  it("renders separate stop and message-action targets while a turn is running", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ComposerPrimaryActions, {
+        compact: false,
+        pendingAction: null,
+        isRunning: true,
+        showPlanFollowUpPrompt: false,
+        promptHasText: true,
+        isSendBusy: false,
+        isConnecting: false,
+        isEnvironmentUnavailable: false,
+        isPreparingWorktree: false,
+        hasSendableContent: true,
+        onPreviousPendingQuestion: () => undefined,
+        onInterrupt: () => undefined,
+        onQueue: () => undefined,
+        onSteer: () => undefined,
+        onImplementPlanInNewThread: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('data-chat-composer-running-action="stop"');
+    expect(markup).toContain('aria-label="Stop generation"');
+    expect(markup).toContain('data-chat-composer-running-action="message-menu"');
+    expect(markup).toContain('aria-label="Choose how to send this message"');
+    expect(markup).toContain("bg-white/30");
   });
 });

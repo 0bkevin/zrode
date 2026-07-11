@@ -140,59 +140,82 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       const messageActionDisabled = isSendBusy || isConnecting || isEnvironmentUnavailable;
 
       return (
-        <Menu>
-          <MenuTrigger
-            render={
-              <button
-                type="button"
-                className={cn(
-                  "flex h-9 min-w-11 cursor-pointer items-center justify-center gap-1 rounded-full bg-destructive/90 px-2 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 hover:scale-105 hover:bg-destructive active:shadow-none active:inset-shadow-[0_1px_--theme(--color-black/8%)] sm:h-8 sm:min-w-10",
-                  compact && "min-w-10 sm:min-w-9",
-                )}
-                {...pointerFocusProps}
-                aria-label="Choose an action for the running turn"
-              />
-            }
+        <div
+          data-chat-composer-running-actions="true"
+          className="flex h-8 items-center overflow-hidden rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-colors duration-150 hover:bg-destructive"
+        >
+          <button
+            type="button"
+            data-chat-composer-running-action="stop"
+            className={cn(
+              "flex h-full min-w-7 cursor-pointer items-center justify-center rounded-l-full py-0 pr-1 pl-2 transition-colors duration-150 hover:bg-white/10 active:bg-black/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/75",
+              compact && "min-w-6.5 pl-1.5",
+            )}
+            {...pointerFocusProps}
+            onClick={onInterrupt}
+            aria-label="Stop generation"
+            title="Stop generation"
           >
             <StopGenerationIcon />
-            <ChevronDownIcon className="size-3 opacity-70" />
-          </MenuTrigger>
-          <MenuPopup align="end" side="top" sideOffset={8} className="w-64">
-            <MenuItem
-              className="items-start py-2"
-              disabled={messageActionDisabled}
-              onClick={onQueue}
+          </button>
+
+          <span aria-hidden="true" className="h-3.5 w-px shrink-0 bg-white/30" />
+
+          <Menu>
+            <MenuTrigger
+              render={
+                <button
+                  type="button"
+                  data-chat-composer-running-action="message-menu"
+                  className={cn(
+                    "flex h-full min-w-5.5 cursor-pointer items-center justify-center rounded-r-full py-0 pr-1.5 pl-0.5 transition-colors duration-150 hover:bg-white/10 active:bg-black/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/75",
+                    compact && "min-w-5 pr-1 pl-0.5",
+                  )}
+                  {...pointerFocusProps}
+                  aria-label="Choose how to send this message"
+                  title="Choose how to send this message"
+                />
+              }
             >
-              <Clock3Icon className="mt-0.5" />
-              <span className="grid min-w-0 gap-0.5">
-                <span>{isSendBusy ? "Queueing..." : "Queue message"}</span>
-                <span className="text-muted-foreground text-xs font-normal">
-                  Send after the current turn finishes
+              <ChevronDownIcon className="size-2.5 opacity-80" />
+            </MenuTrigger>
+            <MenuPopup align="end" side="top" sideOffset={8} className="w-64">
+              <MenuItem
+                className="items-start py-2"
+                disabled={messageActionDisabled}
+                onClick={onQueue}
+              >
+                <Clock3Icon className="mt-0.5" />
+                <span className="grid min-w-0 gap-0.5">
+                  <span>{isSendBusy ? "Queueing..." : "Queue message"}</span>
+                  <span className="text-muted-foreground text-xs font-normal">
+                    Send after the current turn finishes
+                  </span>
                 </span>
-              </span>
-            </MenuItem>
-            <MenuItem
-              className="items-start py-2"
-              disabled={messageActionDisabled}
-              onClick={onSteer}
-            >
-              <CornerDownRightIcon className="mt-0.5" />
-              <span className="grid min-w-0 gap-0.5">
-                <span>Steer current turn</span>
-                <span className="text-muted-foreground text-xs font-normal">
-                  Send this as guidance right now
+              </MenuItem>
+              <MenuItem
+                className="items-start py-2"
+                disabled={messageActionDisabled}
+                onClick={onSteer}
+              >
+                <CornerDownRightIcon className="mt-0.5" />
+                <span className="grid min-w-0 gap-0.5">
+                  <span>Steer current turn</span>
+                  <span className="text-muted-foreground text-xs font-normal">
+                    Send this as guidance right now
+                  </span>
                 </span>
-              </span>
-            </MenuItem>
-            <MenuItem variant="destructive" className="items-start py-2" onClick={onInterrupt}>
-              <StopGenerationIcon className="mt-0.5 size-4" />
-              <span className="grid min-w-0 gap-0.5">
-                <span>Stop generation</span>
-                <span className="text-current/70 text-xs font-normal">End the current turn</span>
-              </span>
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
+              </MenuItem>
+              <MenuItem variant="destructive" className="items-start py-2" onClick={onInterrupt}>
+                <StopGenerationIcon className="mt-0.5 size-4" />
+                <span className="grid min-w-0 gap-0.5">
+                  <span>Stop generation</span>
+                  <span className="text-current/70 text-xs font-normal">End the current turn</span>
+                </span>
+              </MenuItem>
+            </MenuPopup>
+          </Menu>
+        </div>
       );
     }
     return (
