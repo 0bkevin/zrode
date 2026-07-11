@@ -9,6 +9,7 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectSessionHistoryImportReactor } from "../Services/ProjectSessionHistoryImportReactor.ts";
+import { QueuedTurnReactor } from "../Services/QueuedTurnReactor.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
@@ -57,6 +58,15 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(QueuedTurnReactor, {
+            start: () => {
+              started.push("queued-turn-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(ProjectSessionHistoryImportReactor, {
             start: () => {
               started.push("project-session-history-import-reactor");
@@ -94,6 +104,7 @@ describe("OrchestrationReactor", () => {
       "provider-runtime-ingestion",
       "provider-command-reactor",
       "checkpoint-reactor",
+      "queued-turn-reactor",
       "project-session-history-import-reactor",
       "thread-deletion-reactor",
       "agent-awareness-relay",

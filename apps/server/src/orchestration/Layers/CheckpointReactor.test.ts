@@ -283,6 +283,7 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly deferReactorStart?: boolean;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -356,8 +357,19 @@ describe("CheckpointReactor", () => {
     const checkpointStore = await runtimeForHarness.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
     );
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    const reactorScope = await Effect.runPromise(Scope.make("sequential"));
+    scope = reactorScope;
+    let reactorStarted = false;
+    const startReactor = async () => {
+      if (reactorStarted) {
+        return;
+      }
+      reactorStarted = true;
+      await Effect.runPromise(reactor.start().pipe(Scope.provide(reactorScope)));
+    };
+    if (options?.deferReactorStart !== true) {
+      await startReactor();
+    }
     const drain = () => Effect.runPromise(reactor.drain);
 
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -423,6 +435,7 @@ describe("CheckpointReactor", () => {
       provider,
       cwd,
       drain,
+      startReactor,
       run: <A, E>(effect: Effect.Effect<A, E, never>) => runtimeForHarness.runPromise(effect),
     };
   }
@@ -567,6 +580,72 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+
+    await runtime!.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-turn-completed-activity"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-turn-completed-1"),
+          tone: "info",
+          kind: "turn.completed",
+          summary: "Turn completed",
+          payload: { state: "completed" },
+          turnId: asTurnId("turn-1"),
+          createdAt,
+        },
+        createdAt,
+      }),
+    );
+    const events = await waitForEvent(
+      harness.engine,
+      (event) => event.type === "thread.turn-quiesced",
+    );
+    expect(events.some((event) => event.type === "thread.turn-quiesced")).toBe(true);
+  });
+
+  it("recovers an unmatched durable turn completion before queued work can resume", async () => {
+    const harness = await createHarness({ deferReactorStart: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-restart-recovery");
+
+    await runtime!.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-turn-completed-before-restart"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-turn-completed-before-restart"),
+          tone: "info",
+          kind: "turn.completed",
+          summary: "Turn completed",
+          payload: { state: "completed" },
+          turnId,
+          createdAt,
+        },
+        createdAt,
+      }),
+    );
+
+    const beforeStart = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((events) => Array.from(events)),
+      ),
+    );
+    expect(beforeStart.some((event) => event.type === "thread.turn-quiesced")).toBe(false);
+
+    await harness.startReactor();
+
+    const events = await waitForEvent(
+      harness.engine,
+      (event) => event.type === "thread.turn-quiesced" && event.payload?.turnId === turnId,
+    );
+    expect(
+      events.some(
+        (event) => event.type === "thread.turn-quiesced" && event.payload.turnId === turnId,
+      ),
+    ).toBe(true);
   });
 
   it("refreshes local git status state on turn completion using the session cwd", async () => {

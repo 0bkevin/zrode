@@ -679,6 +679,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
+      if (input.expectedTurnId !== undefined) {
+        const adapterSession = (yield* routed.adapter.listSessions()).find(
+          (session) => session.threadId === input.threadId,
+        );
+        if (adapterSession?.activeTurnId !== input.expectedTurnId) {
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            `Turn '${input.expectedTurnId}' is no longer active on thread '${input.threadId}'.`,
+          );
+        }
+      }
       const turn = yield* routed.adapter.sendTurn(input);
       yield* directory.upsert({
         threadId: input.threadId,

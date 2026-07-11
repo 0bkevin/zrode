@@ -76,6 +76,7 @@ export function applyThreadDetailEvent(
           archivedAt: null,
           deletedAt: null,
           messages: [],
+          queuedTurns: [],
           proposedPlans: [],
           activities: [],
           checkpoints: [],
@@ -151,6 +152,55 @@ export function applyThreadDetailEvent(
             : {}),
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.turn-steer-requested":
+    case "thread.turn-quiesced":
+      return { kind: "unchanged" };
+
+    case "thread.turn-enqueued": {
+      const queuedTurn = {
+        messageId: event.payload.messageId,
+        text: event.payload.text,
+        attachments: event.payload.attachments,
+        modelSelection: event.payload.modelSelection,
+        runtimeMode: event.payload.runtimeMode,
+        interactionMode: event.payload.interactionMode,
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+        ...(event.payload.sourceProposedPlan !== undefined
+          ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+          : {}),
+        queuedAt: event.payload.queuedAt,
+        enqueuedSequence: event.sequence,
+      };
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          queuedTurns: [
+            ...thread.queuedTurns.filter((entry) => entry.messageId !== queuedTurn.messageId),
+            queuedTurn,
+          ].toSorted(
+            (left, right) =>
+              left.enqueuedSequence - right.enqueuedSequence ||
+              left.messageId.localeCompare(right.messageId),
+          ),
+          updatedAt: event.occurredAt,
+        },
+      };
+    }
+
+    case "thread.queued-turn-cancelled":
+    case "thread.queued-turn-dequeued":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          queuedTurns: thread.queuedTurns.filter(
+            (entry) => entry.messageId !== event.payload.messageId,
+          ),
           updatedAt: event.occurredAt,
         },
       };

@@ -150,6 +150,7 @@ describe("OrchestrationEngine", () => {
           archivedAt: null,
           deletedAt: null,
           messages: [],
+          queuedTurns: [],
           proposedPlans: [],
           activities: [],
           checkpoints: [],
@@ -162,6 +163,7 @@ describe("OrchestrationEngine", () => {
       threads: projectionSnapshot.threads.map((thread) => ({
         ...thread,
         messages: [],
+        queuedTurns: [],
         proposedPlans: [],
         activities: [],
         checkpoints: [],
@@ -202,6 +204,7 @@ describe("OrchestrationEngine", () => {
           getFullThreadDiffContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
+          getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
         }),
       ),
       Layer.provide(
@@ -544,6 +547,34 @@ describe("OrchestrationEngine", () => {
     );
 
     expect(eventTypes).toEqual(["thread.created", "thread.meta-updated"]);
+    await system.dispose();
+  });
+
+  it("replays events committed after stream creation but before acquisition", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+    const events = engine.streamDomainEvents;
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-stream-gap"),
+        projectId: asProjectId("project-stream-gap"),
+        title: "Stream Gap Project",
+        workspaceRoot: "/tmp/project-stream-gap",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+
+    const replayed = await system.run(
+      Stream.take(events, 1).pipe(Stream.runCollect, Effect.timeout("1 second")),
+    );
+    expect(Array.from(replayed, (event) => event.type)).toEqual(["project.created"]);
     await system.dispose();
   });
 

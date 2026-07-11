@@ -28,6 +28,9 @@ import {
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
   ThreadTurnStartRequestedPayload,
+  ThreadTurnEnqueuedPayload,
+  ThreadQueuedTurnCancelledPayload,
+  ThreadQueuedTurnDequeuedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -228,6 +231,7 @@ export function projectEvent(
             archivedAt: null,
             deletedAt: null,
             messages: [],
+            queuedTurns: [],
             activities: [],
             checkpoints: [],
             session: null,
@@ -337,6 +341,94 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             updatedAt: event.occurredAt,
           }),
+        })),
+      );
+
+    case "thread.turn-steer-requested":
+    case "thread.turn-quiesced":
+      return Effect.succeed(nextBase);
+
+    case "thread.turn-enqueued":
+      return decodeForEvent(ThreadTurnEnqueuedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          const queuedTurn = {
+            messageId: payload.messageId,
+            text: payload.text,
+            attachments: payload.attachments,
+            modelSelection: payload.modelSelection,
+            runtimeMode: payload.runtimeMode,
+            interactionMode: payload.interactionMode,
+            ...(payload.titleSeed !== undefined ? { titleSeed: payload.titleSeed } : {}),
+            ...(payload.sourceProposedPlan !== undefined
+              ? { sourceProposedPlan: payload.sourceProposedPlan }
+              : {}),
+            queuedAt: payload.queuedAt,
+            enqueuedSequence: event.sequence,
+          };
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              queuedTurns: [
+                ...thread.queuedTurns.filter((entry) => entry.messageId !== payload.messageId),
+                queuedTurn,
+              ].toSorted(
+                (left, right) =>
+                  left.enqueuedSequence - right.enqueuedSequence ||
+                  left.messageId.localeCompare(right.messageId),
+              ),
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.queued-turn-cancelled":
+      return decodeForEvent(
+        ThreadQueuedTurnCancelledPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: nextBase.threads.map((thread) =>
+            thread.id === payload.threadId
+              ? {
+                  ...thread,
+                  queuedTurns: thread.queuedTurns.filter(
+                    (entry) => entry.messageId !== payload.messageId,
+                  ),
+                  updatedAt: event.occurredAt,
+                }
+              : thread,
+          ),
+        })),
+      );
+
+    case "thread.queued-turn-dequeued":
+      return decodeForEvent(
+        ThreadQueuedTurnDequeuedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: nextBase.threads.map((thread) =>
+            thread.id === payload.threadId
+              ? {
+                  ...thread,
+                  queuedTurns: thread.queuedTurns.filter(
+                    (entry) => entry.messageId !== payload.messageId,
+                  ),
+                  updatedAt: event.occurredAt,
+                }
+              : thread,
+          ),
         })),
       );
 

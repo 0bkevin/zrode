@@ -37,6 +37,7 @@ const baseThread: OrchestrationThread = {
   archivedAt: null,
   deletedAt: null,
   messages: [],
+  queuedTurns: [],
   proposedPlans: [],
   activities: [],
   checkpoints: [],
@@ -335,6 +336,57 @@ describe("applyThreadDetailEvent", () => {
       if (result.kind === "updated") {
         expect(result.thread.latestTurn?.state).toBe("running");
         expect(result.thread.latestTurn?.completedAt).toBeNull();
+      }
+    });
+  });
+
+  describe("queued turns", () => {
+    it("adds queued turns in sequence order and removes them when dequeued", () => {
+      const queued = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 20,
+        occurredAt: "2026-04-01T08:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.turn-enqueued",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-queued"),
+          text: "Run next",
+          attachments: [],
+          modelSelection: baseThread.modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          queuedAt: "2026-04-01T08:00:00.000Z",
+        },
+      });
+
+      expect(queued.kind).toBe("updated");
+      if (queued.kind !== "updated") return;
+      expect(queued.thread.queuedTurns).toEqual([
+        expect.objectContaining({
+          messageId: MessageId.make("msg-queued"),
+          text: "Run next",
+          enqueuedSequence: 20,
+        }),
+      ]);
+
+      const dequeued = applyThreadDetailEvent(queued.thread, {
+        ...baseEventFields,
+        sequence: 21,
+        occurredAt: "2026-04-01T08:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.queued-turn-dequeued",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-queued"),
+          dequeuedAt: "2026-04-01T08:01:00.000Z",
+        },
+      });
+      expect(dequeued.kind).toBe("updated");
+      if (dequeued.kind === "updated") {
+        expect(dequeued.thread.queuedTurns).toEqual([]);
       }
     });
   });

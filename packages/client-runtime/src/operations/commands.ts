@@ -39,6 +39,9 @@ export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
+export type SteerThreadTurnInput = CommandInput<"thread.turn.steer">;
+export type EnqueueThreadTurnInput = CommandInput<"thread.turn.enqueue">;
+export type CancelQueuedThreadTurnInput = CommandInput<"thread.queued-turn.cancel">;
 export type RetryThreadTurnInput = CommandInput<"thread.turn.retry">;
 export type EditLastUserMessageInput = CommandInput<"thread.last-user-message.edit">;
 export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
@@ -199,6 +202,41 @@ export const startThreadTurn: (input: StartThreadTurnInput) => CommandEffect = E
     createdAt: metadata.createdAt,
   });
 });
+
+export const steerThreadTurn: (input: SteerThreadTurnInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.steerThreadTurn",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.turn.steer",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const enqueueThreadTurn: (input: EnqueueThreadTurnInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.enqueueThreadTurn",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.turn.enqueue",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const cancelQueuedThreadTurn: (input: CancelQueuedThreadTurnInput) => CommandEffect =
+  Effect.fn("EnvironmentCommands.cancelQueuedThreadTurn")(function* (input) {
+    const metadata = yield* timestampedCommandMetadata(input);
+    return yield* dispatch({
+      ...input,
+      type: "thread.queued-turn.cancel",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  });
 
 export const retryThreadTurn: (input: RetryThreadTurnInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.retryThreadTurn",

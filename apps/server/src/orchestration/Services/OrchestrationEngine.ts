@@ -46,9 +46,11 @@ export interface OrchestrationEngineShape {
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**
-   * Stream persisted domain events in dispatch order.
+   * Stream persisted domain events in dispatch order without a subscription gap.
    *
-   * This is a hot runtime stream (new events only), not a historical replay.
+   * Each property access captures the current durable cursor. On acquisition,
+   * the stream subscribes live first, catches up from that cursor, then
+   * continues with buffered live events while deduplicating by sequence.
    */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
 }

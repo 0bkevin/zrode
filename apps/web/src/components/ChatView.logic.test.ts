@@ -52,6 +52,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     handoffSource: null,
     session: null,
     messages: [],
+    queuedTurns: [],
     proposedPlans: [],
     activities: [],
     checkpoints: [],

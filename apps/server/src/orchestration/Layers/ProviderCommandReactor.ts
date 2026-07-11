@@ -2,11 +2,13 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
+  type ProviderSendTurnInput,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
@@ -51,6 +53,7 @@ type ProviderIntentEvent = Extract<
     type:
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
+      | "thread.turn-steer-requested"
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
@@ -255,6 +258,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly kind:
       | "provider.turn.start.failed"
+      | "provider.turn.steer.failed"
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
@@ -263,7 +267,7 @@ const make = Effect.gen(function* () {
     readonly detail: string;
     readonly turnId: TurnId | null;
     readonly createdAt: string;
-    readonly messageId?: string;
+    readonly messageId?: MessageId;
     readonly retryable?: boolean;
     readonly turnStart?: Record<string, unknown>;
     readonly requestId?: string;
@@ -629,6 +633,8 @@ const make = Effect.gen(function* () {
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId?: MessageId;
+    readonly expectedTurnId?: TurnId;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -641,11 +647,13 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(
-      input.threadId,
-      input.createdAt,
-      input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
-    );
+    if (input.expectedTurnId === undefined) {
+      yield* ensureSessionForThread(
+        input.threadId,
+        input.createdAt,
+        input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
+      );
+    }
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
@@ -681,11 +689,13 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
+      ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
+      ...(input.expectedTurnId !== undefined ? { expectedTurnId: input.expectedTurnId } : {}),
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-    };
+    } satisfies ProviderSendTurnInput;
   });
 
   const maybeGenerateAndRenameWorktreeBranchForFirstTurn = Effect.fn(
@@ -900,6 +910,7 @@ const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -921,6 +932,65 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
   });
 
+  const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>,
+  ) {
+    const key = turnStartKeyForEvent(event);
+    if (yield* hasHandledTurnStartRecently(key)) {
+      return;
+    }
+
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
+    const appendSteerFailure = (detail: string) =>
+      appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider steering failed",
+        detail,
+        turnId: event.payload.expectedTurnId,
+        createdAt: event.payload.createdAt,
+        messageId: event.payload.messageId,
+        retryable: false,
+      }).pipe(Effect.asVoid);
+
+    if (!message || message.role !== "user") {
+      return yield* appendSteerFailure(
+        `User message '${event.payload.messageId}' was not found for steering request.`,
+      );
+    }
+
+    const sendTurnRequest = yield* buildSendTurnRequestForThread({
+      threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
+      expectedTurnId: event.payload.expectedTurnId,
+      messageText: message.text,
+      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+      ...(event.payload.modelSelection !== undefined
+        ? { modelSelection: event.payload.modelSelection }
+        : {}),
+      interactionMode: event.payload.interactionMode,
+      createdAt: event.payload.createdAt,
+    }).pipe(
+      Effect.map(Option.some),
+      Effect.catchCause((cause) =>
+        appendSteerFailure(formatFailureDetail(cause)).pipe(Effect.as(Option.none())),
+      ),
+    );
+
+    if (Option.isNone(sendTurnRequest)) {
+      return;
+    }
+
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.catchCause((cause) => appendSteerFailure(formatFailureDetail(cause))),
+      Effect.forkScoped,
+    );
+  });
+
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>,
   ) {
@@ -940,8 +1010,20 @@ const make = Effect.gen(function* () {
       });
     }
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    // An interrupt can wait behind provider/session events. If its target turn
+    // has already quiesced and queued work has started, treating it as a
+    // session-wide interrupt would stop the newer turn instead.
+    if (
+      event.payload.turnId !== undefined &&
+      (thread.session?.status !== "running" || thread.session.activeTurnId !== event.payload.turnId)
+    ) {
+      return;
+    }
+
+    yield* providerService.interruptTurn({
+      threadId: event.payload.threadId,
+      ...(event.payload.turnId !== undefined ? { turnId: event.payload.turnId } : {}),
+    });
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
@@ -1091,6 +1173,9 @@ const make = Effect.gen(function* () {
       case "thread.turn-start-requested":
         yield* processTurnStartRequested(event);
         return;
+      case "thread.turn-steer-requested":
+        yield* processTurnSteerRequested(event);
+        return;
       case "thread.turn-interrupt-requested":
         yield* processTurnInterruptRequested(event);
         return;
@@ -1126,6 +1211,7 @@ const make = Effect.gen(function* () {
       if (
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
+        event.type === "thread.turn-steer-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||

@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   DEFAULT_MODEL,
   EventId,
+  type MessageId,
   ProviderDriverKind,
   ProviderItemId,
   type ProviderInstanceId,
@@ -42,6 +43,7 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -110,6 +112,8 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly messageId?: MessageId;
+  readonly expectedTurnId?: TurnId;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -1287,17 +1291,44 @@ export const makeCodexSessionRuntime = (
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-                "decode-response-payload",
-                error,
-                { method: "turn/start" },
-              ),
-            ),
-          );
-          const turnId = TurnId.make(response.turn.id);
+          const turnId = yield* input.expectedTurnId !== undefined
+            ? client.raw
+                .request("turn/steer", {
+                  threadId: providerThreadId,
+                  expectedTurnId: input.expectedTurnId,
+                  input: params.input,
+                  ...(input.messageId !== undefined
+                    ? { clientUserMessageId: input.messageId }
+                    : {}),
+                })
+                .pipe(
+                  Effect.flatMap((rawResponse) =>
+                    decodeV2TurnSteerResponse(rawResponse).pipe(
+                      Effect.mapError((error) =>
+                        CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                          "decode-response-payload",
+                          error,
+                          { method: "turn/steer" },
+                        ),
+                      ),
+                    ),
+                  ),
+                  Effect.map((response) => TurnId.make(response.turnId)),
+                )
+            : client.raw.request("turn/start", params).pipe(
+                Effect.flatMap((rawResponse) =>
+                  decodeV2TurnStartResponse(rawResponse).pipe(
+                    Effect.mapError((error) =>
+                      CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                        "decode-response-payload",
+                        error,
+                        { method: "turn/start" },
+                      ),
+                    ),
+                  ),
+                ),
+                Effect.map((response) => TurnId.make(response.turn.id)),
+              );
           yield* updateSession(sessionRef, {
             status: "running",
             activeTurnId: turnId,

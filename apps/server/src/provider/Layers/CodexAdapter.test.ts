@@ -7,6 +7,7 @@ import {
   ApprovalRequestId,
   CodexSettings,
   EventId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
@@ -355,6 +356,37 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "priority",
+      });
+    }),
+  );
+
+  it.effect("passes explicit steering preconditions to the Codex runtime", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-steer");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      yield* Effect.ignore(
+        adapter.sendTurn({
+          threadId,
+          messageId: MessageId.make("message-steer"),
+          expectedTurnId: TurnId.make("turn-active"),
+          input: "Use the existing helper",
+          attachments: [],
+        }),
+      );
+
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
+        messageId: MessageId.make("message-steer"),
+        expectedTurnId: TurnId.make("turn-active"),
+        input: "Use the existing helper",
       });
     }),
   );

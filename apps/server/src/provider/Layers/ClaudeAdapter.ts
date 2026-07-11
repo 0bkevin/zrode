@@ -86,6 +86,7 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
+import { validateExpectedSteeringTurn } from "../Steering.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { claudeResultErrorMessage } from "./ClaudeResultError.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -3654,6 +3655,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // instead, so they don't block the user's next turn.
     const steeringTurnState =
       context.turnState && context.turnState.synthetic !== true ? context.turnState : null;
+    yield* validateExpectedSteeringTurn({
+      provider: PROVIDER,
+      threadId: input.threadId,
+      expectedTurnId: input.expectedTurnId,
+      activeTurnId: steeringTurnState?.turnId,
+    });
     if (context.turnState && steeringTurnState === null) {
       yield* completeTurn(context, "completed");
     }

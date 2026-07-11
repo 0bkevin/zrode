@@ -167,6 +167,7 @@ const makeDefaultOrchestrationReadModel = () => {
         archivedAt: null,
         latestTurn: null,
         messages: [],
+        queuedTurns: [],
         session: null,
         activities: [],
         proposedPlans: [],
@@ -719,6 +720,7 @@ const buildAppUnderTest = (options?: {
           getProjectShellById: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
+          getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
@@ -5513,6 +5515,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             archivedAt: null,
             latestTurn: null,
             messages: [],
+            queuedTurns: [],
             session: null,
             activities: [],
             proposedPlans: [],
@@ -5592,6 +5595,100 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.deepEqual(replayResult, []);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("streams queued-turn lifecycle events to thread subscribers", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const messageId = MessageId.make("queued-message");
+      const baseEvent = {
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      };
+      const queuedTurnEvents = [
+        {
+          ...baseEvent,
+          sequence: 1,
+          eventId: EventId.make("queued-event"),
+          type: "thread.turn-enqueued" as const,
+          payload: {
+            threadId: defaultThreadId,
+            messageId,
+            text: "Follow up",
+            attachments: [],
+            modelSelection: defaultModelSelection,
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            queuedAt: now,
+          },
+        },
+        {
+          ...baseEvent,
+          sequence: 2,
+          eventId: EventId.make("cancelled-event"),
+          type: "thread.queued-turn-cancelled" as const,
+          payload: {
+            threadId: defaultThreadId,
+            messageId,
+            cancelledAt: now,
+          },
+        },
+        {
+          ...baseEvent,
+          sequence: 3,
+          eventId: EventId.make("dequeued-event"),
+          type: "thread.queued-turn-dequeued" as const,
+          payload: {
+            threadId: defaultThreadId,
+            messageId,
+            dequeuedAt: now,
+          },
+        },
+      ] satisfies ReadonlyArray<OrchestrationEvent>;
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshotById: () =>
+              Effect.succeed(
+                Option.some({
+                  snapshotSequence: 0,
+                  thread,
+                }),
+              ),
+          },
+          orchestrationEngine: {
+            streamDomainEvents: Stream.fromIterable(queuedTurnEvents),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId: defaultThreadId }).pipe(
+            Stream.take(4),
+            Stream.runCollect,
+          ),
+        ),
+      );
+
+      assert.deepEqual(
+        Array.from(items, (item) => (item.kind === "snapshot" ? item.kind : item.event.type)),
+        [
+          "snapshot",
+          "thread.turn-enqueued",
+          "thread.queued-turn-cancelled",
+          "thread.queued-turn-dequeued",
+        ],
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

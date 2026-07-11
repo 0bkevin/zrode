@@ -321,6 +321,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               updatedAt: "2026-02-24T00:00:05.000Z",
             },
           ],
+          queuedTurns: [],
           proposedPlans: [
             {
               id: "plan-1",
@@ -440,6 +441,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+      }
+
+      const pairedThreadDetail = yield* snapshotQuery.getThreadDetailSnapshotById(
+        ThreadId.make("thread-1"),
+      );
+      assert.equal(pairedThreadDetail._tag, "Some");
+      if (pairedThreadDetail._tag === "Some") {
+        assert.equal(pairedThreadDetail.value.snapshotSequence, 5);
+        assert.deepEqual(pairedThreadDetail.value.thread, snapshot.threads[0]);
       }
     }),
   );

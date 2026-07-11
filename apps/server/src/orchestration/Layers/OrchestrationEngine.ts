@@ -308,7 +308,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   );
 
   const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive) =>
-    eventStore.readFromSequence(fromSequenceExclusive);
+    eventStore.readFromSequence(fromSequenceExclusive, Number.MAX_SAFE_INTEGER);
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {
@@ -324,11 +324,36 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   return {
     readEvents,
     dispatch,
-    // Each access creates a fresh PubSub subscription so that multiple
-    // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
-    // each independently receive all domain events.
+    // Capture a durable cursor when a consumer asks for the stream. The actual
+    // stream may not be acquired until after that consumer has loaded a
+    // snapshot, so subscribing to the PubSub alone would leave a gap. Acquire
+    // the live subscription first, replay through the sequence current at
+    // acquisition, then continue from the buffered subscription. Events that
+    // land in both sources are removed by the sequence cursor.
     get streamDomainEvents(): OrchestrationEngineShape["streamDomainEvents"] {
-      return Stream.fromPubSub(eventPubSub);
+      const fromSequenceExclusive = commandReadModel.snapshotSequence;
+      return Stream.unwrap(
+        Effect.gen(function* () {
+          const liveSubscription = yield* PubSub.subscribe(eventPubSub);
+          const replayThroughSequence = commandReadModel.snapshotSequence;
+          let lastEmittedSequence = fromSequenceExclusive;
+          const isNextEvent = (event: OrchestrationEvent): boolean => {
+            if (event.sequence <= lastEmittedSequence) {
+              return false;
+            }
+            lastEmittedSequence = event.sequence;
+            return true;
+          };
+          const replayLimit = Math.max(0, replayThroughSequence - fromSequenceExclusive);
+          const replay = eventStore.readFromSequence(fromSequenceExclusive, replayLimit).pipe(
+            Stream.filter((event) => event.sequence <= replayThroughSequence),
+            Stream.filter(isNextEvent),
+            Stream.orDie,
+          );
+          const live = Stream.fromSubscription(liveSubscription).pipe(Stream.filter(isNextEvent));
+          return Stream.concat(replay, live);
+        }),
+      );
     },
   } satisfies OrchestrationEngineShape;
 });

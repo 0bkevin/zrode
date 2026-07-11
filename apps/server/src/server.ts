@@ -48,6 +48,7 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { QueuedTurnReactorLive } from "./orchestration/Layers/QueuedTurnReactor.ts";
 import { ProjectSessionHistoryImportReactorLive } from "./orchestration/Layers/ProjectSessionHistoryImportReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -164,6 +165,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
+  Layer.provideMerge(QueuedTurnReactorLive),
   Layer.provideMerge(ProjectSessionHistoryImportReactorLive),
   Layer.provideMerge(ProviderSessionHistoryImporterLive),
   Layer.provideMerge(ThreadDeletionReactorLive),

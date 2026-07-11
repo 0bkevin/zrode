@@ -97,7 +97,13 @@ export function useThreadComposerState() {
   const selectedDraft = selectedThreadKey ? composerDrafts[selectedThreadKey] : null;
   const draftMessage = selectedDraft?.text ?? "";
   const draftAttachments = selectedDraft?.attachments ?? [];
-  const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
+  const selectedThreadQueueCount = useMemo(() => {
+    const messageIds = new Set(selectedThreadQueuedMessages.map((message) => message.messageId));
+    for (const queuedTurn of selectedThreadDetail?.queuedTurns ?? []) {
+      messageIds.add(queuedTurn.messageId);
+    }
+    return messageIds.size;
+  }, [selectedThreadDetail?.queuedTurns, selectedThreadQueuedMessages]);
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;

@@ -35,6 +35,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
+import { validateExpectedSteeringTurn } from "../Steering.ts";
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import {
   buildOpenCodePermissionRules,
@@ -1172,6 +1173,12 @@ export function makeOpenCodeAdapter(
       // prompt into the busy session and the work continues as one turn, so
       // the active turn id is reused instead of opening a new turn.
       const steeringTurnId = context.activeTurnId;
+      yield* validateExpectedSteeringTurn({
+        provider: PROVIDER,
+        threadId: input.threadId,
+        expectedTurnId: input.expectedTurnId,
+        activeTurnId: steeringTurnId,
+      });
       const turnId = steeringTurnId ?? TurnId.make(`opencode-turn-${yield* randomUUIDv4}`);
       const modelSelection =
         input.modelSelection ??

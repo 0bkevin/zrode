@@ -40,6 +40,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
+import { validateExpectedSteeringTurn } from "../Steering.ts";
 import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
@@ -765,7 +766,18 @@ export function makeDevinAdapter(devinSettings: DevinSettings, options?: DevinAd
     const sendTurn: DevinAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
+        const steeringTurnId =
+          input.expectedTurnId !== undefined
+            ? ctx.activeTurnId
+            : ctx.promptsInFlight > 0
+              ? ctx.activeTurnId
+              : undefined;
+        yield* validateExpectedSteeringTurn({
+          provider: PROVIDER,
+          threadId: input.threadId,
+          expectedTurnId: input.expectedTurnId,
+          activeTurnId: steeringTurnId,
+        });
         const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
         ctx.promptsInFlight += 1;
         let promptSlotSettled = false;

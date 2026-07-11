@@ -231,6 +231,11 @@ import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
 import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { ComposerQueuePanel } from "./chat/ComposerQueuePanel";
+import {
+  reconcileQueuedTurnPreviews,
+  type QueuedTurnPreviewInput,
+} from "./chat/ComposerQueuePanel.logic";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
@@ -292,6 +297,10 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID = new Map<MessageId, AssistantNerdStats>();
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+interface OptimisticQueuedTurn extends QueuedTurnPreviewInput {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}
 const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
@@ -945,6 +954,13 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const steerThreadTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
+  const enqueueThreadTurn = useAtomCommand(threadEnvironment.enqueueTurn, {
+    reportFailure: false,
+  });
+  const cancelQueuedThreadTurn = useAtomCommand(threadEnvironment.cancelQueuedTurn, {
+    reportFailure: false,
+  });
   const retryThreadTurn = useAtomCommand(threadEnvironment.retryTurn, { reportFailure: false });
   const editLastUserMessage = useAtomCommand(threadEnvironment.editLastUserMessage, {
     reportFailure: false,
@@ -1046,6 +1062,16 @@ function ChatViewContent(props: ChatViewProps) {
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
+  const [optimisticQueuedTurns, setOptimisticQueuedTurns] = useState<OptimisticQueuedTurn[]>([]);
+  const optimisticQueuedTurnsRef = useRef(optimisticQueuedTurns);
+  optimisticQueuedTurnsRef.current = optimisticQueuedTurns;
+  const [optimisticallyCancelledQueuedMessageIds, setOptimisticallyCancelledQueuedMessageIds] =
+    useState<ReadonlySet<MessageId>>(() => new Set());
+  const optimisticallyCancelledQueuedMessageIdsRef = useRef(
+    optimisticallyCancelledQueuedMessageIds,
+  );
+  optimisticallyCancelledQueuedMessageIdsRef.current = optimisticallyCancelledQueuedMessageIds;
+  const pendingQueuedTurnSubmissionIdsRef = useRef(new Set<MessageId>());
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
     Record<string, string | null>
   >({});
@@ -1688,6 +1714,152 @@ function ChatViewContent(props: ChatViewProps) {
     hasMultipleRegisteredEnvironments && activeThread
       ? `${environmentById.get(activeThread.environmentId)?.label ?? serverConfig?.environment.label ?? activeThread.environmentId} server`
       : "server";
+  const setQueuedTurnOptimisticallyCancelled = useCallback(
+    (messageId: MessageId, cancelled: boolean) => {
+      const current = optimisticallyCancelledQueuedMessageIdsRef.current;
+      if (current.has(messageId) === cancelled) {
+        return;
+      }
+      const next = new Set(current);
+      if (cancelled) {
+        next.add(messageId);
+      } else {
+        next.delete(messageId);
+      }
+      optimisticallyCancelledQueuedMessageIdsRef.current = next;
+      setOptimisticallyCancelledQueuedMessageIds(next);
+    },
+    [],
+  );
+  const removeOptimisticQueuedTurn = useCallback((messageId: MessageId) => {
+    const current = optimisticQueuedTurnsRef.current;
+    const next = current.filter((turn) => turn.messageId !== messageId);
+    if (next.length === current.length) {
+      return;
+    }
+    optimisticQueuedTurnsRef.current = next;
+    setOptimisticQueuedTurns(next);
+  }, []);
+  const submitQueuedTurnCancellation = useCallback(
+    async (target: {
+      readonly environmentId: EnvironmentId;
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+    }) => {
+      let failure: AtomCommandResult<unknown, unknown> | null = null;
+      try {
+        const result = await cancelQueuedThreadTurn({
+          environmentId: target.environmentId,
+          input: {
+            threadId: target.threadId,
+            messageId: target.messageId,
+          },
+        });
+        if (result._tag === "Failure") {
+          failure = result;
+        }
+      } catch (error) {
+        setQueuedTurnOptimisticallyCancelled(target.messageId, false);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to cancel queued message",
+            description:
+              error instanceof Error ? error.message : "The queued message was not removed.",
+          }),
+        );
+        return;
+      }
+
+      if (failure === null) {
+        removeOptimisticQueuedTurn(target.messageId);
+        return;
+      }
+
+      setQueuedTurnOptimisticallyCancelled(target.messageId, false);
+      if (!isAtomCommandInterrupted(failure)) {
+        const error = squashAtomCommandFailure(failure);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to cancel queued message",
+            description:
+              error instanceof Error ? error.message : "The queued message was not removed.",
+          }),
+        );
+      }
+    },
+    [cancelQueuedThreadTurn, removeOptimisticQueuedTurn, setQueuedTurnOptimisticallyCancelled],
+  );
+  const handleCancelQueuedTurn = useCallback(
+    (messageId: MessageId) => {
+      if (!activeThread) return;
+
+      setQueuedTurnOptimisticallyCancelled(messageId, true);
+      if (pendingQueuedTurnSubmissionIdsRef.current.has(messageId)) {
+        return;
+      }
+      void submitQueuedTurnCancellation({
+        environmentId: activeThread.environmentId,
+        threadId: activeThread.id,
+        messageId,
+      });
+    },
+    [activeThread, setQueuedTurnOptimisticallyCancelled, submitQueuedTurnCancellation],
+  );
+  const sentMessageIds = useMemo(
+    () => new Set<MessageId>(activeThread?.messages.map((message) => message.id) ?? []),
+    [activeThread?.messages],
+  );
+  const activeOptimisticQueuedTurns = useMemo(
+    () =>
+      activeThread
+        ? optimisticQueuedTurns.filter(
+            (turn) =>
+              turn.environmentId === activeThread.environmentId &&
+              turn.threadId === activeThread.id,
+          )
+        : [],
+    [activeThread, optimisticQueuedTurns],
+  );
+  const composerQueuedTurns = useMemo(
+    () =>
+      reconcileQueuedTurnPreviews({
+        serverQueuedTurns: activeThread?.queuedTurns ?? [],
+        optimisticQueuedTurns: activeOptimisticQueuedTurns,
+        hiddenMessageIds: optimisticallyCancelledQueuedMessageIds,
+        sentMessageIds,
+      }),
+    [
+      activeOptimisticQueuedTurns,
+      activeThread?.queuedTurns,
+      optimisticallyCancelledQueuedMessageIds,
+      sentMessageIds,
+    ],
+  );
+  useEffect(() => {
+    if (!activeThread || optimisticQueuedTurnsRef.current.length === 0) {
+      return;
+    }
+    const acknowledgedMessageIds = new Set<MessageId>([
+      ...activeThread.queuedTurns.map((turn) => turn.messageId),
+      ...sentMessageIds,
+    ]);
+    if (acknowledgedMessageIds.size === 0) {
+      return;
+    }
+    const current = optimisticQueuedTurnsRef.current;
+    const next = current.filter(
+      (turn) =>
+        turn.environmentId !== activeThread.environmentId ||
+        turn.threadId !== activeThread.id ||
+        !acknowledgedMessageIds.has(turn.messageId),
+    );
+    if (next.length !== current.length) {
+      optimisticQueuedTurnsRef.current = next;
+      setOptimisticQueuedTurns(next);
+    }
+  }, [activeThread, sentMessageIds]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     if (activeEnvironmentUnavailableState) {
@@ -4519,7 +4691,10 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const onSend = async (e?: { preventDefault: () => void }) => {
+  const onSend = async (
+    e?: { preventDefault: () => void },
+    requestedBehavior?: "queue" | "steer",
+  ) => {
     e?.preventDefault();
     if (
       !activeThread ||
@@ -4703,6 +4878,13 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     if (!activeProject) return;
+    const submissionBehavior: "start" | "queue" | "steer" =
+      phase === "running" ? (requestedBehavior ?? "queue") : "start";
+    const activeTurnIdForSteer = activeThread.session?.activeTurnId ?? null;
+    if (submissionBehavior === "steer" && activeTurnIdForSteer === null) {
+      setThreadError(activeThread.id, "The active turn changed before it could be steered.");
+      return;
+    }
     const threadIdForSend = activeThread.id;
     const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
     const baseBranchForWorktree =
@@ -4720,7 +4902,9 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     sendInFlightRef.current = true;
-    beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
+    if (submissionBehavior === "start") {
+      beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
+    }
 
     const composerImagesSnapshot = [...composerImages];
     const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
@@ -4765,34 +4949,53 @@ function ChatViewContent(props: ChatViewProps) {
       sizeBytes: image.sizeBytes,
       previewUrl: image.previewUrl,
     }));
-    // Sending always returns to the live edge. The new row becomes the
-    // anchored end-space target so it lands near the top while the response
-    // streams into the reserved space below it.
-    isAtEndRef.current = true;
-    timelineScrollModeRef.current = "anchoring-new-turn";
-    liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = messageIdForSend;
-    activeTimelineAnchorIndexRef.current = null;
-    setTimelineLiveFollow(true);
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    setTimelineAnchor({
-      threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
-      messageId: messageIdForSend,
-    });
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
+    if (submissionBehavior === "queue") {
+      const optimisticQueuedTurn: OptimisticQueuedTurn = {
+        environmentId: activeThread.environmentId,
+        threadId: threadIdForSend,
+        messageId: messageIdForSend,
         text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        turnId: null,
-        createdAt: messageCreatedAt,
-        updatedAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
+        attachments: optimisticAttachments,
+      };
+      pendingQueuedTurnSubmissionIdsRef.current.add(messageIdForSend);
+      const nextOptimisticQueuedTurns = [
+        ...optimisticQueuedTurnsRef.current.filter(
+          (turn) => turn.messageId !== optimisticQueuedTurn.messageId,
+        ),
+        optimisticQueuedTurn,
+      ];
+      optimisticQueuedTurnsRef.current = nextOptimisticQueuedTurns;
+      setOptimisticQueuedTurns(nextOptimisticQueuedTurns);
+    }
+    if (submissionBehavior !== "queue") {
+      // Immediate sends return to the live edge. Queued sends stay in the
+      // composer banner until the server dequeues them into the timeline.
+      isAtEndRef.current = true;
+      timelineScrollModeRef.current = "anchoring-new-turn";
+      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+      pendingTimelineAnchorRef.current = messageIdForSend;
+      activeTimelineAnchorIndexRef.current = null;
+      setTimelineLiveFollow(true);
+      showScrollDebouncer.current.cancel();
+      setShowScrollToBottom(false);
+      setTimelineAnchor({
+        threadKey: scopedThreadKey(scopeThreadRef(activeThread.environmentId, threadIdForSend)),
+        messageId: messageIdForSend,
+      });
+      setOptimisticUserMessages((existing) => [
+        ...existing,
+        {
+          id: messageIdForSend,
+          role: "user",
+          text: outgoingMessageText,
+          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+          turnId: null,
+          createdAt: messageCreatedAt,
+          updatedAt: messageCreatedAt,
+          streaming: false,
+        },
+      ]);
+    }
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
       const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -4852,7 +5055,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
 
-    if (failure === null && isServerThread) {
+    if (failure === null && isServerThread && submissionBehavior !== "queue") {
       const settingsResult = await persistThreadSettingsForNextTurn({
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
@@ -4870,7 +5073,7 @@ function ChatViewContent(props: ChatViewProps) {
       failure = turnAttachmentsResult;
     }
 
-    let turnStartSucceeded = false;
+    let turnSubmissionSucceeded = false;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
@@ -4902,33 +5105,77 @@ function ChatViewContent(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      beginLocalDispatch({ preparingWorktree: false });
-      const startResult = await startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            attachments: turnAttachmentsResult.value,
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
+      if (submissionBehavior === "start") {
+        beginLocalDispatch({ preparingWorktree: false });
+      }
+      const turnInput = {
+        threadId: threadIdForSend,
+        message: {
+          messageId: messageIdForSend,
+          role: "user" as const,
+          text: outgoingMessageText,
+          attachments: turnAttachmentsResult.value,
         },
-      });
-      if (startResult._tag === "Failure") {
-        failure = startResult;
+        modelSelection: ctxSelectedModelSelection,
+        runtimeMode,
+        interactionMode,
+        createdAt: messageCreatedAt,
+      };
+      let submissionResult: AtomCommandResult<unknown, unknown>;
+      if (submissionBehavior === "queue") {
+        submissionResult = await enqueueThreadTurn({
+          environmentId,
+          input: { ...turnInput, titleSeed: title },
+        });
+      } else if (submissionBehavior === "steer") {
+        if (activeTurnIdForSteer === null) {
+          sendInFlightRef.current = false;
+          setThreadError(activeThread.id, "The active turn changed before it could be steered.");
+          return;
+        }
+        submissionResult = await steerThreadTurn({
+          environmentId,
+          input: {
+            ...turnInput,
+            expectedTurnId: activeTurnIdForSteer,
+          },
+        });
       } else {
-        turnStartSucceeded = true;
+        submissionResult = await startThreadTurn({
+          environmentId,
+          input: {
+            ...turnInput,
+            titleSeed: title,
+            ...(bootstrap ? { bootstrap } : {}),
+          },
+        });
+      }
+      if (submissionResult._tag === "Failure") {
+        failure = submissionResult;
+      } else {
+        turnSubmissionSucceeded = true;
+      }
+    }
+
+    if (submissionBehavior === "queue") {
+      pendingQueuedTurnSubmissionIdsRef.current.delete(messageIdForSend);
+      if (
+        turnSubmissionSucceeded &&
+        optimisticallyCancelledQueuedMessageIdsRef.current.has(messageIdForSend)
+      ) {
+        await submitQueuedTurnCancellation({
+          environmentId: activeThread.environmentId,
+          threadId: threadIdForSend,
+          messageId: messageIdForSend,
+        });
       }
     }
 
     if (failure !== null) {
+      if (submissionBehavior === "queue") {
+        removeOptimisticQueuedTurn(messageIdForSend);
+        setQueuedTurnOptimisticallyCancelled(messageIdForSend, false);
+      }
       if (
         promptRef.current.length === 0 &&
         composerImagesRef.current.length === 0 &&
@@ -4973,7 +5220,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
     sendInFlightRef.current = false;
-    if (!turnStartSucceeded) {
+    if (!turnSubmissionSucceeded && submissionBehavior === "start") {
       resetLocalDispatch();
     }
   };
@@ -6232,6 +6479,12 @@ function ChatViewContent(props: ChatViewProps) {
               <div className="chat-composer-horizontal-inset">
                 <div className="pointer-events-auto relative z-10 isolate">
                   <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
+                  {composerQueuedTurns.length > 0 ? (
+                    <ComposerQueuePanel
+                      queuedTurns={composerQueuedTurns}
+                      onCancel={handleCancelQueuedTurn}
+                    />
+                  ) : null}
                   <div className="relative z-10">
                     <ChatComposer
                       composerRef={composerRef}

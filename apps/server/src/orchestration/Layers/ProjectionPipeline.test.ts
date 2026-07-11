@@ -175,6 +175,86 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-turn-queue-")))(
+  "OrchestrationProjectionPipeline queued turns",
+  (it) => {
+    it.effect("persists queued turns and removes them on cancellation", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-07-10T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-queued-turn");
+        const messageId = MessageId.make("message-queued-turn");
+
+        yield* eventStore.append({
+          type: "thread.turn-enqueued",
+          eventId: EventId.make("event-turn-enqueued"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("command-turn-enqueued"),
+          causationEventId: null,
+          correlationId: CommandId.make("command-turn-enqueued"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId,
+            text: "Run this next",
+            attachments: [],
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5.4",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            queuedAt: now,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+        const queuedRows = yield* sql<{
+          readonly messageId: string;
+          readonly text: string;
+          readonly enqueuedSequence: number;
+        }>`
+          SELECT
+            message_id AS "messageId",
+            text,
+            enqueued_sequence AS "enqueuedSequence"
+          FROM projection_thread_turn_queue
+        `;
+        assert.deepEqual(queuedRows, [
+          { messageId: "message-queued-turn", text: "Run this next", enqueuedSequence: 1 },
+        ]);
+
+        const cancelled = yield* eventStore.append({
+          type: "thread.queued-turn-cancelled",
+          eventId: EventId.make("event-turn-cancelled"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("command-turn-cancelled"),
+          causationEventId: null,
+          correlationId: CommandId.make("command-turn-cancelled"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId,
+            cancelledAt: now,
+          },
+        });
+        yield* projectionPipeline.projectEvent(cancelled);
+
+        const remainingRows = yield* sql`
+          SELECT message_id FROM projection_thread_turn_queue
+        `;
+        assert.deepEqual(remainingRows, []);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

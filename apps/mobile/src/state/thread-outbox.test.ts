@@ -14,7 +14,6 @@ import {
   encodeQueuedThreadMessage,
   groupQueuedThreadMessages,
   isQueuedThreadCreationSendable,
-  modelSelectionsEqual,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
@@ -108,22 +107,6 @@ describe("thread outbox", () => {
       runtimeMode: selectedMessage.runtimeMode,
       interactionMode: selectedMessage.interactionMode,
     });
-  });
-
-  it("compares model options as part of the queued settings change", () => {
-    const base = {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: "gpt-5.4",
-      options: [{ id: "reasoningEffort", value: "medium" }],
-    } as const;
-
-    expect(modelSelectionsEqual(base, base)).toBe(true);
-    expect(
-      modelSelectionsEqual(base, {
-        ...base,
-        options: [{ id: "reasoningEffort", value: "xhigh" }],
-      }),
-    ).toBe(false);
   });
 
   it("backs off queued delivery retries and caps them at sixteen seconds", () => {
@@ -355,6 +338,15 @@ describe("thread outbox", () => {
         threadBusy: false,
       }),
     ).toBe("send");
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        isCreation: false,
+        threadExists: true,
+        shellStatus: "live",
+        environmentConnected: true,
+        threadBusy: true,
+      }),
+    ).toBe("send");
   });
 
   it("sends queued creations once connected and live, removing already-created ones", () => {
@@ -451,19 +443,19 @@ describe("thread outbox", () => {
     expect(shouldRetryThreadOutboxDelivery(new Error("Thread no longer exists"))).toBe(false);
   });
 
-  it("retains queued messages when settings synchronization fails before startTurn", () => {
+  it("retries interrupted delivery but drops deterministic submission failures", () => {
     const deterministicFailure = new Error("Thread no longer exists");
 
     expect(
       resolveThreadOutboxFailureAction({
-        stage: "settings-sync",
+        stage: "submit-turn",
         error: deterministicFailure,
-        interrupted: false,
+        interrupted: true,
       }),
     ).toBe("retry");
     expect(
       resolveThreadOutboxFailureAction({
-        stage: "start-turn",
+        stage: "submit-turn",
         error: deterministicFailure,
         interrupted: false,
       }),

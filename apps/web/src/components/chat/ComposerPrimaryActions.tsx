@@ -1,5 +1,5 @@
 import { memo, type PointerEventHandler } from "react";
-import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronLeftIcon, Clock3Icon, CornerDownRightIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
@@ -27,6 +27,8 @@ interface ComposerPrimaryActionsProps {
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
+  onQueue: () => void;
+  onSteer: () => void;
   onImplementPlanInNewThread: () => void;
 }
 
@@ -52,6 +54,14 @@ const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
 };
 
+function StopGenerationIcon({ className = "size-3" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+      <rect x="2" y="2" width="8" height="8" rx="1.5" />
+    </svg>
+  );
+}
+
 export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
   pendingAction,
@@ -66,6 +76,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   preserveComposerFocusOnPointerDown = false,
   onPreviousPendingQuestion,
   onInterrupt,
+  onQueue,
+  onSteer,
   onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
   const pointerFocusProps = preserveComposerFocusOnPointerDown
@@ -124,6 +136,65 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (isRunning) {
+    if (hasSendableContent) {
+      const messageActionDisabled = isSendBusy || isConnecting || isEnvironmentUnavailable;
+
+      return (
+        <Menu>
+          <MenuTrigger
+            render={
+              <button
+                type="button"
+                className={cn(
+                  "flex h-9 min-w-11 cursor-pointer items-center justify-center gap-1 rounded-full bg-destructive/90 px-2 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 hover:scale-105 hover:bg-destructive active:shadow-none active:inset-shadow-[0_1px_--theme(--color-black/8%)] sm:h-8 sm:min-w-10",
+                  compact && "min-w-10 sm:min-w-9",
+                )}
+                {...pointerFocusProps}
+                aria-label="Choose an action for the running turn"
+              />
+            }
+          >
+            <StopGenerationIcon />
+            <ChevronDownIcon className="size-3 opacity-70" />
+          </MenuTrigger>
+          <MenuPopup align="end" side="top" sideOffset={8} className="w-64">
+            <MenuItem
+              className="items-start py-2"
+              disabled={messageActionDisabled}
+              onClick={onQueue}
+            >
+              <Clock3Icon className="mt-0.5" />
+              <span className="grid min-w-0 gap-0.5">
+                <span>{isSendBusy ? "Queueing..." : "Queue message"}</span>
+                <span className="text-muted-foreground text-xs font-normal">
+                  Send after the current turn finishes
+                </span>
+              </span>
+            </MenuItem>
+            <MenuItem
+              className="items-start py-2"
+              disabled={messageActionDisabled}
+              onClick={onSteer}
+            >
+              <CornerDownRightIcon className="mt-0.5" />
+              <span className="grid min-w-0 gap-0.5">
+                <span>Steer current turn</span>
+                <span className="text-muted-foreground text-xs font-normal">
+                  Send this as guidance right now
+                </span>
+              </span>
+            </MenuItem>
+            <MenuItem variant="destructive" className="items-start py-2" onClick={onInterrupt}>
+              <StopGenerationIcon className="mt-0.5 size-4" />
+              <span className="grid min-w-0 gap-0.5">
+                <span>Stop generation</span>
+                <span className="text-current/70 text-xs font-normal">End the current turn</span>
+              </span>
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
+      );
+    }
     return (
       <button
         type="button"
@@ -132,9 +203,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         onClick={onInterrupt}
         aria-label="Stop generation"
       >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
+        <StopGenerationIcon />
       </button>
     );
   }

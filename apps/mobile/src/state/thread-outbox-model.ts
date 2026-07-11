@@ -97,14 +97,6 @@ export function resolveQueuedThreadSettings(
   };
 }
 
-export function modelSelectionsEqual(left: ModelSelectionType, right: ModelSelectionType): boolean {
-  return (
-    left.instanceId === right.instanceId &&
-    left.model === right.model &&
-    JSON.stringify(left.options ?? null) === JSON.stringify(right.options ?? null)
-  );
-}
-
 export function encodeQueuedThreadMessage(message: QueuedThreadMessage): unknown {
   return encodeStoredQueuedThreadMessage({
     schemaVersion: THREAD_OUTBOX_SCHEMA_VERSION,
@@ -169,7 +161,9 @@ export function resolveThreadOutboxDeliveryAction(input: {
   if (!input.threadExists) {
     return input.shellStatus === "live" ? "remove" : "wait";
   }
-  return input.environmentConnected && !input.threadBusy ? "send" : "wait";
+  // Existing-thread messages are delivered into the server-side durable
+  // queue, so they can be accepted while a provider turn is still running.
+  return input.environmentConnected ? "send" : "wait";
 }
 
 /**
@@ -208,7 +202,7 @@ export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
   return isTransportConnectionErrorMessage(errorMessage(error));
 }
 
-export type ThreadOutboxCommandStage = "settings-sync" | "start-turn";
+export type ThreadOutboxCommandStage = "submit-turn";
 export type ThreadOutboxFailureAction = "retry" | "discard";
 
 export function resolveThreadOutboxFailureAction(input: {
@@ -216,11 +210,7 @@ export function resolveThreadOutboxFailureAction(input: {
   readonly error: unknown;
   readonly interrupted: boolean;
 }): ThreadOutboxFailureAction {
-  if (
-    input.stage === "settings-sync" ||
-    input.interrupted ||
-    shouldRetryThreadOutboxDelivery(input.error)
-  ) {
+  if (input.interrupted || shouldRetryThreadOutboxDelivery(input.error)) {
     return "retry";
   }
   return "discard";

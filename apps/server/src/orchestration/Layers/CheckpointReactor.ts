@@ -86,6 +86,23 @@ function isHistoryImportDomainEvent(event: OrchestrationEvent): boolean {
   return event.metadata.adapterKey?.startsWith("history-import:") ?? false;
 }
 
+function isTurnCompletionActivityEvent(
+  event: OrchestrationEvent,
+): event is Extract<OrchestrationEvent, { type: "thread.activity-appended" }> {
+  return (
+    event.type === "thread.activity-appended" &&
+    event.payload.activity.kind === "turn.completed" &&
+    event.payload.activity.turnId !== null
+  );
+}
+
+function turnCompletionKey(input: {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+}): string {
+  return `${input.threadId}\0${input.turnId}`;
+}
+
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
     case "failed":
@@ -411,8 +428,13 @@ const make = Effect.gen(function* () {
 
   // Captures a real git checkpoint when a turn completes via a runtime event.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
-      const turnId = toTurnId(event.turnId);
+    function* (event: {
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId | null;
+      readonly state?: string;
+      readonly createdAt: string;
+    }) {
+      const turnId = event.turnId;
       if (!turnId) {
         return;
       }
@@ -465,12 +487,26 @@ const make = Effect.gen(function* () {
         thread,
         cwd: checkpointCwd,
         turnCount: nextTurnCount,
-        status: checkpointStatusFromRuntime(event.payload.state),
+        status: checkpointStatusFromRuntime(event.state),
         assistantMessageId: undefined,
         createdAt: event.createdAt,
       });
     },
   );
+
+  const markTurnQuiesced = Effect.fn("markTurnQuiesced")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly createdAt: string;
+  }) {
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.quiesce",
+      commandId: CommandId.make(`server:turn-quiesce:${input.threadId}:${input.turnId}`),
+      threadId: input.threadId,
+      turnId: input.turnId,
+      createdAt: input.createdAt,
+    });
+  });
 
   // Captures a real git checkpoint when a placeholder checkpoint (status "missing")
   // is detected via a domain event. This replaces the placeholder with a real
@@ -1003,6 +1039,43 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+      return;
+    }
+
+    if (
+      event.type === "thread.activity-appended" &&
+      event.payload.activity.kind === "turn.completed" &&
+      event.payload.activity.turnId !== null
+    ) {
+      const payload = event.payload.activity.payload;
+      const state =
+        typeof payload === "object" &&
+        payload !== null &&
+        "state" in payload &&
+        typeof payload.state === "string"
+          ? payload.state
+          : undefined;
+      const turnId = event.payload.activity.turnId;
+      yield* captureCheckpointFromTurnCompletion({
+        threadId: event.payload.threadId,
+        turnId,
+        ...(state !== undefined ? { state } : {}),
+        createdAt: event.payload.activity.createdAt,
+      }).pipe(
+        Effect.catch((error) =>
+          appendCaptureFailureActivity({
+            threadId: event.payload.threadId,
+            turnId,
+            detail: error.message,
+            createdAt: event.payload.activity.createdAt,
+          }).pipe(Effect.catch(() => Effect.void)),
+        ),
+      );
+      yield* markTurnQuiesced({
+        threadId: event.payload.threadId,
+        turnId,
+        createdAt: event.payload.activity.createdAt,
+      });
     }
   });
 
@@ -1017,7 +1090,12 @@ const make = Effect.gen(function* () {
     if (event.type === "turn.completed") {
       const turnId = toTurnId(event.turnId);
       yield* refreshLocalGitStatusFromTurnCompletion(event);
-      yield* captureCheckpointFromTurnCompletion(event).pipe(
+      yield* captureCheckpointFromTurnCompletion({
+        threadId: event.threadId,
+        turnId,
+        state: event.payload.state,
+        createdAt: event.createdAt,
+      }).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
             appendCaptureFailureActivity({
@@ -1057,10 +1135,24 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
+  const enqueuedTurnCompletionEventIds = new Set<string>();
+
+  const enqueueTurnCompletionEvent = Effect.fn("enqueueTurnCompletionEvent")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  ) {
+    if (enqueuedTurnCompletionEventIds.has(event.eventId)) {
+      return;
+    }
+    enqueuedTurnCompletionEventIds.add(event.eventId);
+    yield* worker.enqueue({ source: "domain", event });
+  });
 
   const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
     yield* Effect.forkScoped(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
+        if (isTurnCompletionActivityEvent(event)) {
+          return enqueueTurnCompletionEvent(event);
+        }
         if (
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
@@ -1073,6 +1165,51 @@ const make = Effect.gen(function* () {
         return worker.enqueue({ source: "domain", event });
       }),
     );
+
+    // Recover the narrow crash window where provider ingestion durably recorded
+    // turn completion but checkpoint settlement had not yet emitted quiescence.
+    // Completed pairs are discarded while scanning so normal startup does not
+    // replay checkpoint work for the whole event history.
+    const pendingTurnCompletions = new Map<
+      string,
+      Extract<OrchestrationEvent, { type: "thread.activity-appended" }>
+    >();
+    yield* Stream.runForEach(orchestrationEngine.readEvents(0), (event) =>
+      Effect.sync(() => {
+        if (isTurnCompletionActivityEvent(event)) {
+          const turnId = event.payload.activity.turnId;
+          if (turnId === null) {
+            return;
+          }
+          pendingTurnCompletions.set(
+            turnCompletionKey({
+              threadId: event.payload.threadId,
+              turnId,
+            }),
+            event,
+          );
+          return;
+        }
+        if (event.type === "thread.turn-quiesced") {
+          pendingTurnCompletions.delete(
+            turnCompletionKey({
+              threadId: event.payload.threadId,
+              turnId: event.payload.turnId,
+            }),
+          );
+        }
+      }),
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("checkpoint reactor failed to rebuild pending turn completions", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+    yield* Effect.forEach(pendingTurnCompletions.values(), enqueueTurnCompletionEvent, {
+      concurrency: 1,
+    }).pipe(Effect.asVoid);
+    yield* worker.drain;
 
     yield* Effect.forkScoped(
       Stream.runForEach(providerService.streamEvents, (event) => {

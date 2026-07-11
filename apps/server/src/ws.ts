@@ -262,6 +262,9 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   {
     type:
       | "thread.message-sent"
+      | "thread.turn-enqueued"
+      | "thread.queued-turn-cancelled"
+      | "thread.queued-turn-dequeued"
       | "thread.proposed-plan-upserted"
       | "thread.activity-appended"
       | "thread.turn-diff-completed"
@@ -271,6 +274,9 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 > {
   return (
     event.type === "thread.message-sent" ||
+    event.type === "thread.turn-enqueued" ||
+    event.type === "thread.queued-turn-cancelled" ||
+    event.type === "thread.queued-turn-dequeued" ||
     event.type === "thread.proposed-plan-upserted" ||
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||
@@ -1125,8 +1131,13 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,
             Effect.gen(function* () {
-              const [threadDetail, snapshotSequence] = yield* Effect.all([
-                projectionSnapshotQuery.getThreadDetailById(input.threadId).pipe(
+              // Access the gap-free engine stream before reading the snapshot.
+              // Its durable cursor is captured now, so events committed while
+              // the transactional detail query runs are replayed on acquire.
+              const domainEvents = orchestrationEngine.streamDomainEvents;
+              const threadSnapshot = yield* projectionSnapshotQuery
+                .getThreadDetailSnapshotById(input.threadId)
+                .pipe(
                   Effect.mapError(
                     (cause) =>
                       new OrchestrationGetSnapshotError({
@@ -1134,33 +1145,30 @@ const makeWsRpcLayer = (
                         cause,
                       }),
                   ),
-                ),
-                projectionSnapshotQuery.getSnapshotSequence().pipe(
-                  Effect.map(({ snapshotSequence }) => snapshotSequence),
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationGetSnapshotError({
-                        message: "Failed to load orchestration snapshot sequence",
-                        cause,
-                      }),
-                  ),
-                ),
-              ]);
+                );
 
-              if (Option.isNone(threadDetail)) {
+              if (Option.isNone(threadSnapshot)) {
                 return yield* new OrchestrationGetSnapshotError({
                   message: `Thread ${input.threadId} was not found`,
                   cause: input.threadId,
                 });
               }
 
-              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+              let lastSequence = threadSnapshot.value.snapshotSequence;
+              const liveStream = domainEvents.pipe(
                 Stream.filter(
                   (event) =>
                     event.aggregateKind === "thread" &&
                     event.aggregateId === input.threadId &&
                     isThreadDetailEvent(event),
                 ),
+                Stream.filter((event) => {
+                  if (event.sequence <= lastSequence) {
+                    return false;
+                  }
+                  lastSequence = event.sequence;
+                  return true;
+                }),
                 Stream.map((event) => ({
                   kind: "event" as const,
                   event,
@@ -1171,8 +1179,8 @@ const makeWsRpcLayer = (
                 Stream.make({
                   kind: "snapshot" as const,
                   snapshot: {
-                    snapshotSequence,
-                    thread: threadDetail.value,
+                    snapshotSequence: threadSnapshot.value.snapshotSequence,
+                    thread: threadSnapshot.value.thread,
                   },
                 }),
                 liveStream,

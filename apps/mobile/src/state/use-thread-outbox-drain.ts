@@ -5,7 +5,6 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
-  CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type MessageId,
@@ -23,7 +22,6 @@ import { useProjects, useThreadShells } from "./entities";
 import { ensureThreadOutboxLoaded, removeThreadOutboxMessage } from "./thread-outbox";
 import {
   isQueuedThreadCreationSendable,
-  modelSelectionsEqual,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
@@ -76,19 +74,9 @@ function findCreationProject(
   );
 }
 
-function settingsCommandId(message: QueuedThreadMessage, setting: string): CommandId {
-  return CommandId.make(`${message.commandId}:${setting}`);
-}
-
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
-    reportFailure: false,
-  });
-  const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
-    reportFailure: false,
-  });
-  const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
+  const enqueueTurn = useAtomCommand(threadEnvironment.enqueueTurn, {
     reportFailure: false,
   });
   const dispatchingQueuedMessageId = useAtomValue(dispatchingQueuedMessageIdAtom);
@@ -140,7 +128,7 @@ export function useThreadOutboxDrain(): void {
     const completeDelivery = async (
       deliveryResult: AtomCommandResult<unknown, unknown>,
     ): Promise<boolean> => {
-      if (reportFailure(deliveryResult, "start-turn")) {
+      if (reportFailure(deliveryResult, "submit-turn")) {
         return false;
       }
 
@@ -163,56 +151,9 @@ export function useThreadOutboxDrain(): void {
   const sendQueuedMessage = useCallback(
     async (queuedMessage: QueuedThreadMessage, thread: EnvironmentThreadShell) => {
       const settings = resolveQueuedThreadSettings(queuedMessage, thread);
-      const { reportFailure, completeDelivery } = makeDeliveryHelpers(queuedMessage);
+      const { completeDelivery } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
-        const updateResult = await updateThreadMetadata({
-          environmentId: queuedMessage.environmentId,
-          input: {
-            commandId: settingsCommandId(queuedMessage, "model-selection"),
-            threadId: queuedMessage.threadId,
-            modelSelection: settings.modelSelection,
-          },
-        });
-        if (AsyncResult.isFailure(updateResult)) {
-          reportFailure(updateResult, "settings-sync");
-          return false;
-        }
-      }
-
-      if (settings.runtimeMode !== thread.runtimeMode) {
-        const runtimeResult = await setThreadRuntimeMode({
-          environmentId: queuedMessage.environmentId,
-          input: {
-            commandId: settingsCommandId(queuedMessage, "runtime-mode"),
-            threadId: queuedMessage.threadId,
-            runtimeMode: settings.runtimeMode,
-            createdAt: queuedMessage.createdAt,
-          },
-        });
-        if (AsyncResult.isFailure(runtimeResult)) {
-          reportFailure(runtimeResult, "settings-sync");
-          return false;
-        }
-      }
-
-      if (settings.interactionMode !== thread.interactionMode) {
-        const interactionResult = await setThreadInteractionMode({
-          environmentId: queuedMessage.environmentId,
-          input: {
-            commandId: settingsCommandId(queuedMessage, "interaction-mode"),
-            threadId: queuedMessage.threadId,
-            interactionMode: settings.interactionMode,
-            createdAt: queuedMessage.createdAt,
-          },
-        });
-        if (AsyncResult.isFailure(interactionResult)) {
-          reportFailure(interactionResult, "settings-sync");
-          return false;
-        }
-      }
-
-      const deliveryResult = await startTurn({
+      const deliveryResult = await enqueueTurn({
         environmentId: queuedMessage.environmentId,
         input: {
           commandId: queuedMessage.commandId,
@@ -231,13 +172,7 @@ export function useThreadOutboxDrain(): void {
       });
       return completeDelivery(deliveryResult);
     },
-    [
-      makeDeliveryHelpers,
-      setThreadInteractionMode,
-      setThreadRuntimeMode,
-      startTurn,
-      updateThreadMetadata,
-    ],
+    [enqueueTurn, makeDeliveryHelpers],
   );
 
   const sendQueuedCreation = useCallback(

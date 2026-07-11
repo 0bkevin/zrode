@@ -33,6 +33,11 @@ export interface ProjectionSnapshotSequence {
   readonly snapshotSequence: number;
 }
 
+export interface ProjectionThreadDetailSnapshot {
+  readonly snapshotSequence: number;
+  readonly thread: OrchestrationThread;
+}
+
 export interface ProjectionThreadCheckpointContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -157,6 +162,15 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read a thread detail and its projection cursor from one database
+   * transaction. Consumers that reduce later events must use this paired
+   * cursor rather than labelling the detail with a separately-read sequence.
+   */
+  readonly getThreadDetailSnapshotById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProjectionThreadDetailSnapshot>, ProjectionRepositoryError>;
 }
 
 /**

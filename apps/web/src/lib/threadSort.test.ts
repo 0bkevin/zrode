@@ -24,6 +24,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     handoffSource: null,
     session: null,
     messages: [],
+    queuedTurns: [],
     proposedPlans: [],
     createdAt: "2026-03-09T10:00:00.000Z",
     archivedAt: null,
