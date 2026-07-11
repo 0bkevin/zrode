@@ -4,6 +4,12 @@ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
 type AppVariant = "development" | "preview" | "production";
 
+const MAIN_ICON = {
+  light: "./assets/zrode-main-default.png",
+  dark: "./assets/zrode-main-dark.png",
+  tinted: "./assets/zrode-main-tinted-light.png",
+} as const;
+
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
 
@@ -14,7 +20,7 @@ const VARIANT_CONFIG: Record<
   {
     readonly appName: string;
     readonly scheme: string;
-    readonly iosIcon: string;
+    readonly iosIcon: string | typeof MAIN_ICON;
     readonly iosBundleIdentifier: string;
     readonly androidPackage: string;
     readonly relyingParty?: string;
@@ -31,7 +37,7 @@ const VARIANT_CONFIG: Record<
   preview: {
     appName: "Zrode Preview",
     scheme: "zrode-preview",
-    iosIcon: "./assets/icon-composer-prod.icon",
+    iosIcon: MAIN_ICON,
     iosBundleIdentifier: "com.t3tools.zrode.preview",
     androidPackage: "com.t3tools.zrode.preview",
     relyingParty: "clerk.t3.codes",
@@ -39,7 +45,7 @@ const VARIANT_CONFIG: Record<
   production: {
     appName: "Zrode",
     scheme: "zrode",
-    iosIcon: "./assets/icon-composer-prod.icon",
+    iosIcon: MAIN_ICON,
     iosBundleIdentifier: "com.t3tools.zrode",
     androidPackage: "com.t3tools.zrode",
     relyingParty: "clerk.t3.codes",
@@ -69,7 +75,7 @@ const config: ExpoConfig = {
     policy: process.env.MOBILE_VERSION_POLICY ?? "appVersion",
   },
   orientation: "portrait",
-  icon: "./assets/icon.png",
+  icon: "./assets/zrode-main-default.png",
   userInterfaceStyle: "automatic",
   updates: {
     enabled: true,
@@ -99,18 +105,16 @@ const config: ExpoConfig = {
     },
   },
   android: {
-    icon: "./assets/icon.png",
+    icon: "./assets/zrode-main-default.png",
     package: variant.androidPackage,
     adaptiveIcon: {
-      backgroundColor: "#E6F4FE",
-      foregroundImage: "./assets/android-icon-foreground.png",
-      backgroundImage: "./assets/android-icon-background.png",
-      monochromeImage: "./assets/android-icon-monochrome.png",
+      backgroundColor: "#050505",
+      foregroundImage: "./assets/zrode-main-default.png",
     },
     predictiveBackGestureEnabled: false,
   },
   web: {
-    favicon: "./assets/favicon.png",
+    favicon: "./assets/zrode-main-default.png",
   },
   plugins: [
     "expo-font",
@@ -127,12 +131,12 @@ const config: ExpoConfig = {
     [
       "expo-splash-screen",
       {
-        image: "./assets/splash-icon.png",
+        image: "./assets/zrode-main-clear-light.png",
         resizeMode: "contain",
         backgroundColor: "#ffffff",
         imageWidth: 220,
         dark: {
-          image: "./assets/splash-icon.png",
+          image: "./assets/zrode-main-clear-dark.png",
           backgroundColor: "#0a0a0a",
         },
       },

@@ -1,11 +1,11 @@
 export const BRAND_ASSET_PATHS = {
-  productionMacIconPng: "assets/prod/zrode-main-macos-1024.png",
-  productionLinuxIconPng: "assets/prod/black-universal-1024.png",
-  productionWindowsIconIco: "assets/prod/t3-black-windows.ico",
-  productionWebFaviconIco: "assets/prod/t3-black-web-favicon.ico",
-  productionWebFavicon16Png: "assets/prod/t3-black-web-favicon-16x16.png",
-  productionWebFavicon32Png: "assets/prod/t3-black-web-favicon-32x32.png",
-  productionWebAppleTouchIconPng: "assets/prod/t3-black-web-apple-touch-180.png",
+  productionMacIconPng: "assets/prod/zrode-main-default.png",
+  productionLinuxIconPng: "assets/prod/zrode-main-default.png",
+  productionWindowsIconIco: "assets/prod/zrode-main-windows.ico",
+  productionWebFaviconIco: "assets/prod/zrode-main-web-favicon.ico",
+  productionWebFavicon16Png: "assets/prod/zrode-main-web-favicon-16x16.png",
+  productionWebFavicon32Png: "assets/prod/zrode-main-web-favicon-32x32.png",
+  productionWebAppleTouchIconPng: "assets/prod/zrode-main-web-apple-touch-180.png",
 
   nightlyMacIconPng: "assets/nightly/zrode-nightly-macos-1024.png",
   nightlyLinuxIconPng: "assets/nightly/blueprint-universal-1024.png",
