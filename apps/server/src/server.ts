@@ -58,7 +58,9 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
@@ -258,15 +260,25 @@ const PreviewLayerLive = Layer.empty.pipe(
 
 const WorkspaceEntriesLayerLive = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));
 
+const WorkspaceContentSearchLayerLive = WorkspaceContentSearch.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+);
+
 const WorkspaceFileSystemLayerLive = WorkspaceFileSystem.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(WorkspaceEntriesLayerLive),
 );
 
+const WorkspaceFileEventsLayerLive = WorkspaceFileEvents.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+);
+
 const WorkspaceLayerLive = Layer.mergeAll(
   WorkspacePaths.layer,
   WorkspaceEntriesLayerLive,
+  WorkspaceContentSearchLayerLive,
   WorkspaceFileSystemLayerLive,
+  WorkspaceFileEventsLayerLive,
 );
 
 const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(

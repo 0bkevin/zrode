@@ -74,7 +74,10 @@ const makeMockAgentWrapper = Effect.fn("makeMockAgentWrapper")(function* (
   });
   const wrapperPath = path.join(dir, "fake-agent.sh");
   const mockAgentCommand = ["node", mockAgentPath].map((arg) => JSON.stringify(arg)).join(" ");
-  const envExports = Object.entries(extraEnv ?? {})
+  const envExports = Object.entries({
+    ZRODE_ACP_AUTH_METHOD_ID: "cursor_login",
+    ...extraEnv,
+  })
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
   const script = `#!/bin/sh
@@ -102,6 +105,7 @@ if [ "$1" = "about" ]; then
   printf 'User Email          cursor@example.com\\n'
   exit 0
 fi
+export ZRODE_ACP_AUTH_METHOD_ID=cursor_login
 exec ${mockAgentCommand} "$@"
 `;
   yield* fileSystem.writeFileString(wrapperPath, script);

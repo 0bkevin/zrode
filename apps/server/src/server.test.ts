@@ -23,6 +23,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type PreviewEvent,
   ProjectId,
+  ProjectFileDiskRevision,
   ProviderDriverKind,
   ProviderInstanceId,
   ResolvedKeybindingRule,
@@ -95,7 +96,9 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceFileEvents from "./workspace/WorkspaceFileEvents.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
@@ -496,10 +499,12 @@ const buildAppUnderTest = (options?: {
     const workspaceAndProjectServicesLayer = Layer.mergeAll(
       WorkspacePaths.layer,
       workspaceEntriesLayer,
+      WorkspaceContentSearch.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       WorkspaceFileSystem.layer.pipe(
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(workspaceEntriesLayer),
       ),
+      WorkspaceFileEvents.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       ProjectFaviconResolver.layer.pipe(Layer.provide(WorkspacePaths.layer)),
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
@@ -4425,39 +4430,204 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
-  it.effect("routes websocket rpc projects.listEntries and projects.readFile", () =>
+  it.effect(
+    "routes websocket rpc projects.listEntries, projects.readFile, and projects.inspectFile",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-files-" });
+        yield* fs.makeDirectory(path.join(workspaceDir, "src"), { recursive: true });
+        yield* fs.writeFileString(
+          path.join(workspaceDir, "src", "index.ts"),
+          "export const answer = 42;\n",
+        );
+
+        yield* buildAppUnderTest();
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const response = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.all({
+              listing: client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir }),
+              file: client[WS_METHODS.projectsReadFile]({
+                cwd: workspaceDir,
+                relativePath: "src/index.ts",
+              }),
+              inspection: client[WS_METHODS.projectsInspectFile]({
+                cwd: workspaceDir,
+                relativePath: "src/index.ts",
+              }),
+            }),
+          ),
+        );
+
+        assert.isTrue(response.listing.entries.some((entry) => entry.path === "src/index.ts"));
+        assert.deepEqual(response.file, {
+          relativePath: "src/index.ts",
+          contents: "export const answer = 42;\n",
+          byteLength: 26,
+          truncated: false,
+          diskRevision: ProjectFileDiskRevision.make(
+            `sha256:${NodeCrypto.createHash("sha256")
+              .update("export const answer = 42;\n")
+              .digest("hex")}:26`,
+          ),
+        });
+        assert.deepEqual(response.inspection, {
+          relativePath: "src/index.ts",
+          byteLength: 26,
+          truncated: false,
+          diskRevision: response.file.diskRevision,
+        });
+      }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("routes websocket rpc project creation, deletion, and text search", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-files-" });
-      yield* fs.makeDirectory(path.join(workspaceDir, "src"), { recursive: true });
-      yield* fs.writeFileString(
-        path.join(workspaceDir, "src", "index.ts"),
-        "export const answer = 42;\n",
-      );
-
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-content-search-",
+      });
+      yield* fs.makeDirectory(path.join(workspaceDir, "src"));
+      yield* fs.writeFileString(path.join(workspaceDir, "src", "index.ts"), "😀é needle\n");
       yield* buildAppUnderTest();
 
       const wsUrl = yield* getWsServerUrl("/ws");
       const response = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
-          Effect.all({
-            listing: client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir }),
-            file: client[WS_METHODS.projectsReadFile]({
+          Effect.gen(function* () {
+            const directory = yield* client[WS_METHODS.projectsCreateDirectory]({
               cwd: workspaceDir,
-              relativePath: "src/index.ts",
-            }),
+              relativePath: "src/features",
+            });
+            const directoryCollision = yield* client[WS_METHODS.projectsCreateDirectory]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+            }).pipe(Effect.result);
+            const searchEvents = yield* client[WS_METHODS.projectsSearchText]({
+              cwd: workspaceDir,
+              query: "needle",
+              isRegex: false,
+              matchCase: true,
+              wholeWord: true,
+              includes: ["src/**"],
+              excludes: [],
+              limit: 100,
+            }).pipe(Stream.runCollect);
+            const preparedDelete = yield* client[WS_METHODS.projectsPrepareDeleteEntry]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+              expectedKind: "directory",
+              recursive: true,
+            });
+            const deleted = yield* client[WS_METHODS.projectsDeleteEntry]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+              expectedKind: "directory",
+              recursive: true,
+              entryRevision: preparedDelete.entryRevision,
+              permanentlyDelete: true,
+            });
+            return {
+              directory,
+              directoryCollision,
+              deleted,
+              searchEvents: Array.from(searchEvents),
+            };
           }),
         ),
       );
 
-      assert.isTrue(response.listing.entries.some((entry) => entry.path === "src/index.ts"));
-      assert.deepEqual(response.file, {
-        relativePath: "src/index.ts",
-        contents: "export const answer = 42;\n",
-        byteLength: 26,
+      assert.deepEqual(response.directory, {
+        relativePath: "src/features",
+      });
+      assert.deepEqual(response.deleted, {
+        relativePath: "src/features",
+        deletedKind: "directory",
+      });
+      assert.isFalse(yield* fs.exists(path.join(workspaceDir, "src/features")));
+      if (
+        response.directoryCollision._tag !== "Failure" ||
+        response.directoryCollision.failure._tag !== "ProjectCreateDirectoryError"
+      ) {
+        assert.fail("Expected a ProjectCreateDirectoryError");
+      }
+      assert.equal(response.directoryCollision.failure.failure, "path_already_exists");
+      assert.deepInclude(response.searchEvents[0], {
+        type: "matches",
+        matches: [
+          {
+            relativePath: "src/index.ts",
+            line: 1,
+            column: 5,
+            endColumn: 11,
+            lineTextStartColumn: 1,
+            lineText: "😀é needle",
+            matchText: "needle",
+          },
+        ],
+      });
+      assert.deepEqual(response.searchEvents.at(-1), {
+        type: "complete",
+        matchCount: 1,
+        fileCount: 1,
         truncated: false,
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("streams workspace file invalidations over websocket rpc", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-watch-",
+      });
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const before = yield* client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir });
+            const events = Array.from(
+              yield* client[WS_METHODS.projectsWatchFiles]({ cwd: workspaceDir }).pipe(
+                Stream.tap((event) =>
+                  event.type === "ready"
+                    ? fs.writeFileString(path.join(workspaceDir, "streamed.txt"), "changed\n")
+                    : Effect.void,
+                ),
+                Stream.take(2),
+                Stream.runCollect,
+                Effect.timeout("5 seconds"),
+              ),
+            );
+            const after = yield* client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir });
+            return { before, events, after };
+          }),
+        ),
+      );
+
+      assert.notInclude(
+        response.before.entries.map((entry) => entry.path),
+        "streamed.txt",
+      );
+      assert.deepInclude(response.events[0], {
+        version: 2,
+        sequence: 0,
+        type: "ready",
+        cwd: workspaceDir,
+      });
+      assert.equal(response.events[1]?.type, "changed");
+      if (response.events[1]?.type === "changed") {
+        assert.include(response.events[1].structuralPaths, "streamed.txt");
+      }
+      assert.include(
+        response.after.entries.map((entry) => entry.path),
+        "streamed.txt",
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
@@ -4677,6 +4847,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             cwd: workspaceDir,
             relativePath: "nested/created.txt",
             contents: "written-by-rpc",
+            precondition: { _tag: "must-not-exist" },
           }),
         ),
       );
@@ -4735,6 +4906,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             cwd: workspaceDir,
             relativePath: "../escape.txt",
             contents: "nope",
+            precondition: { _tag: "unconditional" },
           }),
         ).pipe(Effect.result),
       );
@@ -4752,6 +4924,82 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(writeError.failure, "workspace_path_outside_root");
       assert.isDefined(writeError.cause);
       assert.notProperty(writeError, "contents");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns a typed error for oversized websocket file writes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-write-" });
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsWriteFile]({
+            cwd: workspaceDir,
+            relativePath: "nested/large.txt",
+            contents: "a".repeat(1024 * 1024 + 1),
+            precondition: { _tag: "must-not-exist" },
+          }),
+        ).pipe(Effect.result),
+      );
+
+      if (result._tag !== "Failure" || result.failure._tag !== "ProjectWriteFileError") {
+        assert.fail("Expected a ProjectWriteFileError");
+      }
+      assert.equal(result.failure.failure, "contents_too_large");
+      assert.equal(result.failure.byteLength, 1024 * 1024 + 1);
+      assert.equal(result.failure.maxByteLength, 1024 * 1024);
+      assert.isFalse(yield* fs.exists(path.join(workspaceDir, "nested")));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket project write revision conflicts distinctly", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-ws-project-write-conflict-",
+      });
+      const filePath = path.join(workspaceDir, "shared.txt");
+      yield* fs.writeFileString(filePath, "base\n");
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const base = yield* client[WS_METHODS.projectsReadFile]({
+              cwd: workspaceDir,
+              relativePath: "shared.txt",
+            });
+            yield* fs.writeFileString(filePath, "external\n");
+            return yield* client[WS_METHODS.projectsWriteFile]({
+              cwd: workspaceDir,
+              relativePath: "shared.txt",
+              contents: "local\n",
+              precondition: { _tag: "match", diskRevision: base.diskRevision! },
+            });
+          }),
+        ).pipe(Effect.result),
+      );
+
+      if (result._tag !== "Failure" || result.failure._tag !== "ProjectWriteFileConflictError") {
+        assert.fail("Expected a ProjectWriteFileConflictError");
+      }
+      assert.equal(result.failure.relativePath, "shared.txt");
+      assert.equal(result.failure.actualExists, true);
+      assert.equal(
+        result.failure.actualDiskRevision,
+        ProjectFileDiskRevision.make(
+          `sha256:${NodeCrypto.createHash("sha256").update("external\n").digest("hex")}:9`,
+        ),
+      );
+      assert.notProperty(result.failure, "cause");
+      assert.equal(yield* fs.readFileString(filePath), "external\n");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -1,5 +1,10 @@
-import { type EnvironmentId, type ProjectReadFileResult, WS_METHODS } from "@t3tools/contracts";
+import {
+  WS_METHODS,
+  type ProjectSearchTextEvent,
+  type ProjectSearchTextMatch,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Stream from "effect/Stream";
 import { Atom } from "effect/unstable/reactivity";
 
 import {
@@ -7,6 +12,8 @@ import {
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcStreamQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 import {
   type CreateProjectInput,
@@ -18,37 +25,49 @@ import {
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 
+export interface ProjectSearchTextSnapshot {
+  readonly matches: ReadonlyArray<ProjectSearchTextMatch>;
+  readonly matchCount: number;
+  readonly fileCount: number;
+  readonly truncated: boolean;
+  readonly complete: boolean;
+}
+
+export const EMPTY_PROJECT_SEARCH_TEXT_SNAPSHOT: ProjectSearchTextSnapshot = Object.freeze({
+  matches: [],
+  matchCount: 0,
+  fileCount: 0,
+  truncated: false,
+  complete: false,
+});
+
+export function applyProjectSearchTextEvent(
+  current: ProjectSearchTextSnapshot,
+  event: ProjectSearchTextEvent,
+): ProjectSearchTextSnapshot {
+  if (event.type === "matches") {
+    return { ...current, matches: [...current.matches, ...event.matches] };
+  }
+  return {
+    ...current,
+    matchCount: event.matchCount,
+    fileCount: event.fileCount,
+    truncated: event.truncated,
+    complete: true,
+  };
+}
+
 export type {
   CreateProjectInput,
   DeleteProjectInput,
   UpdateProjectInput,
 } from "../operations/commands.ts";
 
-export interface OptimisticProjectFile {
-  readonly data: ProjectReadFileResult;
-  readonly confirmedAgainst: object | null | undefined;
-}
-
-export interface OptimisticProjectFileTarget {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-  readonly relativePath: string;
-}
-
-function optimisticProjectFileKey(target: OptimisticProjectFileTarget): string {
-  return JSON.stringify([target.environmentId, target.cwd, target.relativePath]);
-}
-
 export function createProjectEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
 ) {
   const projectScheduler = createAtomCommandScheduler();
   const fileScheduler = createAtomCommandScheduler();
-  const optimisticFileFamily = Atom.family((key: string) =>
-    Atom.make<OptimisticProjectFile | null>(null).pipe(
-      Atom.withLabel(`environment-data:projects:optimistic-file:${key}`),
-    ),
-  );
   const projectConcurrency = {
     mode: "serial" as const,
     key: ({ environmentId, input }: { environmentId: string; input: { projectId: string } }) =>
@@ -59,6 +78,13 @@ export function createProjectEnvironmentAtoms<R, E>(
       label: "environment-data:projects:search-entries",
       tag: WS_METHODS.projectsSearchEntries,
       staleTimeMs: 15_000,
+    }),
+    searchText: createEnvironmentRpcStreamQueryAtomFamily(runtime, {
+      label: "environment-data:projects:search-text",
+      tag: WS_METHODS.projectsSearchText,
+      idleTtlMs: 0,
+      transform: (stream) =>
+        stream.pipe(Stream.scan(EMPTY_PROJECT_SEARCH_TEXT_SNAPSHOT, applyProjectSearchTextEvent)),
     }),
     listEntries: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:projects:list-entries",
@@ -72,8 +98,47 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
-    optimisticFile: (target: OptimisticProjectFileTarget) =>
-      optimisticFileFamily(optimisticProjectFileKey(target)),
+    inspectFile: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:inspect-file",
+      tag: WS_METHODS.projectsInspectFile,
+      staleTimeMs: 0,
+      idleTtlMs: 5 * 60_000,
+    }),
+    fileEvents: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:projects:file-events",
+      tag: WS_METHODS.projectsWatchFiles,
+      idleTtlMs: 1_000,
+    }),
+    createDirectory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:create-directory",
+      tag: WS_METHODS.projectsCreateDirectory,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
+    deleteEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:delete-entry",
+      tag: WS_METHODS.projectsDeleteEntry,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
+    prepareDeleteEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:prepare-delete-entry",
+      tag: WS_METHODS.projectsPrepareDeleteEntry,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:create",
       execute: (input: CreateProjectInput) => createProject(input),

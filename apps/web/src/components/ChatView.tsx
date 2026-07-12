@@ -123,10 +123,16 @@ import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
+  selectOrderedFileSurfaces,
   selectThreadRightPanelState,
+  type FileRevealTarget,
   type RightPanelSurface,
   useRightPanelStore,
 } from "../rightPanelStore";
+import {
+  capturedFileDocumentsAreSafe,
+  fileDocumentNeedsCloseProtection,
+} from "./files/workspaceFileCloseSafety";
 import {
   isPreviewSupportedInRuntime,
   setActivePreviewTab,
@@ -289,6 +295,15 @@ import {
   resolveServerConfigVersionMismatch,
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
+import {
+  fileDocumentStore,
+  prepareFileDocumentForClose,
+  type FileDocumentCloseDecision,
+  type FileDocumentClosePrompt,
+  useFileDocumentBeforeUnloadProtection,
+  useFileDocumentStoreVersion,
+} from "./files/fileDocumentRuntime";
+import { FileDocumentCloseDialog } from "./files/FileDocumentCloseDialog";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
@@ -1448,33 +1463,6 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread ? environmentShell.stateAtom(activeThread.environmentId) : null,
   );
   const activeEnvironmentBootstrapComplete = activeEnvironmentShell.data?.snapshot._tag === "Some";
-  const activeProjectKey = activeProject
-    ? `${activeProject.environmentId}:${activeProject.workspaceRoot}`
-    : null;
-  const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
-    ReadonlyMap<string, ReadonlySet<string>>
-  >(() => new Map());
-  const pendingFileSurfaceIds = activeProjectKey
-    ? (pendingFileSurfaceIdsByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS)
-    : EMPTY_PENDING_FILE_SURFACE_IDS;
-  const handleFilePendingChange = useCallback(
-    (relativePath: string, pending: boolean) => {
-      if (!activeProjectKey) return;
-      setPendingFileSurfaceIdsByProject((currentByProject) => {
-        const current = currentByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS;
-        const surfaceId = `file:${relativePath}`;
-        if (current.has(surfaceId) === pending) return currentByProject;
-        const next = new Set(current);
-        if (pending) next.add(surfaceId);
-        else next.delete(surfaceId);
-        const nextByProject = new Map(currentByProject);
-        if (next.size === 0) nextByProject.delete(activeProjectKey);
-        else nextByProject.set(activeProjectKey, next);
-        return nextByProject;
-      });
-    },
-    [activeProjectKey],
-  );
   const configuredPreviewUrls = useMemo(
     () => getConfiguredPreviewUrls(activeProject?.scripts),
     [activeProject?.scripts],
@@ -2437,6 +2425,48 @@ function ChatViewContent(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  const fileDocumentStoreVersion = useFileDocumentStoreVersion();
+  useFileDocumentBeforeUnloadProtection();
+  const pendingFileSurfaceIds = useMemo(() => {
+    if (!activeProject || !activeWorkspaceRoot) return EMPTY_PENDING_FILE_SURFACE_IDS;
+    const pending = new Set<string>();
+    for (const snapshot of fileDocumentStore.getUnsafeSnapshots()) {
+      if (
+        snapshot.key.environmentId === activeProject.environmentId &&
+        snapshot.key.cwd === activeWorkspaceRoot
+      ) {
+        pending.add(`file:${snapshot.key.relativePath}`);
+      }
+    }
+    return pending;
+  }, [activeProject, activeWorkspaceRoot, fileDocumentStoreVersion]);
+  const [fileDocumentClosePrompt, setFileDocumentClosePrompt] =
+    useState<FileDocumentClosePrompt | null>(null);
+  const fileDocumentCloseResolverRef = useRef<
+    ((decision: FileDocumentCloseDecision) => void) | null
+  >(null);
+  const requestFileDocumentCloseDecision = useCallback(
+    (prompt: FileDocumentClosePrompt) =>
+      new Promise<FileDocumentCloseDecision>((resolve) => {
+        fileDocumentCloseResolverRef.current?.("cancel");
+        fileDocumentCloseResolverRef.current = resolve;
+        setFileDocumentClosePrompt(prompt);
+      }),
+    [],
+  );
+  const resolveFileDocumentCloseDecision = useCallback((decision: FileDocumentCloseDecision) => {
+    const resolve = fileDocumentCloseResolverRef.current;
+    fileDocumentCloseResolverRef.current = null;
+    setFileDocumentClosePrompt(null);
+    resolve?.(decision);
+  }, []);
+  useEffect(
+    () => () => {
+      fileDocumentCloseResolverRef.current?.("cancel");
+      fileDocumentCloseResolverRef.current = null;
+    },
+    [],
+  );
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -3234,9 +3264,9 @@ function ChatViewContent(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
   const openFileSurface = useCallback(
-    (relativePath: string) => {
+    (relativePath: string, target?: FileRevealTarget) => {
       if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
+      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, target);
     },
     [activeProject, activeThreadRef],
   );
@@ -3444,14 +3474,74 @@ function ChatViewContent(props: ChatViewProps) {
       setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
     }
   }, [activeThreadRef]);
+  const prepareFileSurfacesForRemoval = useCallback(
+    async (surfaces: readonly RightPanelSurface[]): Promise<boolean> => {
+      if (!activeThreadRef || !activeProject || !activeWorkspaceRoot) return true;
+      for (const surface of surfaces) {
+        if (surface.kind !== "file") continue;
+        const key = {
+          environmentId: activeProject.environmentId,
+          cwd: activeWorkspaceRoot,
+          relativePath: surface.relativePath,
+        };
+        const snapshot = fileDocumentStore.getSnapshot(key);
+        if (!fileDocumentNeedsCloseProtection(snapshot)) {
+          continue;
+        }
+        useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
+        if (!(await prepareFileDocumentForClose(key, requestFileDocumentCloseDecision))) {
+          toastManager.add({
+            type: "warning",
+            title: "File kept open",
+            description: `Resolve or save the changes to ${surface.relativePath} before closing.`,
+          });
+          return false;
+        }
+      }
+      return true;
+    },
+    [activeProject, activeThreadRef, activeWorkspaceRoot, requestFileDocumentCloseDecision],
+  );
+  const capturedFileSurfacesAreSafe = useCallback(
+    (surfaces: readonly RightPanelSurface[]): boolean =>
+      !activeProject ||
+      !activeWorkspaceRoot ||
+      capturedFileDocumentsAreSafe(selectOrderedFileSurfaces(surfaces), (relativePath) =>
+        fileDocumentStore.getSnapshot({
+          environmentId: activeProject.environmentId,
+          cwd: activeWorkspaceRoot,
+          relativePath,
+        }),
+      ),
+    [activeProject, activeWorkspaceRoot],
+  );
+  const warnCapturedFileChanged = useCallback(() => {
+    toastManager.add({
+      type: "warning",
+      title: "Tabs kept open",
+      description: "A file changed while the close action was being confirmed. Try again.",
+    });
+  }, []);
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
-      cleanupRightPanelSurfaces([surface]);
-      useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval([surface]))) return;
+        cleanupRightPanelSurfaces([surface]);
+        if (surface.kind === "file") {
+          useRightPanelStore.getState().closeFileSurfaces(activeThreadRef, [surface.id]);
+        } else {
+          useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        }
+        syncActivePreviewSurface();
+      })();
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
+      syncActivePreviewSurface,
+    ],
   );
   const openChatInNewWindow = useCallback(() => {
     if (!activeThreadRef) return;
@@ -3501,45 +3591,69 @@ function ChatViewContent(props: ChatViewProps) {
                 }
               : null;
       if (!target) return;
-      void openPaneWindow(target)
-        .catch(() => false)
-        .then((opened) => {
-          if (!opened) {
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Unable to open window",
-                description: "The pane window could not be opened.",
-              }),
-            );
-            return;
-          }
-          // A moved preview tab counts as claimed until the new window's
-          // claim arrives, so this window neither re-adopts nor closes it.
-          if (target.kind === "preview") {
-            markPreviewTabDetaching(target.tabId);
-          }
-          // Close the tab here without terminating anything server-side — the
-          // new window reattaches to the same terminal sessions / workspace.
-          useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-          syncActivePreviewSurface();
-        });
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval([surface]))) return;
+        const opened = await openPaneWindow(target).catch(() => false);
+        if (!opened) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to open window",
+              description: "The pane window could not be opened.",
+            }),
+          );
+          return;
+        }
+        // Opening a separate window is asynchronous. The source document may
+        // become dirty/conflicted while that window is created; never close the
+        // authoritative source editor based on the earlier safety decision.
+        if (!capturedFileSurfacesAreSafe([surface])) {
+          warnCapturedFileChanged();
+          return;
+        }
+        // A moved preview tab counts as claimed until the new window's
+        // claim arrives, so this window neither re-adopts nor closes it.
+        if (target.kind === "preview") {
+          markPreviewTabDetaching(target.tabId);
+        }
+        // Close the tab here without terminating anything server-side — the
+        // new window reattaches to the same terminal sessions / workspace.
+        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      })();
     },
-    [activeThreadRef, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      capturedFileSurfacesAreSafe,
+      prepareFileSurfacesForRemoval,
+      syncActivePreviewSurface,
+      warnCapturedFileChanged,
+    ],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      const capturedSurfaceIds = surfaces.map((entry) => entry.id);
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        if (!capturedFileSurfacesAreSafe(surfaces)) {
+          warnCapturedFileChanged();
+          return;
+        }
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
+        syncActivePreviewSurface();
+      })();
     },
     [
       activeThreadRef,
+      capturedFileSurfacesAreSafe,
       cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
+      warnCapturedFileChanged,
     ],
   );
   const closeRightPanelSurfacesToRight = useCallback(
@@ -3548,22 +3662,76 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      const capturedSurfaceIds = surfaces.map((entry) => entry.id);
+      void (async () => {
+        if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        if (!capturedFileSurfacesAreSafe(surfaces)) {
+          warnCapturedFileChanged();
+          return;
+        }
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
+        syncActivePreviewSurface();
+      })();
     },
     [
       activeThreadRef,
+      capturedFileSurfacesAreSafe,
       cleanupRightPanelSurfaces,
+      prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
+      warnCapturedFileChanged,
     ],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
-    cleanupRightPanelSurfaces(rightPanelState.surfaces);
-    useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
-  }, [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces]);
+    const surfaces = rightPanelState.surfaces;
+    const capturedSurfaceIds = surfaces.map((surface) => surface.id);
+    void (async () => {
+      if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+      if (!capturedFileSurfacesAreSafe(surfaces)) {
+        warnCapturedFileChanged();
+        return;
+      }
+      cleanupRightPanelSurfaces(surfaces);
+      useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
+    })();
+  }, [
+    activeThreadRef,
+    capturedFileSurfacesAreSafe,
+    cleanupRightPanelSurfaces,
+    prepareFileSurfacesForRemoval,
+    rightPanelState.surfaces,
+    warnCapturedFileChanged,
+  ]);
+  const closeAllFileSurfaces = useCallback(() => {
+    if (!activeThreadRef) return;
+    const fileSurfaces = selectOrderedFileSurfaces(rightPanelState.surfaces);
+    if (fileSurfaces.length === 0) return;
+    const capturedSurfaceIds = fileSurfaces.map((surface) => surface.id);
+    void (async () => {
+      // Prepare the complete set before one atomic store mutation. Canceling
+      // any prompt therefore leaves every editor surface open.
+      if (!(await prepareFileSurfacesForRemoval(fileSurfaces))) return;
+      if (!capturedFileSurfacesAreSafe(fileSurfaces)) {
+        toastManager.add({
+          type: "warning",
+          title: "Editors kept open",
+          description: "A file changed while Close All was being confirmed. Try again.",
+        });
+        return;
+      }
+      // No awaits are allowed between the synchronous safety recheck and this
+      // captured-ID mutation. Files opened while prompts were visible survive.
+      useRightPanelStore.getState().closeFileSurfaces(activeThreadRef, capturedSurfaceIds);
+    })();
+  }, [
+    activeThreadRef,
+    capturedFileSurfacesAreSafe,
+    prepareFileSurfacesForRemoval,
+    rightPanelState.surfaces,
+  ]);
   const copyRightPanelFilePath = useCallback((relativePath: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -4457,6 +4625,15 @@ function ChatViewContent(props: ChatViewProps) {
         event.preventDefault();
         event.stopPropagation();
         toggleRightPanel();
+        return;
+      }
+
+      if (command === "workspaceSearch.focus") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (activeThreadRef && activeProject) {
+          useRightPanelStore.getState().showWorkspaceSearch(activeThreadRef);
+        }
         return;
       }
 
@@ -6341,6 +6518,7 @@ function ChatViewContent(props: ChatViewProps) {
           environmentId={activeProject.environmentId}
           cwd={activeWorkspaceRoot}
           projectName={activeProject.title}
+          layoutMode="docked"
           threadRef={activeThreadRef}
           composerDraftTarget={composerDraftTarget}
           keybindings={keybindings}
@@ -6348,10 +6526,12 @@ function ChatViewContent(props: ChatViewProps) {
           relativePath={
             activeRightPanelSurface.kind === "file" ? activeRightPanelSurface.relativePath : null
           }
-          revealLine={activeFileSurface?.revealLine ?? null}
+          revealTarget={activeFileSurface?.revealTarget ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
+          pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}
-          onPendingChange={handleFilePendingChange}
+          onCloseFile={closeRightPanelSurface}
+          onCloseAllFiles={closeAllFileSurfaces}
         />
       </Suspense>
     ) : null
@@ -6729,6 +6909,11 @@ function ChatViewContent(props: ChatViewProps) {
           </RightPanelTabs>
         </RightPanelSheet>
       ) : null}
+
+      <FileDocumentCloseDialog
+        prompt={fileDocumentClosePrompt}
+        onDecision={resolveFileDocumentCloseDecision}
+      />
 
       {expandedImage && (
         <ExpandedImageDialog

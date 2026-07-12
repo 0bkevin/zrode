@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -201,6 +202,78 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
         expect(error.message).toContain(
           "Workspace file path must be relative to the project root: ../escape.md",
         );
+      }),
+    );
+
+    it.effect("rejects Windows drive-absolute paths on every host platform", () =>
+      Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const cwd = yield* makeTempDir();
+
+        const error = yield* workspacePaths
+          .resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: "C:\\absolute\\file.md",
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+      }),
+    );
+
+    it.effect("normalizes backslash separators before resolving on POSIX", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcessPlatform) === "win32") return;
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const cwd = yield* makeTempDir();
+        const path = yield* Path.Path;
+
+        const resolved = yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: cwd,
+          relativePath: "plans\\effect-rpc.md",
+        });
+        const traversalError = yield* workspacePaths
+          .resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: "..\\escape.md",
+          })
+          .pipe(Effect.flip);
+
+        expect(resolved).toEqual({
+          absolutePath: path.join(cwd, "plans/effect-rpc.md"),
+          relativePath: "plans/effect-rpc.md",
+        });
+        expect(traversalError).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+      }),
+    );
+
+    it.effect("accepts the exact portable path limits and rejects longer paths", () =>
+      Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const cwd = yield* makeTempDir();
+        const exactAscii = `a/${"b".repeat(510)}`;
+        const exactUtf8 = "😀".repeat(256);
+
+        expect(
+          (yield* workspacePaths.resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: exactAscii,
+          })).relativePath,
+        ).toBe(exactAscii);
+        expect(
+          (yield* workspacePaths.resolveRelativePathWithinRoot({
+            workspaceRoot: cwd,
+            relativePath: exactUtf8,
+          })).relativePath,
+        ).toBe(exactUtf8);
+        expect(
+          yield* workspacePaths
+            .resolveRelativePathWithinRoot({
+              workspaceRoot: cwd,
+              relativePath: `${exactAscii}c`,
+            })
+            .pipe(Effect.flip),
+        ).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
       }),
     );
   });

@@ -40,7 +40,9 @@ function makeAcpAgentWrapper(dir: string, env: Record<string, string>): string {
     agentPath,
     [
       "#!/bin/sh",
-      ...Object.entries(env).map(([key, value]) => `export ${key}=${shellSingleQuote(value)}`),
+      ...Object.entries({ ZRODE_ACP_AUTH_METHOD_ID: "cursor_login", ...env }).map(
+        ([key, value]) => `export ${key}=${shellSingleQuote(value)}`,
+      ),
       'if [ "$1" != "acp" ]; then',
       '  printf "%s\\n" "unexpected args: $*" >&2',
       "  exit 11",

@@ -39,6 +39,10 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 
+export const FileExplorerPosition = Schema.Literals(["left", "right"]);
+export type FileExplorerPosition = typeof FileExplorerPosition.Type;
+export const DEFAULT_FILE_EXPLORER_POSITION: FileExplorerPosition = "right";
+
 export const AppearanceColorPreset = Schema.Literals([
   "default",
   "graphite",
@@ -103,6 +107,9 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  fileExplorerPosition: FileExplorerPosition.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FILE_EXPLORER_POSITION)),
+  ),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -678,6 +685,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  fileExplorerPosition: Schema.optionalKey(FileExplorerPosition),
   favorites: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({

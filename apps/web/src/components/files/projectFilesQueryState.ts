@@ -1,22 +1,11 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentId,
-  ProjectListEntriesResult,
-  ProjectReadFileResult,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ProjectFileEvent, ProjectListEntriesResult } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
-import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
-import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
-
-const EMPTY_PROJECT_FILE_PATH = "";
-function optimisticFileAtom(environmentId: EnvironmentId, cwd: string, relativePath: string) {
-  return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath });
-}
 
 interface ProjectQueryState<A> {
   readonly data: A | null;
@@ -32,107 +21,23 @@ export function getProjectEntriesQueryAtom(environmentId: EnvironmentId, cwd: st
 export function getProjectFileQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
-  relativePath: string | null,
+  relativePath: string,
 ) {
   return projectEnvironment.readFile({
     environmentId,
-    input: { cwd, relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH },
+    input: { cwd, relativePath },
   });
 }
 
-// Runs on every editor keystroke, so avoid TextEncoder's full-buffer allocation.
-function utf8ByteLength(value: string): number {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 0x80) {
-      bytes += 1;
-    } else if (code < 0x800) {
-      bytes += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4;
-        index += 1;
-      } else {
-        bytes += 3;
-      }
-    } else {
-      bytes += 3;
-    }
-  }
-  return bytes;
-}
-
-export function setProjectFileQueryData(
+export function getProjectFileInspectQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
-  contents: string,
-): void {
-  appAtomRegistry.set(optimisticFileAtom(environmentId, cwd, relativePath), {
-    confirmedAgainst: undefined,
-    data: {
-      relativePath,
-      contents,
-      byteLength: utf8ByteLength(contents),
-      truncated: false,
-    },
+) {
+  return projectEnvironment.inspectFile({
+    environmentId,
+    input: { cwd, relativePath },
   });
-}
-
-export function getOptimisticProjectFileQueryData(
-  environmentId: EnvironmentId,
-  cwd: string,
-  relativePath: string,
-): ProjectReadFileResult | null {
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
-}
-
-export function confirmProjectFileQueryData(
-  environmentId: EnvironmentId,
-  cwd: string,
-  relativePath: string,
-  contents: string,
-): boolean {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
-  const optimisticFile = appAtomRegistry.get(atom);
-  if (optimisticFile?.data.contents !== contents) return false;
-
-  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
-  const confirmed = {
-    ...optimisticFile,
-    confirmedAgainst: appAtomRegistry.get(queryAtom),
-  };
-  appAtomRegistry.set(atom, confirmed);
-  appAtomRegistry.refresh(queryAtom);
-  void executeAtomQuery(appAtomRegistry, queryAtom, {
-    reportDefect: false,
-    reportFailure: false,
-  }).then((result) => {
-    if (result._tag === "Success" && appAtomRegistry.get(atom) === confirmed) {
-      appAtomRegistry.set(atom, null);
-    }
-  });
-  return true;
-}
-
-export function resolveProjectFileQueryData(
-  environmentId: EnvironmentId,
-  cwd: string,
-  relativePath: string | null,
-  data: ProjectReadFileResult | null,
-): ProjectReadFileResult | null {
-  if (relativePath === null) return data;
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? data;
-}
-
-export function clearProjectFileQueryData(
-  environmentId: EnvironmentId,
-  cwd: string,
-  relativePath: string,
-): void {
-  appAtomRegistry.set(optimisticFileAtom(environmentId, cwd, relativePath), null);
 }
 
 function errorMessage<A>(result: AsyncResult.AsyncResult<A, unknown>): string | null {
@@ -141,39 +46,68 @@ function errorMessage<A>(result: AsyncResult.AsyncResult<A, unknown>): string | 
   return cause instanceof Error ? cause.message : "Workspace query failed.";
 }
 
+export function shouldRefreshProjectEntries(event: ProjectFileEvent): boolean {
+  return event.type !== "changed" || event.structuralPaths.length > 0;
+}
+
+export interface ProjectEntriesRefreshDecision {
+  readonly sequence: number | null;
+  readonly shouldRefresh: boolean;
+}
+
+export function projectEntriesRefreshDecision(
+  previousSequence: number | null,
+  event: ProjectFileEvent,
+): ProjectEntriesRefreshDecision {
+  if (!("sequence" in event)) {
+    return { sequence: null, shouldRefresh: true };
+  }
+  const sequenceWasSkippedOrReset =
+    previousSequence === null ||
+    event.sequence > previousSequence + 1 ||
+    event.sequence < previousSequence;
+  return {
+    sequence: event.sequence,
+    shouldRefresh: sequenceWasSkippedOrReset || shouldRefreshProjectEntries(event),
+  };
+}
+
 export function useProjectEntriesQuery(
   environmentId: EnvironmentId,
   cwd: string,
 ): ProjectQueryState<ProjectListEntriesResult> {
   const atom = getProjectEntriesQueryAtom(environmentId, cwd);
   const result = useAtomValue(atom);
+  const fileEventResult = useAtomValue(
+    projectEnvironment.fileEvents({ environmentId, input: { cwd } }),
+  );
   const refreshAtom = useAtomRefresh(atom);
   const refresh = useCallback(() => refreshAtom(), [refreshAtom]);
+  const latestFileEvent = Option.getOrNull(AsyncResult.value(fileEventResult));
+  const eventSequenceRef = useRef<{
+    readonly queryKey: string;
+    sequence: number | null;
+  } | null>(null);
+  const queryKey = `${environmentId}\0${cwd}`;
+
+  useEffect(() => {
+    const sequenceState = eventSequenceRef.current;
+    const previousSequence = sequenceState?.queryKey === queryKey ? sequenceState.sequence : null;
+    if (latestFileEvent === null || latestFileEvent.cwd !== cwd) {
+      if (sequenceState?.queryKey !== queryKey) {
+        eventSequenceRef.current = { queryKey, sequence: null };
+      }
+      return;
+    }
+    const decision = projectEntriesRefreshDecision(previousSequence, latestFileEvent);
+    eventSequenceRef.current = { queryKey, sequence: decision.sequence };
+    if (decision.shouldRefresh) {
+      refreshAtom();
+    }
+  }, [cwd, latestFileEvent, queryKey, refreshAtom]);
+
   return {
     data: Option.getOrNull(AsyncResult.value(result)),
-    error: errorMessage(result),
-    isPending: result.waiting,
-    refresh,
-  };
-}
-
-export function useProjectFileQuery(
-  environmentId: EnvironmentId,
-  cwd: string,
-  relativePath: string | null,
-): ProjectQueryState<ProjectReadFileResult> {
-  const atom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
-  const result = useAtomValue(atom);
-  const refreshAtom = useAtomRefresh(atom);
-  const refresh = useCallback(() => refreshAtom(), [refreshAtom]);
-  const data = Option.getOrNull(AsyncResult.value(result));
-  const optimisticResult = useAtomValue(
-    optimisticFileAtom(environmentId, cwd, relativePath ?? EMPTY_PROJECT_FILE_PATH),
-  );
-  const optimisticFile = relativePath === null ? null : optimisticResult;
-
-  return {
-    data: optimisticFile?.data ?? data,
     error: errorMessage(result),
     isPending: result.waiting,
     refresh,

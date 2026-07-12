@@ -37,7 +37,9 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
     grokPath,
     [
       "#!/bin/sh",
-      ...Object.entries(env).map(([key, value]) => `export ${key}=${shellSingleQuote(value)}`),
+      ...Object.entries({ ZRODE_ACP_AUTH_METHOD_ID: "cached_token", ...env }).map(
+        ([key, value]) => `export ${key}=${shellSingleQuote(value)}`,
+      ),
       'if [ "$1" != "agent" ] || [ "$2" != "stdio" ]; then',
       '  printf "%s\\n" "unexpected args: $*" >&2',
       "  exit 11",
@@ -64,7 +66,7 @@ function withFakeAcpGrok<A, E, R>(
     );
     const binaryPath = makeAcpGrokWrapper(tempDir, env);
     const config = decodeGrokSettings({ binaryPath });
-    const textGeneration = yield* makeGrokTextGeneration(config);
+    const textGeneration = yield* makeGrokTextGeneration(config, {});
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }

@@ -64,6 +64,7 @@ const STATIC_KEYBINDING_COMMANDS = [
   "preview.resetZoom",
   "commandPalette.toggle",
   "fileSearch.toggle",
+  "workspaceSearch.focus",
   "chat.new",
   "chat.newLocal",
   "editor.openFavorite",

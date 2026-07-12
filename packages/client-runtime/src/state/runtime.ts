@@ -11,6 +11,7 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 import { EnvironmentNotRegisteredError, EnvironmentRegistry } from "../connection/registry.ts";
 import {
   type EnvironmentRpcInput,
+  type EnvironmentRpcUnavailableError,
   type EnvironmentRpcStreamFailure,
   type EnvironmentRpcStreamValue,
   type EnvironmentStreamCommandRpcTag,
@@ -604,6 +605,51 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
         : options.transform(stream);
     },
   });
+}
+
+/**
+ * Mount a finite streaming RPC as query-like reactive state. Each mount owns
+ * one request; releasing the atom interrupts the RPC and server-side work.
+ */
+export function createEnvironmentRpcStreamQueryAtomFamily<
+  R,
+  ER,
+  TTag extends EnvironmentStreamCommandRpcTag,
+  B,
+>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
+  options: {
+    readonly label: string;
+    readonly tag: TTag;
+    readonly idleTtlMs?: number;
+    readonly transform: (
+      stream: Stream.Stream<
+        EnvironmentRpcStreamValue<TTag>,
+        EnvironmentRpcStreamFailure<TTag> | EnvironmentRpcUnavailableError,
+        EnvironmentSupervisor
+      >,
+    ) => Stream.Stream<
+      B,
+      EnvironmentRpcStreamFailure<TTag> | EnvironmentRpcUnavailableError,
+      EnvironmentSupervisor
+    >;
+  },
+) {
+  const family = Atom.family((key: string) => {
+    const target = parseEnvironmentRpcKey<EnvironmentRpcInput<TTag>>(key);
+    const remote = runStream(options.tag, target.input);
+    const transformed = options.transform(remote);
+    const stream = runStreamInEnvironment(target.environmentId, transformed);
+    return runtime
+      .atom(stream)
+      .pipe(Atom.setIdleTTL(options.idleTtlMs ?? 0), Atom.withLabel(`${options.label}:${key}`));
+  });
+  return (target: {
+    readonly environmentId: EnvironmentIdType;
+    readonly input: EnvironmentRpcInput<TTag>;
+    /** Forces a fresh finite stream for an otherwise identical RPC input. */
+    readonly requestKey?: string | number;
+  }) => family(JSON.stringify([target.environmentId, target.input, target.requestKey ?? null]));
 }
 
 export function createEnvironmentRpcCommand<R, ER, TTag extends EnvironmentUnaryRpcTag>(

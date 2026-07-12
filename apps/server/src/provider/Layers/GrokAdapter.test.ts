@@ -36,7 +36,10 @@ const mockAgentCommand = process.execPath;
 async function makeMockGrokWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-mock-"));
   const wrapperPath = NodePath.join(dir, "fake-grok.sh");
-  const envExports = Object.entries(extraEnv ?? {})
+  const envExports = Object.entries({
+    ZRODE_ACP_AUTH_METHOD_ID: "cached_token",
+    ...extraEnv,
+  })
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
   const script = `#!/bin/sh
@@ -87,7 +90,10 @@ const grokAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeGrokAdapter>[1]) =>
-  makeGrokAdapter(decodeGrokSettings({ binaryPath }), options).pipe(Effect.orDie);
+  makeGrokAdapter(decodeGrokSettings({ binaryPath }), {
+    ...options,
+    environment: options?.environment ?? {},
+  }).pipe(Effect.orDie);
 
 it("requires a settlement to match the live Grok turn", () => {
   const staleTurnId = TurnId.make("stale-turn");

@@ -1,5 +1,5 @@
 diff --git a/dist/editor/editor.js b/dist/editor/editor.js
-index e8013fc6eb6f243a6c912facf3fc0319ac66a8d0..80c82df4cdeb828bd331f5ec2f443d216bedc304 100644
+index e8013fc6eb6f243a6c912facf3fc0319ac66a8d0..bb9bc1789 100644
 --- a/dist/editor/editor.js
 +++ b/dist/editor/editor.js
 @@ -77,15 +77,12 @@ var Editor = class {
@@ -28,6 +28,9 @@ index e8013fc6eb6f243a6c912facf3fc0319ac66a8d0..80c82df4cdeb828bd331f5ec2f443d21
  				const textDocument = this.#textDocument;
  				const lineIndex = resolveEditableLine(resolveGutterTarget(e.composedPath()[0]));
  				if (lineIndex === void 0 || textDocument === void 0) return;
+@@ -750 +747 @@ var Editor = class {
+-		if (didLineCountChange) fileInstance.applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer);
++		if (!isDiff || didLineCountChange) fileInstance.applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer, didLineCountChange);
 diff --git a/dist/react/utils/useFileInstance.js b/dist/react/utils/useFileInstance.js
 index cb8e2026fb5d7a19f489c0a2402efbcb7dff3322..510fad6364d4a2214c7dd65fe2b114f1cce0c815 100644
 --- a/dist/react/utils/useFileInstance.js
@@ -67,3 +70,178 @@ index d1558633de87044b7aa96cff09443db11f163cec..c0b16f0a0bec6fba2026f24f38b2c0a8
      }
    },
    "publishConfig": {
+diff --git a/dist/editor/textMeasure.js b/dist/editor/textMeasure.js
+index 19b89e13e..de38a4dbe 100644
+--- a/dist/editor/textMeasure.js
++++ b/dist/editor/textMeasure.js
+@@ -39,2 +39,4 @@ var Metrics = class {
+-		const textWithExpandedTabs = text.replaceAll("	", " ".repeat(this.tabSize));
+-		if (needsDomTextMeasurement(textWithExpandedTabs)) return this.domMeasureTextWidth(textWithExpandedTabs);
++		const containsTabs = text.includes("	");
++		const isAscii = getExpandedAsciiTextColumns(text, this.tabSize) !== -1;
++		const textWithExpandedTabs = containsTabs && isAscii ? expandTabsToTabStops(text, this.tabSize) : text;
++		if (containsTabs && !isAscii || needsDomTextMeasurement(textWithExpandedTabs)) return this.domMeasureTextWidth(textWithExpandedTabs);
+@@ -107 +109,2 @@ function getExpandedAsciiTextColumns(text, tabSize) {
+-		columns += text.charCodeAt(i) === 9 ? tabSize : 1;
++		if (text.charCodeAt(i) !== 9) columns += 1;
++		else if (tabSize > 0) columns += tabSize - columns % tabSize;
+@@ -111,0 +115,17 @@ function getExpandedAsciiTextColumns(text, tabSize) {
++/** Expand ASCII tabs to the spaces required to reach the next tab stop. */
++function expandTabsToTabStops(text, tabSize) {
++	if (tabSize <= 0) return text.replaceAll("	", "");
++	let columns = 0;
++	let expandedText = "";
++	for (let i = 0; i < text.length; i++) {
++		if (text.charCodeAt(i) !== 9) {
++			expandedText += text[i];
++			columns += 1;
++			continue;
++		}
++		const spaces = tabSize - columns % tabSize;
++		expandedText += " ".repeat(spaces);
++		columns += spaces;
++	}
++	return expandedText;
++}
+diff --git a/dist/components/VirtualizedFile.js b/dist/components/VirtualizedFile.js
+--- a/dist/components/VirtualizedFile.js
++++ b/dist/components/VirtualizedFile.js
+@@ -284 +284 @@
+-	applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer = false) {
++	applyDocumentChange(textDocument, newLineAnnotations, shouldUpdateBuffer = false, shouldInvalidateLayout = true) {
+@@ -288,0 +289,7 @@
++		if (!shouldInvalidateLayout) {
++			if (this.reconcileHeights()) {
++				this.getSimpleVirtualizer()?.markDOMDirty();
++				this.virtualizer.instanceChanged(this, false);
++			}
++			return;
++		}
+diff --git a/dist/renderers/FileRenderer.js b/dist/renderers/FileRenderer.js
+index 5c34e1837..5033a6ec4 100644
+--- a/dist/renderers/FileRenderer.js
++++ b/dist/renderers/FileRenderer.js
+@@ -75,0 +76 @@
++		this.computedLang = file.lang ?? getFiletypeFromFileName(file.name);
+@@ -178 +179,8 @@ var FileRenderer = class {
+-		if (result != null && result.code.length !== textDocument.lineCount) {
++		this.textDoucmentCache.set(file, textDocument);
++		if (file.cacheKey != null) this.lineCache = {
++			cacheKey: file.cacheKey,
++			lines: linesFromFileContents(textDocument.getText())
++		};
++		if (result == null) return;
++		if (result.code.length !== textDocument.lineCount) {
++			result.code.length = Math.min(result.code.length, textDocument.lineCount);
+@@ -199 +206,0 @@ var FileRenderer = class {
+-		this.textDoucmentCache.set(file, textDocument);
+@@ -201,0 +208,7 @@ var FileRenderer = class {
++	resolveLiveSource(file) {
++		const textDocument = this.textDoucmentCache.get(file);
++		return textDocument == null ? file : {
++			...file,
++			contents: textDocument.getText()
++		};
++	}
+@@ -221,3 +235,4 @@ var FileRenderer = class {
+-		const lines = this.getOrCreateLineCache(file);
+-		const hasContent = file.contents.length > 0;
+-		const forcePlainText = !hasContent || isFilePlainText(file) || isFileMassive(lines.length, this.getTokenizeMaxLength());
++		const source = this.resolveLiveSource(file);
++		const lines = source === file ? this.getOrCreateLineCache(file) : linesFromFileContents(source.contents);
++		const hasContent = source.contents.length > 0;
++		const forcePlainText = !hasContent || isFilePlainText(source) || isFileMassive(lines.length, this.getTokenizeMaxLength());
+@@ -231 +246 @@ var FileRenderer = class {
+-				if (this.renderCache.result == null || newContent || newRenderRange || forceHighlight) this.renderCache.result = this.workerManager.getPlainFileAST(file, renderRange.startingLine, renderRange.totalLines, lines);
++				if (this.renderCache.result == null || newContent || newRenderRange || forceHighlight) this.renderCache.result = this.workerManager.getPlainFileAST(source, renderRange.startingLine, renderRange.totalLines, lines);
+@@ -241 +256 @@ var FileRenderer = class {
+-				const { result, options: options$1 } = this.renderFileWithHighlighter(file, this.highlighter, forcePlainText || !hasLangs);
++				const { result, options: options$1 } = this.renderFileWithHighlighter(source, this.highlighter, forcePlainText || !hasLangs);
+@@ -250,3 +265,2 @@ var FileRenderer = class {
+-			if (!hasThemes || !forcePlainText && !hasLangs) this.asyncHighlight(file).then(({ result, options: options$1 }) => {
+-				if (this.renderCache != null) this.renderCache.highlighted = false;
+-				this.onHighlightSuccess(file, result, options$1, !forcePlainText);
++			if (!hasThemes || !forcePlainText && !hasLangs) this.asyncHighlight(file).then(({ result, options: options$1, source }) => {
++				this.onHighlightSuccess(file, result, options$1, !forcePlainText, source);
+@@ -262 +276 @@ var FileRenderer = class {
+-		const forcePlainText = isFileMassive(this.getOrCreateLineCache(file).length, this.getTokenizeMaxLength());
++		let forcePlainText = isFileMassive(this.getOrCreateLineCache(file).length, this.getTokenizeMaxLength());
+@@ -267 +281,6 @@ var FileRenderer = class {
+-		return this.renderFileWithHighlighter(file, this.highlighter, forcePlainText);
++		const source = this.resolveLiveSource(file);
++		forcePlainText = isFileMassive(linesFromFileContents(source.contents).length, this.getTokenizeMaxLength());
++		return {
++			...this.renderFileWithHighlighter(source, this.highlighter, forcePlainText),
++			source
++		};
+@@ -376,3 +395,10 @@ var FileRenderer = class {
+-	onHighlightSuccess(file, result, options, highlighted = true) {
+-		if (this.renderCache == null) return;
+-		const triggerRenderUpdate = !areFilesEqual(file, this.renderCache.file) || !this.renderCache.highlighted || !areFileRenderOptionsEqual(options, this.renderCache.options);
++	onHighlightSuccess(file, result, options, highlighted = true, source = file) {
++		const renderCache = this.renderCache;
++		if (renderCache == null || !areFilesEqual(file, renderCache.file)) return;
++		const canonicalFile = renderCache.file;
++		const textDocument = this.textDoucmentCache.get(canonicalFile);
++		const liveText = textDocument?.getText() ?? canonicalFile.contents;
++		const liveLineCount = textDocument?.lineCount ?? linesFromFileContents(liveText).length;
++		const { options: currentOptions } = this.getRenderOptions(canonicalFile);
++		if (source.contents !== liveText || !areFileRenderOptionsEqual(options, currentOptions) || result.code.length !== liveLineCount) return;
++		const triggerRenderUpdate = renderCache.result !== result || !renderCache.highlighted || !areFileRenderOptionsEqual(options, renderCache.options);
+@@ -380 +406 @@ var FileRenderer = class {
+-			file,
++			file: canonicalFile,
+diff --git a/dist/editor/tokenzier.js b/dist/editor/tokenzier.js
+index 1da9163b8..d58924c3c 100644
+--- a/dist/editor/tokenzier.js
++++ b/dist/editor/tokenzier.js
+@@ -143 +142,0 @@
+-		let state = this.#stateStack[line] ?? INITIAL;
+@@ -161,0 +161 @@
++		let state = this.#stateStack[line] ?? INITIAL;
+diff --git a/dist/components/Virtualizer.js b/dist/components/Virtualizer.js
+--- a/dist/components/Virtualizer.js
++++ b/dist/components/Virtualizer.js
+@@ -42,0 +43 @@
++	programmaticScrollPending = false;
+@@ -233,0 +235,2 @@
++		const preserveProgrammaticScroll = this.programmaticScrollPending;
++		this.programmaticScrollPending = false;
+@@ -241 +244 @@
+-		this.scrollFix(anchor);
++		if (!preserveProgrammaticScroll) this.scrollFix(anchor);
+@@ -283,0 +287,14 @@
++	beginProgrammaticScroll() {
++		this.programmaticScrollPending = true;
++	}
++	finishProgrammaticScroll() {
++		const scrollContainer = this.getScrollContainerElement();
++		if (scrollContainer != null) {
++			const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
++			if (scrollContainer.scrollTop > maxScrollTop) scrollContainer.scrollTo({
++				top: maxScrollTop,
++				behavior: "instant"
++			});
++		}
++		this.markDOMDirty();
++	}
+diff --git a/dist/editor/editor.js b/dist/editor/editor.js
+--- a/dist/editor/editor.js
++++ b/dist/editor/editor.js
+@@ -822,0 +823,6 @@
++	}
++	#beginProgrammaticScroll() {
++		this.#fileInstance?.getSimpleVirtualizer?.()?.beginProgrammaticScroll?.();
++	}
++	#finishProgrammaticScroll() {
++		this.#fileInstance?.getSimpleVirtualizer?.()?.finishProgrammaticScroll?.();
+@@ -828,0 +835 @@
++			this.#beginProgrammaticScroll();
+@@ -832,0 +840 @@
++			this.#finishProgrammaticScroll();
+@@ -860,0 +869 @@
++			this.#beginProgrammaticScroll();
+@@ -885,0 +895 @@
++			this.#beginProgrammaticScroll();
+@@ -900,0 +911 @@
++		this.#finishProgrammaticScroll();
