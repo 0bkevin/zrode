@@ -14,6 +14,8 @@ import type * as AcpSchema from "effect-acp/schema";
 const requestLogPath = process.env.ZRODE_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.ZRODE_ACP_EXIT_LOG_PATH;
 const emitToolCalls = process.env.ZRODE_ACP_EMIT_TOOL_CALLS === "1";
+const mockToolKind = (process.env.ZRODE_ACP_TOOL_KIND ?? "execute") as AcpSchema.ToolKind;
+const supportsImages = process.env.ZRODE_ACP_SUPPORTS_IMAGES === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.ZRODE_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.ZRODE_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
@@ -335,7 +337,10 @@ const program = Effect.gen(function* () {
         request.clientCapabilities?._meta?.parameterizedModelPicker === true;
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true },
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: supportsImages, audio: false, embeddedContext: true },
+        },
         ...(advertiseAuthMethods
           ? {
               authMethods: [
@@ -671,7 +676,7 @@ const program = Effect.gen(function* () {
             sessionUpdate: "tool_call",
             toolCallId,
             title: "Terminal",
-            kind: "execute",
+            kind: mockToolKind,
             status: "pending",
             rawInput: {
               command: ["echo", "hello"],
@@ -713,7 +718,7 @@ const program = Effect.gen(function* () {
             sessionUpdate: "tool_call",
             toolCallId,
             title: "Terminal",
-            kind: "execute",
+            kind: mockToolKind,
             status: "pending",
             rawInput: {
               command: ["cat", "server/package.json"],
@@ -735,7 +740,7 @@ const program = Effect.gen(function* () {
           toolCall: {
             toolCallId,
             title: "`cat server/package.json`",
-            kind: "execute",
+            kind: mockToolKind,
             status: "pending",
             content: [
               {

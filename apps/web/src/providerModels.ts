@@ -53,6 +53,16 @@ export function getProviderInteractionModeToggle(
   return getProviderSnapshot(providers, provider)?.showInteractionModeToggle ?? true;
 }
 
+export function getProviderSupportsImageAttachments(
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "supportsImageAttachments">>,
+  instanceId: ProviderInstanceId,
+): boolean {
+  return (
+    providers.find((candidate) => candidate.instanceId === instanceId)?.supportsImageAttachments !==
+    false
+  );
+}
+
 export function isProviderEnabled(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,

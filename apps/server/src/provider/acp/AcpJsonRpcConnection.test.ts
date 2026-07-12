@@ -67,6 +67,41 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
+  it.effect("includes configured metadata in authenticate requests", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const authenticateStarted = requestEvents.find(
+        (event) => event.method === "authenticate" && event.status === "started",
+      );
+      expect(authenticateStarted?.payload).toEqual({
+        methodId: "test",
+        _meta: { headless: true },
+      });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          authMethodId: "test",
+          authenticateMeta: { headless: true },
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
   it.effect("skips initial authenticate when configured", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {

@@ -6,6 +6,7 @@ import {
   applyGrokAcpModelSelection,
   buildGrokAcpSpawnInput,
   resolveGrokAcpBaseModelId,
+  resolveGrokPermissionMode,
 } from "./GrokAcpSupport.ts";
 
 describe("resolveGrokAcpBaseModelId", () => {
@@ -25,13 +26,48 @@ describe("buildGrokAcpSpawnInput", () => {
 
     expect(spawn).toEqual({
       command: "/usr/local/bin/grok",
-      args: ["agent", "stdio"],
+      args: ["--no-auto-update", "--permission-mode", "default", "agent", "stdio"],
       cwd: "/tmp/project",
       env: {
         XAI_API_KEY: "secret",
         GROK_OAUTH2_REFERRER: "zrode",
       },
     });
+  });
+
+  it("passes permission and reasoning controls as non-interactive process options", () => {
+    const spawn = buildGrokAcpSpawnInput(
+      undefined,
+      "/tmp/project",
+      {},
+      {
+        interactionMode: "plan",
+        reasoningEffort: "medium",
+        runtimeMode: "auto-accept-edits",
+      },
+    );
+
+    expect(spawn.args).toEqual([
+      "--no-auto-update",
+      "--permission-mode",
+      "plan",
+      "--effort",
+      "medium",
+      "agent",
+      "stdio",
+    ]);
+  });
+});
+
+describe("resolveGrokPermissionMode", () => {
+  it("maps composer runtime modes to Grok permission modes", () => {
+    expect(resolveGrokPermissionMode(undefined)).toBe("default");
+    expect(resolveGrokPermissionMode({ runtimeMode: "approval-required" })).toBe("default");
+    expect(resolveGrokPermissionMode({ runtimeMode: "auto-accept-edits" })).toBe("acceptEdits");
+    expect(resolveGrokPermissionMode({ runtimeMode: "full-access" })).toBe("bypassPermissions");
+    expect(resolveGrokPermissionMode({ runtimeMode: "full-access", interactionMode: "plan" })).toBe(
+      "plan",
+    );
   });
 });
 

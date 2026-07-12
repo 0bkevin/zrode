@@ -52,6 +52,17 @@ describe("ProviderSessionStartInput", () => {
     ).toThrow();
   });
 
+  it("accepts a Grok interaction mode for session startup", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-grok-plan",
+      provider: "grok",
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    });
+
+    expect(parsed.interactionMode).toBe("plan");
+  });
+
   it("accepts claude runtime knobs", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",

@@ -3,15 +3,18 @@ import {
   type GrokSettings,
   EventId,
   type ProviderApprovalDecision,
+  type ProviderInteractionMode,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderUserInputAnswers,
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  type RuntimeMode,
   type ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -118,6 +121,9 @@ interface GrokSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly reasoningEffort: string | undefined;
+  readonly supportsImageAttachments: boolean;
   stopped: boolean;
 }
 
@@ -200,6 +206,21 @@ function selectAutoApprovedPermissionOption(
   return (
     selectPermissionOptionId(request, "acceptForSession") ??
     selectPermissionOptionId(request, "accept")
+  );
+}
+
+export function shouldAutoApproveGrokPermission(
+  runtimeMode: RuntimeMode,
+  request: EffectAcpSchema.RequestPermissionRequest,
+  interactionMode: ProviderInteractionMode = "default",
+): boolean {
+  if (interactionMode === "plan") return false;
+  if (runtimeMode === "full-access") return true;
+  if (runtimeMode !== "auto-accept-edits") return false;
+  return (
+    request.toolCall.kind === "edit" ||
+    request.toolCall.kind === "delete" ||
+    request.toolCall.kind === "move"
   );
 }
 
@@ -564,6 +585,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           );
 
           const resumeSessionId = parseGrokResume(input.resumeCursor)?.sessionId;
+          const reasoningEffort = getModelSelectionStringOptionValue(grokModelSelection, "effort");
+          const interactionMode = input.interactionMode ?? "default";
           const acpNativeLoggers = makeAcpNativeLoggers({
             nativeEventLogger,
             provider: PROVIDER,
@@ -578,6 +601,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "zrode", version: "0.0.0" },
+            launchOptions: {
+              runtimeMode: input.runtimeMode,
+              interactionMode,
+              ...(reasoningEffort ? { reasoningEffort } : {}),
+            },
             ...(mcpSession
               ? {
                   mcpServers: [
@@ -667,7 +695,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
                   yield* logNative(input.threadId, "session/request_permission", params);
-                  if (input.runtimeMode === "full-access") {
+                  if (shouldAutoApproveGrokPermission(input.runtimeMode, params, interactionMode)) {
                     const autoApprovedOptionId = selectAutoApprovedPermissionOption(params);
                     if (autoApprovedOptionId !== undefined) {
                       return {
@@ -778,6 +806,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            interactionMode,
+            reasoningEffort,
+            supportsImageAttachments:
+              started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
             stopped: false,
           };
 
@@ -915,6 +947,33 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
+            const turnReasoningEffort = getModelSelectionStringOptionValue(
+              input.modelSelection?.instanceId === boundInstanceId
+                ? input.modelSelection
+                : undefined,
+              "effort",
+            );
+            if (turnReasoningEffort !== undefined && turnReasoningEffort !== ctx.reasoningEffort) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "Changing Grok reasoning effort requires restarting the provider session.",
+              });
+            }
+            if (input.interactionMode && input.interactionMode !== ctx.interactionMode) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "Changing Grok Plan mode requires restarting the provider session.",
+              });
+            }
+            if ((input.attachments?.length ?? 0) > 0 && !ctx.supportsImageAttachments) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "sendTurn",
+                issue: "This Grok ACP agent does not support image attachments.",
+              });
+            }
             // A sendTurn while a prompt is in flight is a steer: the agent
             // folds the new prompt into the ongoing work, so the active turn
             // id is reused instead of opening a new turn.
