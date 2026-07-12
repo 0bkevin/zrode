@@ -122,6 +122,33 @@ describe("instance-scoped model selection", () => {
     );
   });
 
+  it("ignores Kilo custom slugs that were not advertised by ACP", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("kilocode"),
+        instanceId: "kilocode",
+        models: ["openai/gpt-5"],
+      }),
+    ];
+    const settings: UnifiedSettings = {
+      ...settingsWithProviderInstances(),
+      providerInstances: {
+        ...settingsWithProviderInstances().providerInstances,
+        [ProviderInstanceId.make("kilocode")]: {
+          driver: ProviderDriverKind.make("kilocode"),
+          config: { customModels: ["stale/custom-model"] },
+        },
+      },
+    };
+    const kilo = deriveProviderInstanceEntries(providers).find(
+      (entry) => entry.instanceId === "kilocode",
+    )!;
+
+    expect(getAppModelOptionsForInstance(settings, kilo).map((option) => option.slug)).toEqual([
+      "openai/gpt-5",
+    ]);
+  });
+
   it("does not inject an unknown selected slug into the stock instance list", () => {
     const providers = [
       provider({

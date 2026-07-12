@@ -1439,6 +1439,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "devin",
                 "githubCopilot",
                 "grok",
+                "kilocode",
                 "opencode",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);

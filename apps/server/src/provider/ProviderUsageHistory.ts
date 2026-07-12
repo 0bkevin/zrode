@@ -260,7 +260,12 @@ const TokenActivityRow = Schema.Struct({
 });
 
 /** Providers with a live rate-limit usage API (session/weekly percent). */
-const RATE_LIMIT_PROVIDERS: ReadonlyArray<ProviderUsageProviderKind> = ["claude", "codex", "grok"];
+const RATE_LIMIT_PROVIDERS: ReadonlyArray<ProviderUsageProviderKind> = [
+  "claude",
+  "codex",
+  "grok",
+  "kilocode",
+];
 /** Providers whose per-message token usage is backfillable from local logs. */
 const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = ["claude", "codex", "opencode"];
 

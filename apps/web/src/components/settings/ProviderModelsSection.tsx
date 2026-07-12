@@ -35,6 +35,7 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("claudeAgent")]: "claude-sonnet-5",
   [ProviderDriverKind.make("cursor")]: "claude-sonnet-4-6",
   [ProviderDriverKind.make("devin")]: "adaptive",
+  [ProviderDriverKind.make("kilocode")]: "provider/model-slug",
   [ProviderDriverKind.make("githubCopilot")]: "claude-sonnet-4.6",
   [ProviderDriverKind.make("grok")]: "grok-build",
   [ProviderDriverKind.make("opencode")]: "openai/gpt-5",
@@ -74,6 +75,7 @@ interface ProviderModelsSectionProps {
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
+  readonly allowCustomModels?: boolean;
 }
 
 /**
@@ -99,6 +101,7 @@ export function ProviderModelsSection({
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
+  allowCustomModels = true,
 }: ProviderModelsSectionProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -386,27 +389,33 @@ export function ProviderModelsSection({
         })}
       </div>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <Input
-          id={`provider-instance-${instanceId}-custom-model`}
-          value={input}
-          onChange={(event) => {
-            setInput(event.target.value);
-            if (error) setError(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            handleAdd();
-          }}
-          placeholder={driverKind ? CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind] : "model-slug"}
-          spellCheck={false}
-        />
-        <Button className="shrink-0" variant="outline" onClick={handleAdd}>
-          <PlusIcon className="size-3.5" />
-          Add
-        </Button>
-      </div>
+      {allowCustomModels ? (
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <Input
+            id={`provider-instance-${instanceId}-custom-model`}
+            value={input}
+            onChange={(event) => {
+              setInput(event.target.value);
+              if (error) setError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              handleAdd();
+            }}
+            placeholder={driverKind ? CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind] : "model-slug"}
+            spellCheck={false}
+          />
+          <Button className="shrink-0" variant="outline" onClick={handleAdd}>
+            <PlusIcon className="size-3.5" />
+            Add
+          </Button>
+        </div>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          This provider accepts only models advertised by its live session.
+        </p>
+      )}
 
       {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
     </div>

@@ -1,6 +1,7 @@
 import type { ServerProcessDiagnosticsEntry } from "@t3tools/contracts";
 
-const AGENT_PROCESS_COMMAND_PATTERN = /\b(codex|claude|opencode|cursor|devin(?:\s+acp)?)\b/i;
+const AGENT_PROCESS_COMMAND_PATTERN =
+  /\b(codex|claude|opencode|cursor|devin(?:\s+acp)?|kilo(?:\s+acp)?)\b/i;
 
 export function formatProcessType(
   process: Pick<ServerProcessDiagnosticsEntry, "command" | "depth">,

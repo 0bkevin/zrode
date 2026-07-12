@@ -3,12 +3,12 @@ import * as Schema from "effect/Schema";
 // ── Provider subscription usage (rate-limit windows) ────────────────
 //
 // Snapshot of how much of a subscription's rate-limit windows remain for a
-// provider account (Claude Code / Codex). Fetched server-side from the
+// provider account (Claude Code / Codex / Grok / Kilo Code). Fetched server-side from the
 // provider's own usage APIs using the locally-authenticated CLI credentials;
 // surfaced in the client status UI as "session" (~5h) and "weekly" (~7d)
 // meters.
 
-export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex", "grok"]);
+export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex", "grok", "kilocode"]);
 export type ProviderUsageProviderKind = typeof ProviderUsageProviderKind.Type;
 
 export const ProviderUsageStatus = Schema.Literals([
@@ -87,6 +87,8 @@ export const ProviderUsageSnapshot = Schema.Struct({
   resetCredits: Schema.NullOr(ProviderUsageResetCredits),
   /** Failure detail for non-"ok" statuses. */
   message: Schema.NullOr(Schema.String),
+  /** Account-scoped provider dashboard URL, when it differs by account or organization. */
+  detailsUrl: Schema.optional(Schema.String),
   /** Epoch milliseconds when this snapshot was fetched. */
   updatedAt: Schema.Number,
 });
@@ -125,10 +127,17 @@ export type ProviderUsageHistoryDay = typeof ProviderUsageHistoryDay.Type;
 
 /**
  * Providers that can appear in the usage-history UI. Claude Code, Codex, and
- * OpenCode have backfillable token activity; Grok contributes live allowance
- * samples only because its local sessions do not persist per-message tokens.
+ * OpenCode have backfillable token activity; Grok and Kilo contribute live
+ * allowance samples because their local sessions do not provide a backfillable
+ * per-message token source here.
  */
-export const ProviderTokenActivityKind = Schema.Literals(["claude", "codex", "grok", "opencode"]);
+export const ProviderTokenActivityKind = Schema.Literals([
+  "claude",
+  "codex",
+  "grok",
+  "kilocode",
+  "opencode",
+]);
 export type ProviderTokenActivityKind = typeof ProviderTokenActivityKind.Type;
 
 /**

@@ -23,7 +23,15 @@ import {
 } from "../state/server";
 import { useEnvironmentThread } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
-import { ClaudeAI, CursorIcon, DevinIcon, GrokIcon, OpenAI, OpenCodeIcon } from "./Icons";
+import {
+  ClaudeAI,
+  CursorIcon,
+  DevinIcon,
+  GrokIcon,
+  KiloCodeIcon,
+  OpenAI,
+  OpenCodeIcon,
+} from "./Icons";
 import { isUnmeteredProviderEligible } from "./providerUsageEligibility";
 import { useRelativeTimeTick } from "./settings/settingsLayout";
 import { toastManager } from "./ui/toast";
@@ -62,6 +70,7 @@ const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   cursor: "https://cursor.com/dashboard",
   devin: "https://app.devin.ai",
   grok: "https://grok.com/?_s=usage",
+  kilocode: "https://app.kilo.ai",
   opencode: "https://opencode.ai",
 };
 
@@ -77,6 +86,7 @@ const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
   cursor: "cursor",
   devin: "devin",
   grok: "grok",
+  kilocode: "kilocode",
   opencode: "opencode",
 };
 
@@ -145,6 +155,8 @@ function providerDisplayName(provider: AnyUsageProviderKind): string {
       return "Devin";
     case "grok":
       return "Grok";
+    case "kilocode":
+      return "Kilo Code";
     case "opencode":
       return "OpenCode";
   }
@@ -168,6 +180,8 @@ function ProviderUsageIcon({
       return <DevinIcon className={className} />;
     case "grok":
       return <GrokIcon className={className} />;
+    case "kilocode":
+      return <KiloCodeIcon className={className} />;
     case "opencode":
       return <OpenCodeIcon className={className} />;
   }
@@ -182,6 +196,12 @@ export function compactProviderUsagePercent(snapshot: ProviderUsageSnapshot): nu
     .filter((window): window is ProviderUsageWindow => window !== null)
     .map(percentUsed);
   return values.length > 0 ? Math.max(...values) : null;
+}
+
+export function compactProviderUsageCreditBalance(snapshot: ProviderUsageSnapshot): string | null {
+  return snapshot.status === "ok" && snapshot.provider === "kilocode"
+    ? (snapshot.credits?.balance ?? null)
+    : null;
 }
 
 function UsageBar({ used, label, className }: { used: number; label: string; className?: string }) {
@@ -416,7 +436,9 @@ function ProviderUsagePopoverContent({
             size="icon-xs"
             variant="ghost"
             className="size-5 rounded-sm p-0 text-muted-foreground/60 hover:text-foreground"
-            onClick={() => openProviderUsagePage(PROVIDER_USAGE_URL[snapshot.provider])}
+            onClick={() =>
+              openProviderUsagePage(snapshot.detailsUrl ?? PROVIDER_USAGE_URL[snapshot.provider])
+            }
             aria-label={`View ${displayName} usage details`}
           >
             <ExternalLinkIcon className="size-3" />
@@ -424,7 +446,11 @@ function ProviderUsagePopoverContent({
         </div>
       </div>
 
-      {snapshot.status === "ok" && hasWindows ? (
+      {snapshot.status === "ok" &&
+      (hasWindows ||
+        snapshot.extraLimits.length > 0 ||
+        snapshot.extraUsage !== null ||
+        snapshot.credits !== null) ? (
         <>
           <UsageWindowRow
             title={snapshot.session?.label ?? "Session"}
@@ -458,10 +484,17 @@ function ProviderUsagePopoverContent({
           ) : null}
           {snapshot.credits &&
           (snapshot.provider === "grok" ||
+            snapshot.provider === "kilocode" ||
             snapshot.credits.hasCredits ||
             snapshot.credits.unlimited) ? (
             <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[11px] text-muted-foreground">
-              <span>{snapshot.provider === "grok" ? "Extra Usage Credits" : "Credits"}</span>
+              <span>
+                {snapshot.provider === "grok"
+                  ? "Extra Usage Credits"
+                  : snapshot.provider === "kilocode"
+                    ? "Kilo balance"
+                    : "Credits"}
+              </span>
               <span className="tabular-nums text-muted-foreground/70">
                 {snapshot.credits.unlimited
                   ? "Unlimited"
@@ -574,7 +607,7 @@ function useMeteredProviderContext(): MeteredProviderContext {
     const keyParts: Array<unknown> = [];
     for (const provider of providers) {
       const kind = DRIVER_TO_USAGE_KIND[provider.driver];
-      if (kind !== "claude" && kind !== "codex" && kind !== "grok") {
+      if (kind !== "claude" && kind !== "codex" && kind !== "grok" && kind !== "kilocode") {
         continue;
       }
       if (!isDefaultProviderInstance(provider) || seen.has(kind)) {
@@ -585,7 +618,9 @@ function useMeteredProviderContext(): MeteredProviderContext {
           ? settings.providers.claudeAgent
           : kind === "codex"
             ? settings.providers.codex
-            : settings.providers.grok;
+            : kind === "grok"
+              ? settings.providers.grok
+              : settings.providers.kilocode;
       keyParts.push([
         kind,
         provider.instanceId,
@@ -610,6 +645,7 @@ function useMeteredProviderContext(): MeteredProviderContext {
     settings.providers.claudeAgent,
     settings.providers.codex,
     settings.providers.grok,
+    settings.providers.kilocode,
   ]);
 }
 
@@ -817,6 +853,7 @@ function ProviderUsagePill({
 }) {
   const displayName = providerDisplayName(snapshot.provider);
   const used = snapshot.status === "ok" ? compactProviderUsagePercent(snapshot) : null;
+  const creditBalance = compactProviderUsageCreditBalance(snapshot);
   return (
     <Popover onOpenChange={onOpenChange}>
       <PopoverTrigger
@@ -850,6 +887,10 @@ function ProviderUsagePill({
                   {used}%
                 </span>
               </>
+            ) : creditBalance !== null ? (
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70 transition-colors group-hover:text-muted-foreground">
+                {creditBalance}
+              </span>
             ) : (
               <span className="truncate text-[10px] text-muted-foreground/50 transition-colors group-hover:text-muted-foreground">
                 {snapshot.status === "unauthenticated" ? "Sign in" : "—"}
@@ -998,7 +1039,10 @@ export function ProviderUsageStatus() {
 
   if (data === null) {
     const pinnedMetered =
-      threadProvider === "claude" || threadProvider === "codex" || threadProvider === "grok"
+      threadProvider === "claude" ||
+      threadProvider === "codex" ||
+      threadProvider === "grok" ||
+      threadProvider === "kilocode"
         ? meteredProviders.includes(threadProvider)
           ? threadProvider
           : undefined

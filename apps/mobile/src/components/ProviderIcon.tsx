@@ -21,6 +21,21 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "kilocode") {
+    const color = isDarkMode ? "#e5e5e5" : "#171717";
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path
+          d="M5 3.5v17M18.5 4 9 12l9.5 8"
+          stroke={color}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={3}
+        />
+      </Svg>
+    );
+  }
+
   if (props.provider === "devin") {
     const color = isDarkMode ? "#e5e5e5" : "#171717";
     return (

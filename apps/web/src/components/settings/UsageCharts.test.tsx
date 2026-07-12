@@ -32,7 +32,7 @@ describe("buildTokenSeries", () => {
     ]);
     expect(series[0]).toEqual({
       day: "2026-06-01",
-      values: { claude: 100, codex: 40, grok: 0, opencode: 0 },
+      values: { claude: 100, codex: 40, grok: 0, kilocode: 0, opencode: 0 },
       total: 140,
     });
     expect(series[1]!.total).toBe(0); // gap day filled

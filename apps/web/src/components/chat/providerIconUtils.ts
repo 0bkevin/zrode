@@ -5,6 +5,7 @@ import {
   DevinIcon,
   GithubCopilotIcon,
   GrokIcon,
+  KiloCodeIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
@@ -18,6 +19,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("devin")]: DevinIcon,
+  [ProviderDriverKind.make("kilocode")]: KiloCodeIcon,
   [ProviderDriverKind.make("githubCopilot")]: GithubCopilotIcon,
 };
 

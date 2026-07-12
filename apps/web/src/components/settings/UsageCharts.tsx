@@ -23,13 +23,14 @@ export const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "claude",
   "codex",
   "grok",
+  "kilocode",
   "opencode",
 ];
 
 type TokenValues = Record<ProviderTokenActivityKind, number>;
 
 function emptyTokenValues(): TokenValues {
-  return { claude: 0, codex: 0, grok: 0, opencode: 0 };
+  return { claude: 0, codex: 0, grok: 0, kilocode: 0, opencode: 0 };
 }
 
 function sumValues(values: TokenValues): number {

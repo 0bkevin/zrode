@@ -58,6 +58,12 @@ export const PROVIDER_OPTIONS: Array<{
     pickerSidebarBadge: "new",
   },
   {
+    value: ProviderDriverKind.make("kilocode"),
+    label: "Kilo Code",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
+  {
     value: ProviderDriverKind.make("githubCopilot"),
     label: "GitHub Copilot",
     available: true,

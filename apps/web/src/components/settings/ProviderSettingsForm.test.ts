@@ -10,6 +10,14 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("publishes Kilo Code metadata and configurable binary path", () => {
+    const kiloCode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("kilocode")];
+    expect(kiloCode?.label).toBe("Kilo Code");
+    expect(deriveProviderSettingsFields(kiloCode!).map((field) => field.key)).toEqual([
+      "binaryPath",
+    ]);
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 
