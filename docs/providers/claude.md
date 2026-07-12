@@ -24,20 +24,21 @@ In Zrode Settings, your Claude provider can stay like this:
 ```text
 Display name: Claude
 Binary path: claude
-Claude HOME path: empty
+Claude config directory: empty
 ```
 
-An empty `Claude HOME path` means Zrode uses your normal home directory.
+An empty `Claude config directory` means Zrode uses Claude Code's default configuration directory.
+Zrode does not replace your process `HOME`.
 
 ## I Want Work And Personal Claude Accounts
 
-Use a different Claude home for each account.
+Use a different Claude config directory for each account.
 
 Example:
 
 ```text
-default home                 work account
-~/.claude_personal_home       personal account
+default configuration    work account
+~/.claude-personal       personal account
 ```
 
 ### Set Up The First Account
@@ -53,16 +54,16 @@ In Zrode Settings:
 ```text
 Display name: Claude Work
 Binary path: claude
-Claude HOME path: empty
+Claude config directory: empty
 ```
 
 ### Set Up The Second Account
 
-Log in with a separate home:
+Log in with a separate config directory:
 
 ```bash
-mkdir -p ~/.claude_personal_home
-HOME=~/.claude_personal_home claude auth login
+mkdir -p ~/.claude-personal
+CLAUDE_CONFIG_DIR=~/.claude-personal claude auth login
 ```
 
 Then add another Claude provider in Zrode:
@@ -70,22 +71,29 @@ Then add another Claude provider in Zrode:
 ```text
 Display name: Claude Personal
 Binary path: claude
-Claude HOME path: ~/.claude_personal_home
+Claude config directory: ~/.claude-personal
 ```
+
+Zrode passes this path as `CLAUDE_CONFIG_DIR`. This is Claude Code's supported isolation mechanism
+and, on macOS, also selects a separate Keychain credential entry.
 
 Use the email shown in Settings to confirm each provider is using the intended account. Emails are
 blurred by default; click the blurred email to reveal it.
+
+The usage card, activity scan, and local-history import target the default Claude provider,
+including its configured environment. Additional Claude instances are isolated for runtime
+sessions, but their usage/history is not yet aggregated into those auxiliary views.
 
 ## Can I Switch Claude Accounts In An Existing Thread?
 
 Usually, no.
 
-Zrode only offers Claude providers that use the same Claude home for an existing thread. A
-different Claude home is treated as a different Claude environment.
+Zrode only offers Claude providers that use the same Claude config directory for an existing
+thread. A different config directory is treated as a different Claude environment.
 
 This is different from the recommended Codex setup. Claude Code keeps account and local state across
-multiple files under its home directory, so Zrode keeps separate Claude homes isolated instead of
-trying to share part of the state.
+multiple files in its configuration directory, so Zrode keeps separate Claude config directories
+isolated instead of trying to share part of the state.
 
 ## I Want To Use OpenRouter
 
@@ -102,7 +110,7 @@ Add or edit a Claude provider in Zrode Settings:
 ```text
 Display name: Claude OpenRouter
 Binary path: claude
-Claude HOME path: ~/.claude_openrouter_home
+Claude config directory: ~/.claude-openrouter
 ```
 
 In that provider's Environment variables section, add:
@@ -116,15 +124,16 @@ ANTHROPIC_API_KEY                              Empty value
 Mark `ANTHROPIC_AUTH_TOKEN` as sensitive. Zrode stores the value as a server secret and does not
 send it back to the app after saving.
 
-If you want this setup isolated from your normal Claude account, create that home first:
+If you want this setup isolated from your normal Claude account, create that config directory first:
 
 ```bash
-mkdir -p ~/.claude_openrouter_home
+mkdir -p ~/.claude-openrouter
 ```
 
-If you previously used the same Claude home with a normal Anthropic login, run `/logout` in a Claude
-Code session for that home before using OpenRouter. Otherwise Claude Code may keep using cached
-Anthropic credentials instead of the OpenRouter token.
+If you previously used the same Claude config directory with a normal Anthropic login, run `/logout`
+in a Claude Code session with `CLAUDE_CONFIG_DIR` set to that directory before using
+OpenRouter. Otherwise Claude Code may keep using cached Anthropic credentials instead of the
+OpenRouter token.
 
 ### Pick OpenRouter Models
 
@@ -189,20 +198,20 @@ Configure a Claude provider:
 ```text
 Display name: Claude Router
 Binary path: claude
-Claude HOME path: ~/.claude_router_home
+Claude config directory: ~/.claude-router
 ```
 
 Then copy the variables that `ccr activate` would export into the provider's Environment variables
 section. Mark tokens and API keys as sensitive.
 
 If you want the router-backed setup to stay separate from your normal Claude account, create and log
-in with a dedicated home first:
+in with a dedicated config directory first:
 
 ```bash
-mkdir -p ~/.claude_router_home
+mkdir -p ~/.claude-router
 ccr start
 ccr activate
-HOME=~/.claude_router_home claude auth login
+CLAUDE_CONFIG_DIR=~/.claude-router claude auth login
 ```
 
 Claude Code Router's setup can change over time. Use its upstream README for the current install and
@@ -218,7 +227,7 @@ Examples:
 - "Claude Router"
 - "Claude Experimental"
 
-If the preset needs different Claude files, give it a different `Claude HOME path`. If it needs
+If the preset needs different Claude files, give it a different `Claude config directory`. If it needs
 different API keys, base URLs, or router settings, use Environment variables.
 
 Do not put environment variable assignments in `Launch arguments`.

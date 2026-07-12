@@ -279,13 +279,24 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "claude", clearWhenEmpty: "omit" },
       }),
     ),
+    configDirPath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Claude config directory",
+        description:
+          "Optional CLAUDE_CONFIG_DIR for this instance. Isolates settings, sessions, plugins, and credentials.",
+        providerSettingsForm: {
+          placeholder: "~/.claude-work",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     homePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
-        title: "Claude HOME path",
-        description:
-          "Custom HOME used when running this Claude instance. Keeps .claude.json and .claude separate.",
-        providerSettingsForm: { placeholder: "~", clearWhenEmpty: "omit" },
+        title: "Legacy Claude HOME path",
+        description: "Deprecated custom HOME retained for existing provider configurations.",
+        providerSettingsForm: { hidden: true },
       }),
     ),
     customModels: Schema.Array(Schema.String).pipe(
@@ -305,7 +316,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: ["binaryPath", "configDirPath", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -606,6 +617,7 @@ const CodexSettingsPatch = Schema.Struct({
 const ClaudeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  configDirPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   launchArgs: Schema.optionalKey(TrimmedString),

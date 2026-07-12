@@ -5,8 +5,8 @@
  * remain for the locally-authenticated Claude Code, Codex, and Grok accounts:
  *
  * - Claude: `GET https://api.anthropic.com/api/oauth/usage` using the OAuth
- *   access token Claude Code stores in `~/.claude/.credentials.json` (or the
- *   macOS keychain entry "Claude Code-credentials"). The response's `limits`
+ *   access token Claude Code stores in its config directory's `.credentials.json` (or the
+ *   config-scoped macOS Keychain entry). The response's `limits`
  *   array carries the session window, the all-models weekly window, and any
  *   model-scoped weekly windows; `extra_usage` carries overflow credits.
  * - Codex: a short-lived `codex app-server` probe answering the
@@ -26,10 +26,10 @@
  * RPC trigger at most one probe (one codex spawn, one keychain read, one
  * HTTP round-trip per endpoint) per TTL window.
  *
- * Usage currently targets the legacy singleton provider settings
- * (`settings.providers.codex` / `settings.providers.claudeAgent` /
- * `settings.providers.grok`); custom
- * `providerInstances` with separate accounts are not yet reflected here.
+ * Claude usage follows the explicit default `providerInstances.claudeAgent`
+ * envelope when present, including its environment; Codex and Grok still use
+ * their legacy singleton settings. Additional non-default instances are not
+ * aggregated here.
  *
  * Per-provider failures never fail the RPC; they fold into the snapshot's
  * `status`/`message` so the client can render partial results.
@@ -50,6 +50,7 @@ import type {
   ServerProviderUsageResult,
   ServerSettings,
 } from "@t3tools/contracts";
+import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -73,7 +74,7 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { AUTH_PROBE_TIMEOUT_MS } from "./providerSnapshot.ts";
-import { resolveClaudeHomePath } from "./Drivers/ClaudeHome.ts";
+import { defaultClaudeInstanceSettings, resolveClaudeConfigDirPath } from "./Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 import { buildCodexInitializeParams, codexAccountAuthLabel } from "./Layers/CodexProvider.ts";
 
@@ -313,15 +314,25 @@ export function invalidateProviderUsageCache(provider?: ProviderUsageProviderKin
 }
 
 export function usageSettingsKey(settings: ServerSettings): string {
+  const claude = defaultClaudeInstanceSettings(settings);
   return JSON.stringify([
-    claudeUsageSettingsKey(settings.providers.claudeAgent),
+    claudeUsageSettingsKey(claude.config, claude.environment),
     codexUsageSettingsKey(settings.providers.codex),
     grokUsageSettingsKey(settings.providers.grok),
   ]);
 }
 
-function claudeUsageSettingsKey(settings: ClaudeSettings): string {
-  return JSON.stringify([settings.enabled, settings.homePath]);
+function claudeUsageSettingsKey(
+  settings: ClaudeSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  return JSON.stringify([
+    settings.enabled,
+    settings.configDirPath,
+    settings.homePath,
+    environment.CLAUDE_CONFIG_DIR,
+    environment.CLAUDE_SECURESTORAGE_CONFIG_DIR,
+  ]);
 }
 
 function codexUsageSettingsKey(settings: CodexSettings): string {
@@ -348,8 +359,10 @@ export function providerUsageSettingsKey(
   settings: ServerSettings,
 ): string {
   switch (provider) {
-    case "claude":
-      return claudeUsageSettingsKey(settings.providers.claudeAgent);
+    case "claude": {
+      const claude = defaultClaudeInstanceSettings(settings);
+      return claudeUsageSettingsKey(claude.config, claude.environment);
+    }
     case "codex":
       return codexUsageSettingsKey(settings.providers.codex);
     case "grok":
@@ -389,6 +402,40 @@ export interface ClaudeOAuthCredentials {
   readonly accessToken: string;
   /** Epoch milliseconds, when the credentials blob reports an expiry. */
   readonly expiresAt: number | null;
+}
+
+/**
+ * Claude Code scopes macOS Keychain credentials by CLAUDE_CONFIG_DIR. Keep
+ * usage polling on the same account instead of silently falling back to the
+ * default Keychain item for every configured Claude instance.
+ */
+export function claudeKeychainServiceName(configDir: string, usesCustomConfigDir: boolean): string {
+  if (!usesCustomConfigDir) return CLAUDE_KEYCHAIN_SERVICE;
+  const normalizedConfigDir = configDir.normalize("NFC");
+  const suffix = NodeCrypto.createHash("sha256")
+    .update(normalizedConfigDir)
+    .digest("hex")
+    .slice(0, 8);
+  return `${CLAUDE_KEYCHAIN_SERVICE}-${suffix}`;
+}
+
+function claudeKeychainAccount(environment: NodeJS.ProcessEnv = process.env): string {
+  try {
+    return environment.USER?.trim() || environment.USERNAME?.trim() || NodeOS.userInfo().username;
+  } catch {
+    return "claude-code-user";
+  }
+}
+
+export function claudeCredentialSourceKey(
+  configDir: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  return JSON.stringify([
+    configDir,
+    environment.CLAUDE_SECURESTORAGE_CONFIG_DIR,
+    claudeKeychainAccount(environment),
+  ]);
 }
 
 export function parseClaudeOAuthCredentials(raw: string): ClaudeOAuthCredentials | null {
@@ -501,7 +548,7 @@ export function parseClaudeLimits(usage: ClaudeUsagePayload): {
 }
 
 interface ClaudeTokenCacheState {
-  readonly home: string;
+  readonly sourceKey: string;
   readonly fileFingerprint: string | null;
   readonly credentials: ClaudeOAuthCredentials | null;
   readonly expiresAt: number;
@@ -521,7 +568,7 @@ function markClaudeCredentialsRejected(rejectedAt: number): void {
     return;
   }
   claudeTokenCache = {
-    home: cached.home,
+    sourceKey: cached.sourceKey,
     fileFingerprint: cached.fileFingerprint,
     credentials: { ...cached.credentials, expiresAt: rejectedAt - 1 },
     expiresAt: rejectedAt + CLAUDE_TOKEN_NEGATIVE_TTL_MS,
@@ -552,16 +599,19 @@ const claudeCredentialsFileFingerprint = Effect.fn("claudeCredentialsFileFingerp
  */
 const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
   settings: ClaudeSettings,
+  environment: NodeJS.ProcessEnv = process.env,
 ) {
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  const home = yield* resolveClaudeHomePath(settings);
+  const configDir = yield* resolveClaudeConfigDirPath(settings, environment);
+  const keychainAccount = claudeKeychainAccount(environment);
+  const sourceKey = claudeCredentialSourceKey(configDir, environment);
   const fileSystem = yield* FileSystem.FileSystem;
-  const credentialsPath = `${home}/.claude/.credentials.json`;
+  const credentialsPath = `${configDir}/.credentials.json`;
   const fileFingerprint = yield* claudeCredentialsFileFingerprint(fileSystem, credentialsPath);
   const cached = claudeTokenCache;
   if (
     cached &&
-    cached.home === home &&
+    cached.sourceKey === sourceKey &&
     cached.fileFingerprint === fileFingerprint &&
     cached.expiresAt > now
   ) {
@@ -577,10 +627,27 @@ const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
     const platform = yield* HostProcessPlatform;
     if (platform === "darwin") {
       const processRunner = yield* ProcessRunner.ProcessRunner;
+      const secureStorageOverride = environment.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+      const usesCustomConfigDir =
+        secureStorageOverride !== undefined
+          ? secureStorageOverride.length > 0
+          : (settings.configDirPath?.trim().length ?? 0) > 0
+            ? true
+            : settings.homePath.trim().length > 0
+              ? false
+              : Boolean(environment.CLAUDE_CONFIG_DIR?.trim());
+      const secureStorageConfigDir =
+        secureStorageOverride !== undefined && secureStorageOverride.length > 0
+          ? secureStorageOverride
+          : configDir;
+      const keychainService = claudeKeychainServiceName(
+        secureStorageConfigDir,
+        usesCustomConfigDir,
+      );
       const keychainOutput = yield* processRunner
         .run({
           command: "security",
-          args: ["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
+          args: ["find-generic-password", "-a", keychainAccount, "-s", keychainService, "-w"],
           timeout: "5 seconds",
         })
         .pipe(Effect.orElseSucceed(() => null));
@@ -596,7 +663,7 @@ const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
   const looksValid =
     credentials !== null && (credentials.expiresAt === null || credentials.expiresAt > now);
   claudeTokenCache = {
-    home,
+    sourceKey,
     fileFingerprint,
     credentials,
     expiresAt: now + (looksValid ? CLAUDE_TOKEN_CACHE_TTL_MS : CLAUDE_TOKEN_NEGATIVE_TTL_MS),
@@ -606,6 +673,7 @@ const readClaudeCredentials = Effect.fn("readClaudeCredentials")(function* (
 
 const fetchClaudeUsageResult = Effect.fn("fetchClaudeUsageResult")(function* (
   settings: ClaudeSettings,
+  environment: NodeJS.ProcessEnv = process.env,
 ) {
   const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
   if (!settings.enabled) {
@@ -613,7 +681,7 @@ const fetchClaudeUsageResult = Effect.fn("fetchClaudeUsageResult")(function* (
       usageSnapshot("claude", "unavailable", "Claude is disabled in Zrode settings.", startedAt),
     );
   }
-  const credentials = yield* readClaudeCredentials(settings);
+  const credentials = yield* readClaudeCredentials(settings, environment);
   if (!credentials) {
     return providerUsageFetchResult(
       usageSnapshot(
@@ -1767,12 +1835,13 @@ const getProviderUsageSnapshot = Effect.fn("getProviderUsageSnapshot")(function*
 });
 
 export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
+  const claude = defaultClaudeInstanceSettings(settings);
   const usage = yield* Effect.all(
     [
       getProviderUsageSnapshot(
         "claude",
-        claudeUsageSettingsKey(settings.providers.claudeAgent),
-        foldProviderDefects("claude", fetchClaudeUsageResult(settings.providers.claudeAgent)),
+        claudeUsageSettingsKey(claude.config, claude.environment),
+        foldProviderDefects("claude", fetchClaudeUsageResult(claude.config, claude.environment)),
       ),
       getProviderUsageSnapshot(
         "codex",

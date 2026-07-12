@@ -8,7 +8,7 @@
  *   so serving a cached snapshot again is a no-op instead of a duplicate.
  * - **Token activity backfill** — the providers keep local session logs with
  *   per-message token usage (Claude Code transcripts under
- *   `<home>/.claude/projects/**.jsonl`, Codex rollouts under
+ *   `<config-dir>/projects/**.jsonl`, Codex rollouts under
  *   `$CODEX_HOME/sessions/**.jsonl`, and OpenCode messages under
  *   `<xdg-data>/opencode/storage/message/**.json`, one message per file). A
  *   throttled background scan parses them into per-day token totals, which is
@@ -47,7 +47,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-import { resolveClaudeHomePath } from "./Drivers/ClaudeHome.ts";
+import { defaultClaudeInstanceSettings, resolveClaudeConfigDirPath } from "./Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "./Drivers/CodexHomeLayout.ts";
 
 /** Samples older than this are pruned as new samples are recorded. */
@@ -381,11 +381,12 @@ export const make = Effect.gen(function* () {
   const resolveLogSources = (settings: ServerSettings) =>
     Effect.gen(function* () {
       const sources: TokenLogSource[] = [];
-      if (settings.providers.claudeAgent.enabled) {
-        const home = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
+      const claude = defaultClaudeInstanceSettings(settings);
+      if (claude.config.enabled) {
+        const configDir = yield* resolveClaudeConfigDirPath(claude.config, claude.environment);
         sources.push({
           provider: "claude",
-          directory: path.join(home, ".claude", "projects"),
+          directory: path.join(configDir, "projects"),
           extension: ".jsonl",
           format: "jsonl",
         });

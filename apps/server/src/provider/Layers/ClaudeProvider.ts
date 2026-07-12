@@ -8,9 +8,11 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
@@ -51,6 +53,20 @@ const CLAUDE_PRESENTATION = {
 const MINIMUM_CLAUDE_FABLE_5_VERSION = "2.1.169";
 const MINIMUM_CLAUDE_OPUS_4_8_VERSION = "2.1.154";
 const MINIMUM_CLAUDE_OPUS_4_7_VERSION = "2.1.111";
+
+const ClaudeAuthStatus = Schema.Struct({
+  loggedIn: Schema.Boolean,
+  authMethod: Schema.optionalKey(Schema.String),
+  email: Schema.optionalKey(Schema.String),
+  subscriptionType: Schema.optionalKey(Schema.String),
+  account: Schema.optionalKey(
+    Schema.Struct({
+      email: Schema.optionalKey(Schema.String),
+      subscriptionType: Schema.optionalKey(Schema.String),
+    }),
+  ),
+});
+const decodeClaudeAuthStatus = Schema.decodeUnknownExit(Schema.fromJsonString(ClaudeAuthStatus));
 
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -489,9 +505,6 @@ function nonEmptyProbeString(value: string): string | undefined {
 }
 
 type ClaudeCapabilitiesProbe = {
-  readonly email: string | undefined;
-  readonly subscriptionType: string | undefined;
-  readonly tokenSource: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
 
@@ -577,8 +590,10 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * account info and slash commands) but never starts an API request to
  * Anthropic. We read the init data and then abort the subprocess.
  *
- * This is used as a fallback when `claude auth status` does not include
- * subscription type information.
+ * Authentication itself is checked first with `claude auth status`, which
+ * avoids starting an SDK process for signed-out accounts. This secondary
+ * probe supplies slash commands and subscription metadata not exposed by
+ * every Claude Code version.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -606,17 +621,7 @@ const probeClaudeCapabilities = (
         },
       });
       const init = await q.initializationResult();
-      const account = init.account as
-        | {
-            readonly email?: string;
-            readonly subscriptionType?: string;
-            readonly tokenSource?: string;
-          }
-        | undefined;
       return {
-        email: account?.email,
-        subscriptionType: account?.subscriptionType,
-        tokenSource: account?.tokenSource,
         slashCommands: parseClaudeInitializationCommands(init.commands),
       } satisfies ClaudeCapabilitiesProbe;
     });
@@ -769,13 +774,42 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ? formatClaudeOpus48UpgradeMessage(parsedVersion)
         : formatClaudeOpus47UpgradeMessage(parsedVersion);
 
+  const authProbe = yield* runClaudeCommand(
+    claudeSettings,
+    ["auth", "status"],
+    resolvedEnvironment,
+  ).pipe(Effect.timeoutOption(DEFAULT_TIMEOUT_MS), Effect.result);
+  const authStatus = Result.isSuccess(authProbe)
+    ? Option.getOrUndefined(authProbe.success)?.stdout.trim()
+    : undefined;
+  const decodedAuthStatus = authStatus ? decodeClaudeAuthStatus(authStatus) : undefined;
+  const knownAuthStatus =
+    decodedAuthStatus && Exit.isSuccess(decodedAuthStatus) ? decodedAuthStatus.value : undefined;
+
+  if (knownAuthStatus?.loggedIn === false) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: [],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "warning",
+        auth: { status: "unauthenticated" },
+        message: "Claude Code is signed out. Run `claude auth login` to sign in.",
+      },
+    });
+  }
+
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
-  if (!capabilities) {
+  if (!capabilities && knownAuthStatus?.loggedIn !== true) {
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -793,9 +827,11 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   const authMetadata = claudeAuthMetadata({
-    subscriptionType: capabilities.subscriptionType,
-    authMethod: capabilities.tokenSource,
+    subscriptionType:
+      knownAuthStatus?.subscriptionType ?? knownAuthStatus?.account?.subscriptionType,
+    authMethod: knownAuthStatus?.authMethod,
   });
+  const authEmail = knownAuthStatus?.email ?? knownAuthStatus?.account?.email;
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
@@ -808,7 +844,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       status: "ready",
       auth: {
         status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
+        ...(authEmail ? { email: authEmail } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),

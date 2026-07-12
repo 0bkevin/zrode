@@ -418,8 +418,8 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("runs Claude SDK sessions with the configured Claude HOME", () => {
-    const harness = makeHarness({ claudeConfig: { homePath: "~/.claude-work" } });
+  it.effect("runs Claude SDK sessions with an isolated Claude config directory", () => {
+    const harness = makeHarness({ claudeConfig: { configDirPath: "~/.claude-work" } });
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
       yield* adapter.startSession({
@@ -433,7 +433,11 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      assert.equal(createInput?.options.env?.HOME, NodePath.join(NodeOS.homedir(), ".claude-work"));
+      assert.equal(
+        createInput?.options.env?.CLAUDE_CONFIG_DIR,
+        NodePath.join(NodeOS.homedir(), ".claude-work"),
+      );
+      assert.equal(createInput?.options.env?.HOME, process.env.HOME);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

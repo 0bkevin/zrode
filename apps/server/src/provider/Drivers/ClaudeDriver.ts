@@ -6,9 +6,9 @@
  * closures captured over the per-instance `ClaudeSettings`.
  *
  * Unlike Codex, the Claude snapshot probe may invoke a secondary probe
- * (`probeClaudeCapabilities`) to read Anthropic account + slash-command
- * metadata. That probe is per-instance and keyed by binary + resolved HOME so
- * two concurrent Claude instances don't cross-contaminate account metadata.
+ * (`probeClaudeCapabilities`) to read slash-command metadata. Account identity
+ * always comes from the uncached `claude auth status` probe. The SDK probe is
+ * per-instance and keyed by binary + resolved configuration directory.
  *
  * @module provider/Drivers/ClaudeDriver
  */
@@ -58,7 +58,11 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+// SDK initialization can participate in OAuth token refresh even before a
+// prompt is sent. Slash commands change infrequently, so do not add a fresh
+// Claude process to the refresh lock on every status poll. Account identity is
+// deliberately never served from this cache.
+const CAPABILITIES_PROBE_TTL = Duration.hours(1);
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -132,7 +136,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
-      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
+      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
+        effectiveConfig,
+        processEnv,
+      );
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
@@ -148,8 +155,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);
 
-      // Per-instance capabilities cache: keyed on binary + resolved HOME so
-      // account-specific probes never share auth metadata across instances.
+      // Per-instance slash-command cache, keyed on binary + resolved config.
       const capabilitiesProbeCache = yield* Cache.make({
         capacity: 1,
         timeToLive: CAPABILITIES_PROBE_TTL,
@@ -158,7 +164,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.provideService(Path.Path, path),
           ),
       });
-      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(effectiveConfig);
+      const capabilitiesCacheKey = yield* makeClaudeCapabilitiesCacheKey(
+        effectiveConfig,
+        processEnv,
+      );
 
       const checkProvider = checkClaudeProviderStatus(
         effectiveConfig,

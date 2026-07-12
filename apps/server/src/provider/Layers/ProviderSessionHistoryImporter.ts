@@ -32,7 +32,10 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { resolveClaudeHomePath } from "../Drivers/ClaudeHome.ts";
+import {
+  defaultClaudeInstanceSettings,
+  resolveClaudeConfigDirPath,
+} from "../Drivers/ClaudeHome.ts";
 import { materializeCodexShadowHome, resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { OpenCodeRuntime, openCodeRuntimeErrorDetail, runOpenCodeSdk } from "../opencodeRuntime.ts";
@@ -513,11 +516,12 @@ const make = Effect.gen(function* () {
     settings: ServerSettings,
   ) =>
     Effect.gen(function* () {
-      if (!settings.providers.claudeAgent.enabled) return [];
-      const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
+      const claude = defaultClaudeInstanceSettings(settings);
+      if (!claude.config.enabled) return [];
+      const claudeConfigDir = yield* resolveClaudeConfigDirPath(claude.config, claude.environment);
       const normalizedWorkspaceRoot = normalizePathValue(path, input.workspaceRoot);
       const projectDirectoryName = encodeClaudeProjectDirectoryName(normalizedWorkspaceRoot);
-      const projectDirectory = path.join(claudeHome, ".claude", "projects", projectDirectoryName);
+      const projectDirectory = path.join(claudeConfigDir, "projects", projectDirectoryName);
       const entries = yield* fs
         .readDirectory(projectDirectory, { recursive: true })
         .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));

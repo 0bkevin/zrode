@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ProviderUsageSnapshot,
   type ServerSettings,
 } from "@t3tools/contracts";
@@ -19,6 +21,8 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 import * as ProcessRunner from "../processRunner.ts";
 import {
   __testing,
+  claudeCredentialSourceKey,
+  claudeKeychainServiceName,
   consumeCodexResetCredit,
   fetchGrokUsage,
   getProviderUsage,
@@ -148,6 +152,50 @@ describe("parseClaudeOAuthCredentials", () => {
       parseClaudeOAuthCredentials(JSON.stringify({ claudeAiOauth: { accessToken: "" } })),
     ).toBeNull();
     expect(parseClaudeOAuthCredentials("not json")).toBeNull();
+  });
+});
+
+describe("claudeKeychainServiceName", () => {
+  it("uses Claude Code's default service for the default config directory", () => {
+    expect(claudeKeychainServiceName("/Users/test/.claude", false)).toBe("Claude Code-credentials");
+  });
+
+  it("uses Claude Code's config-scoped service for an isolated account", () => {
+    expect(claudeKeychainServiceName("/Users/test/.claude-work/.claude", true)).toBe(
+      "Claude Code-credentials-2212dfe3",
+    );
+    expect(claudeKeychainServiceName("/Users/test/.claude-work/.claude", true)).not.toBe(
+      claudeKeychainServiceName("/Users/test/.claude-personal/.claude", true),
+    );
+  });
+
+  it("normalizes Unicode paths before deriving the Keychain service", () => {
+    expect(claudeKeychainServiceName("/Users/test/.claude-cafe\u0301", true)).toBe(
+      claudeKeychainServiceName("/Users/test/.claude-café", true),
+    );
+  });
+});
+
+describe("claudeCredentialSourceKey", () => {
+  it("changes for secure-storage directories and Keychain accounts", () => {
+    const configDir = "/Users/test/.claude";
+    const first = claudeCredentialSourceKey(configDir, {
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: "/Users/test/.claude-personal",
+      USER: "alice",
+    });
+
+    expect(
+      claudeCredentialSourceKey(configDir, {
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: "/Users/test/.claude-work",
+        USER: "alice",
+      }),
+    ).not.toBe(first);
+    expect(
+      claudeCredentialSourceKey(configDir, {
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: "/Users/test/.claude-personal",
+        USER: "bob",
+      }),
+    ).not.toBe(first);
   });
 });
 
@@ -544,6 +592,25 @@ describe("usageSettingsKey", () => {
     );
     expect(providerUsageSettingsKey("codex", otherClaudeHome)).toBe(
       providerUsageSettingsKey("codex", DISABLED_SETTINGS),
+    );
+  });
+
+  it("keys Claude usage from the explicit default provider instance", () => {
+    const settings: ServerSettings = {
+      ...DISABLED_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("claudeAgent")]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          environment: [
+            { name: "CLAUDE_CONFIG_DIR", value: "/tmp/instance-claude", sensitive: false },
+          ],
+          config: { enabled: true },
+        },
+      } as ServerSettings["providerInstances"],
+    };
+
+    expect(providerUsageSettingsKey("claude", settings)).not.toBe(
+      providerUsageSettingsKey("claude", DISABLED_SETTINGS),
     );
   });
 });

@@ -13,7 +13,9 @@ Methods mirror the `NativeApi` interface defined in `@t3tools/contracts`:
 - `providers.respondToRequest`, `providers.stopSession`
 - `shell.openInEditor`, `server.getConfig`
 
-Codex is the only implemented provider. `claudeCode` is reserved in contracts/UI.
+The built-in provider registry currently includes Codex, Claude Agent SDK, OpenCode, Cursor, Grok,
+GitHub Copilot, and Devin drivers. Each configured provider instance owns its snapshot, adapter,
+text-generation backend, environment, and continuation identity.
 
 ## Client transport
 
