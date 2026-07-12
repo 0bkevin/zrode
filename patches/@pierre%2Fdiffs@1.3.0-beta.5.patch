@@ -199,3 +199,49 @@ index 1da9163b8..d58924c3c 100644
 -		let state = this.#stateStack[line] ?? INITIAL;
 @@ -161,0 +161 @@
 +		let state = this.#stateStack[line] ?? INITIAL;
+diff --git a/dist/components/Virtualizer.js b/dist/components/Virtualizer.js
+--- a/dist/components/Virtualizer.js
++++ b/dist/components/Virtualizer.js
+@@ -42,0 +43 @@
++	programmaticScrollPending = false;
+@@ -233,0 +235,2 @@
++		const preserveProgrammaticScroll = this.programmaticScrollPending;
++		this.programmaticScrollPending = false;
+@@ -241 +244 @@
+-		this.scrollFix(anchor);
++		if (!preserveProgrammaticScroll) this.scrollFix(anchor);
+@@ -283,0 +287,14 @@
++	beginProgrammaticScroll() {
++		this.programmaticScrollPending = true;
++	}
++	finishProgrammaticScroll() {
++		const scrollContainer = this.getScrollContainerElement();
++		if (scrollContainer != null) {
++			const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
++			if (scrollContainer.scrollTop > maxScrollTop) scrollContainer.scrollTo({
++				top: maxScrollTop,
++				behavior: "instant"
++			});
++		}
++		this.markDOMDirty();
++	}
+diff --git a/dist/editor/editor.js b/dist/editor/editor.js
+--- a/dist/editor/editor.js
++++ b/dist/editor/editor.js
+@@ -822,0 +823,6 @@
++	}
++	#beginProgrammaticScroll() {
++		this.#fileInstance?.getSimpleVirtualizer?.()?.beginProgrammaticScroll?.();
++	}
++	#finishProgrammaticScroll() {
++		this.#fileInstance?.getSimpleVirtualizer?.()?.finishProgrammaticScroll?.();
+@@ -828,0 +835 @@
++			this.#beginProgrammaticScroll();
+@@ -832,0 +840 @@
++			this.#finishProgrammaticScroll();
+@@ -860,0 +869 @@
++			this.#beginProgrammaticScroll();
+@@ -885,0 +895 @@
++			this.#beginProgrammaticScroll();
+@@ -900,0 +911 @@
++		this.#finishProgrammaticScroll();

@@ -83,7 +83,11 @@ import {
 } from "./editableFileState";
 import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
-import { fileRevealTargetLine, fileRevealTargetToEditorSelection } from "./fileRevealSelection";
+import {
+  fileRevealTargetLine,
+  fileRevealTargetToEditorSelection,
+  shouldManuallyScrollFileReveal,
+} from "./fileRevealSelection";
 import { fileDocumentErrorMessage, useFileDocument } from "./fileDocumentRuntime";
 import type { FileDocumentHandle, FileDocumentSnapshot } from "./fileDocumentStore";
 import {
@@ -235,7 +239,13 @@ function useFileReveal(
       mounted.fileContainer,
       latest.revealTarget?.kind === "line" ? targetLine : null,
     );
-    if (!(mounted.instance instanceof VirtualizedFile) || targetLine === null) return;
+    if (
+      !(mounted.instance instanceof VirtualizedFile) ||
+      targetLine === null ||
+      !shouldManuallyScrollFileReveal(latest.revealTarget)
+    ) {
+      return;
+    }
     const virtualizedFile = mounted.instance;
     if (
       handledRequestIdsByPathRef.current.get(latest.relativePath) === latest.revealRequestId ||
@@ -347,6 +357,8 @@ function EditableFileSurface({
   const selectionFrameRef = useRef<number | null>(null);
   const revealSelectionFrameRef = useRef<number | null>(null);
   const handledRevealRequestIdRef = useRef<number | null>(null);
+  const editorReadyRef = useRef(false);
+  const scheduleRevealSelectionRef = useRef<() => void>(() => {});
   // The Pierre editor owns the text document while the user types: handing its own
   // onChange contents back through a new `file` prop makes it rebuild the document,
   // which drops focus, caret position, and undo history on every keystroke. Keep the
@@ -377,6 +389,10 @@ function EditableFileSurface({
   const editor = useMemo(
     () =>
       new Editor<FileCommentAnnotationGroup>({
+        onAttach: () => {
+          editorReadyRef.current = true;
+          scheduleRevealSelectionRef.current();
+        },
         onChange: (file, nextLineAnnotations) => {
           const nextContents = file.contents;
           setFileState((current) => updateLocalEditorContents(current, nextContents));
@@ -421,6 +437,7 @@ function EditableFileSurface({
 
     const latestReveal = latestRevealSelectionRef.current;
     if (
+      !editorReadyRef.current ||
       latestReveal.revealTarget?.kind !== "range" ||
       handledRevealRequestIdRef.current === latestReveal.revealRequestId
     ) {
@@ -432,6 +449,7 @@ function EditableFileSurface({
       const surface = surfaceRef.current;
       const currentReveal = latestRevealSelectionRef.current;
       if (
+        !editorReadyRef.current ||
         !surface?.isConnected ||
         currentReveal.revealTarget?.kind !== "range" ||
         handledRevealRequestIdRef.current === currentReveal.revealRequestId
@@ -448,6 +466,7 @@ function EditableFileSurface({
       handledRevealRequestIdRef.current = currentReveal.revealRequestId;
     });
   }, [editor]);
+  scheduleRevealSelectionRef.current = scheduleRevealSelection;
 
   // A search result can target another range in the file that is already
   // mounted. Pierre does not emit onPostRender when only this external reveal
@@ -458,6 +477,7 @@ function EditableFileSurface({
 
   useEffect(
     () => () => {
+      editorReadyRef.current = false;
       editor.cleanUp();
     },
     [editor],

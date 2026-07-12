@@ -6,6 +6,7 @@ import {
   type RenderFileOptions,
   type ThemedFileResult,
   VirtualizedFile,
+  Virtualizer,
 } from "@pierre/diffs";
 import { TextDocument } from "@pierre/diffs/editor";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -117,6 +118,38 @@ function expectRejectedWithoutMutation(
 }
 
 describe("Pierre editable file highlighting", () => {
+  it("preserves editor-driven scrolls and clamps stale space below the file", () => {
+    const markDOMDirty = vi.fn();
+    const scrollTo = vi.fn();
+    const scrollContainer = {
+      clientHeight: 400,
+      scrollHeight: 1_000,
+      scrollTop: 900,
+      scrollTo,
+    };
+    const fixture = {
+      getScrollContainerElement: () => scrollContainer,
+      markDOMDirty,
+      programmaticScrollPending: false,
+    };
+    const patchedPrototype = Virtualizer.prototype as unknown as {
+      beginProgrammaticScroll(this: typeof fixture): void;
+      finishProgrammaticScroll(this: typeof fixture): void;
+    };
+
+    Reflect.apply(patchedPrototype.beginProgrammaticScroll, fixture, []);
+    expect(fixture.programmaticScrollPending).toBe(true);
+
+    Reflect.apply(patchedPrototype.finishProgrammaticScroll, fixture, []);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 600, behavior: "instant" });
+    expect(markDOMDirty).toHaveBeenCalledTimes(1);
+
+    scrollTo.mockClear();
+    scrollContainer.scrollTop = 500;
+    Reflect.apply(patchedPrototype.finishProgrammaticScroll, fixture, []);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
   it("syncs same-line virtualized edits without invalidating scroll layout", () => {
     const applyDocumentChange = vi.fn();
     const markDOMDirty = vi.fn();

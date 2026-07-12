@@ -4,6 +4,7 @@ import {
   clampFileRevealTarget,
   fileRevealTargetLine,
   fileRevealTargetToEditorSelection,
+  shouldManuallyScrollFileReveal,
 } from "./fileRevealSelection";
 
 describe("file reveal selection", () => {
@@ -41,5 +42,17 @@ describe("file reveal selection", () => {
       start: { line: 1, column: 2 },
       end: { line: 2, column: 4 },
     });
+  });
+
+  it("assigns exactly one scroll owner to every reveal kind", () => {
+    expect(shouldManuallyScrollFileReveal({ kind: "line", line: 10 })).toBe(true);
+    expect(
+      shouldManuallyScrollFileReveal({
+        kind: "range",
+        start: { line: 10, column: 2 },
+        end: { line: 10, column: 5 },
+      }),
+    ).toBe(false);
+    expect(shouldManuallyScrollFileReveal(null)).toBe(false);
   });
 });

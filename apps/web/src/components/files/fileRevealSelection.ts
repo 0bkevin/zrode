@@ -69,3 +69,13 @@ export function fileRevealTargetLine(
   const clamped = clampFileRevealTarget(contents, target);
   return clamped.kind === "line" ? clamped.line : clamped.start.line;
 }
+
+/**
+ * Line links are passive highlights and need the file virtualizer to reveal
+ * them. Range targets are editor selections: Pierre already centers those
+ * when `Editor.setSelections` runs. Letting both paths scroll the same range
+ * makes the two virtual-scroll corrections fight and visibly oscillate.
+ */
+export function shouldManuallyScrollFileReveal(target: FileRevealTarget | null): boolean {
+  return target?.kind === "line";
+}
