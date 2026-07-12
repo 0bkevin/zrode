@@ -47,7 +47,10 @@ async function makeMockAgentWrapper(
 ) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-mock-"));
   const wrapperPath = NodePath.join(dir, "fake-agent.sh");
-  const envExports = Object.entries(extraEnv ?? {})
+  const envExports = Object.entries({
+    ZRODE_ACP_AUTH_METHOD_ID: "cursor_login",
+    ...extraEnv,
+  })
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
   const script = `#!/bin/sh
@@ -74,6 +77,7 @@ async function makeProbeWrapper(
 printf '%s\t' "$@" >> ${JSON.stringify(argvLogPath)}
 printf '\n' >> ${JSON.stringify(argvLogPath)}
 export ZRODE_ACP_REQUEST_LOG_PATH=${JSON.stringify(requestLogPath)}
+export ZRODE_ACP_AUTH_METHOD_ID=cursor_login
 ${envExports}
 exec ${JSON.stringify(mockAgentCommand)} ${mockAgentArgs.map((arg) => JSON.stringify(arg)).join(" ")} "$@"
 `;

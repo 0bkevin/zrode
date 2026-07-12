@@ -3,7 +3,7 @@ import type { EnvironmentId, ProjectFileEvent, ProjectListEntriesResult } from "
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { projectEnvironment } from "~/state/projects";
 
@@ -39,6 +39,28 @@ export function shouldRefreshProjectEntries(event: ProjectFileEvent): boolean {
   return event.type !== "changed" || event.structuralPaths.length > 0;
 }
 
+export interface ProjectEntriesRefreshDecision {
+  readonly sequence: number | null;
+  readonly shouldRefresh: boolean;
+}
+
+export function projectEntriesRefreshDecision(
+  previousSequence: number | null,
+  event: ProjectFileEvent,
+): ProjectEntriesRefreshDecision {
+  if (!("sequence" in event)) {
+    return { sequence: null, shouldRefresh: true };
+  }
+  const sequenceWasSkippedOrReset =
+    previousSequence === null ||
+    event.sequence > previousSequence + 1 ||
+    event.sequence < previousSequence;
+  return {
+    sequence: event.sequence,
+    shouldRefresh: sequenceWasSkippedOrReset || shouldRefreshProjectEntries(event),
+  };
+}
+
 export function useProjectEntriesQuery(
   environmentId: EnvironmentId,
   cwd: string,
@@ -51,12 +73,27 @@ export function useProjectEntriesQuery(
   const refreshAtom = useAtomRefresh(atom);
   const refresh = useCallback(() => refreshAtom(), [refreshAtom]);
   const latestFileEvent = Option.getOrNull(AsyncResult.value(fileEventResult));
+  const eventSequenceRef = useRef<{
+    readonly queryKey: string;
+    sequence: number | null;
+  } | null>(null);
+  const queryKey = `${environmentId}\0${cwd}`;
 
   useEffect(() => {
-    if (latestFileEvent !== null && shouldRefreshProjectEntries(latestFileEvent)) {
+    const sequenceState = eventSequenceRef.current;
+    const previousSequence = sequenceState?.queryKey === queryKey ? sequenceState.sequence : null;
+    if (latestFileEvent === null || latestFileEvent.cwd !== cwd) {
+      if (sequenceState?.queryKey !== queryKey) {
+        eventSequenceRef.current = { queryKey, sequence: null };
+      }
+      return;
+    }
+    const decision = projectEntriesRefreshDecision(previousSequence, latestFileEvent);
+    eventSequenceRef.current = { queryKey, sequence: decision.sequence };
+    if (decision.shouldRefresh) {
       refreshAtom();
     }
-  }, [latestFileEvent, refreshAtom]);
+  }, [cwd, latestFileEvent, queryKey, refreshAtom]);
 
   return {
     data: Option.getOrNull(AsyncResult.value(result)),

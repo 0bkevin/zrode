@@ -426,4 +426,21 @@ describe("Pierre editable file highlighting", () => {
     expect(fixture.internals.renderCache?.highlighted).toBe(true);
     expect(fixture.onRenderUpdate).toHaveBeenCalledTimes(1);
   });
+
+  it("notifies when a valid live result replaces an already-highlighted result", () => {
+    const fixture = createLiveFixture(true);
+    const acceptedResult = resultFor("const liveValue = 2;", "return liveValue;");
+
+    fixture.internals.onHighlightSuccess(
+      fixture.file,
+      acceptedResult,
+      renderOptions,
+      true,
+      fixture.liveSource,
+    );
+
+    expect(fixture.internals.renderCache?.result).toBe(acceptedResult);
+    expect(fixture.internals.renderCache?.highlighted).toBe(true);
+    expect(fixture.onRenderUpdate).toHaveBeenCalledTimes(1);
+  });
 });

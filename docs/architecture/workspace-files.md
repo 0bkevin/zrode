@@ -334,6 +334,27 @@ Workspace refreshes preserve expansion where the tree API permits. The
 explorer/editor split has a persisted, clamped internal width and accessible
 resize affordance.
 
+Basic inline file and directory creation is now available. File creation uses
+the revisioned `must-not-exist` write path; directory creation validates and
+pins the existing parent before one non-recursive mutation. These operations
+refresh the coarse index and keep an optimistic row only while that refresh
+converges. Permanent deletion is a two-phase typed operation. Before showing
+confirmation, the server returns an opaque revision covering root, path, kind,
+device, inode, ctime, and every recursive descendant. Commit must present that
+exact revision; files are always non-recursive and directories always
+recursive. The server revalidates the tree under an exclusive root mutation
+permit, atomically moves the entry to a private tombstone, verifies the detached
+tree, then removes it. Writes and creates use shared permits, so independent
+targets remain concurrent. A failed removal restores the original name when
+safe. If it is occupied or restoration fails, the entry is exposed beside it
+under a collision-safe `*.zrode-recovered-*` name and a structured partial
+failure is returned. Only failure of both recovery moves can leave a hidden
+tombstone. The explorer blocks
+deletion while an affected document has unsaved state, presents an irreversible
+confirmation, and closes affected clean file tabs only after server success.
+Final symlinks are rejected rather than followed. Rename remains deferred
+because it additionally needs stable source identity and document re-keying.
+
 ## Deferred roadmap
 
 The dependency order matters. Building these as independent UI actions would
@@ -354,17 +375,15 @@ The explorer can then apply deltas to stable row objects, correlate a rename
 without closing its document, and preserve expansion/selection without a full
 path reset. This phase is the prerequisite for mutation UI.
 
-### 2. Create, rename, and delete
+### 2. Rename and recoverable delete
 
-Add typed server operations with operation IDs and explicit preconditions:
-create requires nonexistence, rename requires the source identity/revision and
-destination policy, and delete requires the source identity/revision. The
-worktree store correlates its own operation ID with watcher echoes. Rename must
-re-key the canonical document only after server success; delete moves dirty
-documents to orphaned state. The initial UX should include inline create and
-rename, recoverable trash where the host supports it, permanent-delete
-confirmation otherwise, and predictable conflict messages. Drag/drop,
-clipboard, and undo can build on those same operations.
+Add typed rename and recoverable-trash operations with operation IDs and
+explicit preconditions. Rename requires source identity/revision and a
+destination policy. The worktree store correlates its own operation ID with
+watcher echoes, and rename re-keys the canonical document only after server
+success. Permanent delete already has identity revalidation and confirmation;
+recoverable trash still needs host capability detection and restoration UX.
+Drag/drop, clipboard, and undo can build on those same operations.
 
 ### 3. Hot exit and cross-window unsaved state
 
@@ -395,7 +414,7 @@ clear policy choice instead of claiming both guarantees.
 Remaining deferred items include:
 
 - revisioned worktree snapshots, stable IDs, and rename preservation;
-- explorer create, rename, delete, drag/drop, clipboard, and undo;
+- explorer rename, recoverable trash, drag/drop, clipboard, and undo;
 - multi-root workspaces and provider/extension filesystem abstractions;
 - cross-window live unsaved-document synchronization;
 - persistence of Pierre's private undo stack across unmounted editor widgets;

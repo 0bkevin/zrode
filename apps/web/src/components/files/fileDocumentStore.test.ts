@@ -177,6 +177,39 @@ describe("FileDocumentStore", () => {
     expect(write).toHaveBeenCalledTimes(1);
   });
 
+  it("does not schedule a retry when an in-flight write fails after disposal", async () => {
+    const pendingWrite = deferred<FileDocumentWriteResult>();
+    const write = vi
+      .fn<FileDocumentAdapters["write"]>()
+      .mockImplementationOnce(() => pendingWrite.promise)
+      .mockResolvedValueOnce(writeResult("r1"));
+    const store = new FileDocumentStore(
+      {
+        read: async () => readResult("initial", "r0"),
+        write,
+        classifyError,
+      },
+      {
+        retryMinDelayMs: 100,
+        retryMaxDelayMs: 100,
+        pollIntervalMs: null,
+        listenToBrowserFocus: false,
+      },
+    );
+    const handle = await store.open(baseKey);
+    handle.edit("local edit");
+    const flush = handle.flush();
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+
+    store.dispose();
+    pendingWrite.reject(failure("transient"));
+    await flush;
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(handle.getSnapshot()).toMatchObject({ status: "retrying", isDirty: true });
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
   it("lets polling acknowledge a committed save whose response was lost", async () => {
     const read = vi
       .fn<FileDocumentAdapters["read"]>()
@@ -283,6 +316,95 @@ describe("FileDocumentStore", () => {
       isDirty: false,
     });
   });
+
+  it("recovers a clean orphaned document when the same bytes are recreated", async () => {
+    const read = vi
+      .fn<FileDocumentAdapters["read"]>()
+      .mockResolvedValueOnce(readResult("first", "r0"))
+      .mockRejectedValueOnce(failure("orphaned"))
+      .mockResolvedValueOnce(readResult("first", "r0"));
+    const store = createStore({
+      read,
+      write: async () => writeResult("unused"),
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+
+    await handle.refresh();
+    expect(handle.getSnapshot()).toMatchObject({ status: "orphaned", isDirty: false });
+
+    await handle.refresh();
+    expect(handle.getSnapshot()).toMatchObject({
+      status: "clean",
+      contents: "first",
+      baseDiskRevision: "r0",
+      isDirty: false,
+      error: null,
+    });
+  });
+
+  it("does not publish a replacement snapshot for an unchanged clean poll", async () => {
+    const read = vi.fn<FileDocumentAdapters["read"]>().mockResolvedValue(readResult("first", "r0"));
+    const store = createStore({
+      read,
+      write: async () => writeResult("unused"),
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+    const snapshot = handle.getSnapshot();
+    const listener = vi.fn();
+    const unsubscribe = handle.subscribe(listener);
+
+    await handle.refresh();
+
+    expect(handle.getSnapshot()).toBe(snapshot);
+    expect(listener).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it.each(["conflict", "orphaned"] as const)(
+    "resumes a dirty %s document when disk returns to its baseline",
+    async (terminalStatus) => {
+      let readCount = 0;
+      const read = vi.fn<FileDocumentAdapters["read"]>().mockImplementation(async () => {
+        readCount += 1;
+        if (readCount === 1 || readCount === 3) return readResult("first", "r0");
+        if (terminalStatus === "orphaned") throw failure("orphaned");
+        return readResult("external", "r1");
+      });
+      const write = vi.fn<FileDocumentAdapters["write"]>().mockResolvedValue(writeResult("r2"));
+      const store = createStore({ read, write, classifyError });
+      const handle = await store.open(baseKey);
+      handle.edit("local edit");
+      const resumeAutosave = handle.suspendAutosave();
+
+      await handle.refresh();
+      expect(handle.getSnapshot()).toMatchObject({ status: terminalStatus, isDirty: true });
+
+      await handle.refresh();
+      expect(handle.getSnapshot()).toMatchObject({
+        status: "dirty",
+        contents: "local edit",
+        baseDiskRevision: "r0",
+        latestRemote: { contents: "first", diskRevision: "r0" },
+        isDirty: true,
+        error: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(write).not.toHaveBeenCalled();
+
+      resumeAutosave();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(handle.getSnapshot().status).toBe("clean"));
+      expect(write).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contents: "local edit",
+          precondition: { _tag: "match", diskRevision: "r0" },
+        }),
+      );
+    },
+  );
 
   it("preserves local text and enters conflict when a dirty file changes externally", async () => {
     let remote = readResult("first", "r0");
@@ -481,6 +603,30 @@ describe("FileDocumentStore", () => {
     await handle.retry();
     expect(write).toHaveBeenCalledTimes(2);
     expect(handle.getSnapshot()).toMatchObject({ status: "clean", isDirty: false });
+  });
+
+  it("does not clear a permanent dirty write error after a successful baseline read", async () => {
+    const writeError = failure("permanent");
+    const write = vi.fn<FileDocumentAdapters["write"]>().mockRejectedValue(writeError);
+    const store = createStore({
+      read: async () => readResult("first", "r0"),
+      write,
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+    handle.edit("local edit");
+    await handle.flush();
+
+    await handle.refresh();
+
+    expect(handle.getSnapshot()).toMatchObject({
+      status: "error",
+      contents: "local edit",
+      isDirty: true,
+      error: writeError,
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(write).toHaveBeenCalledTimes(1);
   });
 
   it("retries a transient overwrite re-read instead of staying retrying forever", async () => {
@@ -705,5 +851,28 @@ describe("FileDocumentStore", () => {
     expect(first.getSnapshot().contents).toBe("/workspace/one");
     expect(second.getSnapshot().contents).toBe("/workspace/two");
     expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds safe unmounted document retention with LRU eviction", async () => {
+    const store = new FileDocumentStore(
+      {
+        read: async (key) => ({
+          ...readResult(key.relativePath, `revision:${key.relativePath}`),
+          relativePath: key.relativePath,
+        }),
+        write: async () => writeResult("unused"),
+        classifyError,
+      },
+      { maxCachedDocuments: 1, cleanTtlMs: 60_000, pollIntervalMs: null },
+    );
+    const firstKey = { ...baseKey, relativePath: "first.ts" };
+    const secondKey = { ...baseKey, relativePath: "second.ts" };
+    const first = await store.open(firstKey);
+    await first.release();
+    const second = await store.open(secondKey);
+    await second.release();
+
+    expect(store.getSnapshot(firstKey)).toBeNull();
+    expect(store.getSnapshot(secondKey)?.contents).toBe("second.ts");
   });
 });

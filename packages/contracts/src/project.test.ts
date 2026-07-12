@@ -2,8 +2,11 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  PROJECT_SEARCH_TEXT_MAX_PATTERNS_PER_LIST,
   ProjectCreateDirectoryInput,
   ProjectCreateDirectoryResult,
+  ProjectDeleteEntryInput,
+  ProjectDeleteEntryResult,
   ProjectFileDiskRevision,
   ProjectReadFileError,
   ProjectFileEvent,
@@ -112,7 +115,7 @@ describe("project file events", () => {
   it("keeps path changes explicitly lossy and bounded", () => {
     expect(
       decode({
-        version: 1,
+        version: 2,
         sequence: 2,
         type: "changed",
         cwd: "/workspace",
@@ -122,7 +125,7 @@ describe("project file events", () => {
     ).toMatchObject({ type: "changed", sequence: 2 });
     expect(() =>
       decode({
-        version: 1,
+        version: 2,
         sequence: 3,
         type: "changed",
         cwd: "/workspace",
@@ -131,9 +134,66 @@ describe("project file events", () => {
       }),
     ).toThrow();
   });
+
+  it("decodes legacy v1 and sequenced v2 watcher events", () => {
+    expect(decode({ version: 1, type: "ready", cwd: "/workspace" })).toEqual({
+      version: 1,
+      type: "ready",
+      cwd: "/workspace",
+    });
+    expect(
+      decode({
+        version: 2,
+        sequence: 7,
+        type: "changed",
+        cwd: "/workspace",
+        contentPaths: ["src/a.ts"],
+        structuralPaths: [],
+      }),
+    ).toMatchObject({ version: 2, sequence: 7, type: "changed" });
+  });
 });
 
 describe("project workspace editing contracts", () => {
+  it("requires explicit permanent and recursive deletion semantics", () => {
+    const decodeInput = Schema.decodeUnknownSync(ProjectDeleteEntryInput);
+    const decodeResult = Schema.decodeUnknownSync(ProjectDeleteEntryResult);
+    expect(
+      decodeInput({
+        cwd: "/workspace",
+        relativePath: "src/old",
+        expectedKind: "directory",
+        recursive: true,
+        entryRevision: "a".repeat(64),
+        permanentlyDelete: true,
+      }),
+    ).toMatchObject({ expectedKind: "directory", recursive: true, permanentlyDelete: true });
+    expect(() =>
+      decodeInput({
+        cwd: "/workspace",
+        relativePath: "src/old",
+        expectedKind: "directory",
+        recursive: true,
+        entryRevision: "a".repeat(64),
+        permanentlyDelete: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeInput({
+        cwd: "/workspace",
+        relativePath: "src/old",
+        expectedKind: "directory",
+        recursive: false,
+        entryRevision: "a".repeat(64),
+        permanentlyDelete: true,
+      }),
+    ).toThrow();
+    expect(decodeResult({ relativePath: "src/old", deletedKind: "directory" })).toEqual({
+      relativePath: "src/old",
+      deletedKind: "directory",
+    });
+  });
+
   it("decodes directory creation inputs and results", () => {
     expect(
       decodeProjectCreateDirectoryInput({
@@ -189,6 +249,21 @@ describe("project workspace editing contracts", () => {
         includes: [],
         excludes: [],
         limit: 2_001,
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeInput({
+        cwd: "/workspace",
+        query: "needle",
+        isRegex: false,
+        matchCase: false,
+        wholeWord: false,
+        includes: Array.from(
+          { length: PROJECT_SEARCH_TEXT_MAX_PATTERNS_PER_LIST + 1 },
+          (_, index) => `pattern-${index}`,
+        ),
+        excludes: [],
+        limit: 200,
       }),
     ).toThrow();
   });

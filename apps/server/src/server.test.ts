@@ -4469,7 +4469,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
-  it.effect("routes websocket rpc projects.createDirectory and projects.searchText", () =>
+  it.effect("routes websocket rpc project creation, deletion, and text search", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -4502,7 +4502,26 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               excludes: [],
               limit: 100,
             }).pipe(Stream.runCollect);
-            return { directory, directoryCollision, searchEvents: Array.from(searchEvents) };
+            const preparedDelete = yield* client[WS_METHODS.projectsPrepareDeleteEntry]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+              expectedKind: "directory",
+              recursive: true,
+            });
+            const deleted = yield* client[WS_METHODS.projectsDeleteEntry]({
+              cwd: workspaceDir,
+              relativePath: "src/features",
+              expectedKind: "directory",
+              recursive: true,
+              entryRevision: preparedDelete.entryRevision,
+              permanentlyDelete: true,
+            });
+            return {
+              directory,
+              directoryCollision,
+              deleted,
+              searchEvents: Array.from(searchEvents),
+            };
           }),
         ),
       );
@@ -4510,7 +4529,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(response.directory, {
         relativePath: "src/features",
       });
-      assert.equal((yield* fs.stat(path.join(workspaceDir, "src/features"))).type, "Directory");
+      assert.deepEqual(response.deleted, {
+        relativePath: "src/features",
+        deletedKind: "directory",
+      });
+      assert.isFalse(yield* fs.exists(path.join(workspaceDir, "src/features")));
       if (
         response.directoryCollision._tag !== "Failure" ||
         response.directoryCollision.failure._tag !== "ProjectCreateDirectoryError"
@@ -4568,7 +4591,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.deepInclude(events[0], { version: 1, sequence: 0, type: "ready", cwd: workspaceDir });
+      assert.deepInclude(events[0], { version: 2, sequence: 0, type: "ready", cwd: workspaceDir });
       assert.equal(events[1]?.type, "changed");
       if (events[1]?.type === "changed") {
         assert.include(events[1].structuralPaths, "streamed.txt");

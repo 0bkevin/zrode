@@ -92,6 +92,7 @@ interface RightPanelStoreState {
   closeTerminal: (ref: ScopedThreadRef, surfaceId: string, terminalId: string) => void;
   activateSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
+  closeSurfaces: (ref: ScopedThreadRef, surfaceIds: readonly string[]) => void;
   closeOtherSurfaces: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurfacesToRight: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeAllSurfaces: (ref: ScopedThreadRef) => void;
@@ -256,6 +257,39 @@ function closeFileSurfacesInThread(
     ...current,
     activeSurfaceId,
     surfaces: nextSurfaces,
+  };
+}
+
+function closeSurfacesInThread(
+  current: ThreadRightPanelState,
+  requestedSurfaceIds: ReadonlySet<string>,
+): ThreadRightPanelState {
+  const closedIds = new Set<string>(
+    current.surfaces
+      .filter((surface) => requestedSurfaceIds.has(surface.id))
+      .map((surface) => surface.id),
+  );
+  if (closedIds.size === 0) return current;
+
+  const surfaces = current.surfaces.filter((surface) => !closedIds.has(surface.id));
+  let activeSurfaceId = current.activeSurfaceId;
+  if (activeSurfaceId !== null && closedIds.has(activeSurfaceId)) {
+    const activeIndex = current.surfaces.findIndex((surface) => surface.id === activeSurfaceId);
+    const nextSurface = current.surfaces
+      .slice(activeIndex + 1)
+      .find((surface) => !closedIds.has(surface.id));
+    const previousSurface = current.surfaces
+      .slice(0, activeIndex)
+      .toReversed()
+      .find((surface) => !closedIds.has(surface.id));
+    activeSurfaceId = nextSurface?.id ?? previousSurface?.id ?? null;
+  }
+
+  return {
+    ...current,
+    isOpen: current.isOpen && surfaces.length > 0,
+    activeSurfaceId,
+    surfaces,
   };
 }
 
@@ -574,22 +608,18 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
         })),
       closeSurface: (ref, surfaceId) =>
         set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const index = current.surfaces.findIndex((surface) => surface.id === surfaceId);
-            if (index < 0) return current;
-            const surfaces = current.surfaces.filter((surface) => surface.id !== surfaceId);
-            if (current.activeSurfaceId !== surfaceId) {
-              return { ...current, isOpen: surfaces.length > 0 && current.isOpen, surfaces };
-            }
-            const fallback = surfaces[Math.min(index, surfaces.length - 1)] ?? null;
-            return {
-              ...current,
-              isOpen: surfaces.length > 0 && current.isOpen,
-              surfaces,
-              activeSurfaceId: fallback?.id ?? null,
-            };
-          }),
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            closeSurfacesInThread(current, new Set([surfaceId])),
+          ),
         })),
+      closeSurfaces: (ref, surfaceIds) => {
+        const requestedSurfaceIds = new Set(surfaceIds);
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            closeSurfacesInThread(current, requestedSurfaceIds),
+          ),
+        }));
+      },
       closeOtherSurfaces: (ref, surfaceId) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {

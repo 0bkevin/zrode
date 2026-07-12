@@ -3,11 +3,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import { ProjectFileDiskRevision } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -99,6 +103,41 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
 
         expect(created).toEqual({ relativePath });
         expect((yield* fileSystem.stat(path.join(cwd, relativePath))).type).toBe("Directory");
+      }),
+    );
+
+    it.effect("uses normalized backslash paths consistently on POSIX", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcessPlatform) === "win32") return;
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "src"));
+
+        const directory = yield* workspaceFileSystem.createDirectory({
+          cwd,
+          relativePath: "src\\nested",
+        });
+        const written = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "src\\nested\\notes.md",
+          contents: "normalized\n",
+          precondition: { _tag: "must-not-exist" },
+        });
+        const read = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src\\nested\\notes.md",
+        });
+
+        expect(directory.relativePath).toBe("src/nested");
+        expect(written.relativePath).toBe("src/nested/notes.md");
+        expect(read).toMatchObject({
+          relativePath: "src/nested/notes.md",
+          contents: "normalized\n",
+        });
+        expect(yield* fileSystem.exists(path.join(cwd, "src/nested/notes.md"))).toBe(true);
+        expect(yield* fileSystem.exists(path.join(cwd, "src\\nested\\notes.md"))).toBe(false);
       }),
     );
 
@@ -746,6 +785,33 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("creates and replaces a long valid basename atomically", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const relativePath = `${"a".repeat(236)}.txt`;
+
+        const created = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath,
+          contents: "created\n",
+          precondition: { _tag: "must-not-exist" },
+        });
+        const replaced = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath,
+          contents: "replaced\n",
+          precondition: { _tag: "match", diskRevision: created.diskRevision },
+        });
+
+        expect(relativePath).toHaveLength(240);
+        expect(replaced).toMatchObject({ relativePath, created: false });
+        expect(yield* fileSystem.readFileString(path.join(cwd, relativePath))).toBe("replaced\n");
+      }),
+    );
+
     it.effect("enforces must-not-exist and supports explicit unconditional writes", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -796,7 +862,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             Effect.promise(async () => {
               const entries = await NodeFSP.readdir(path.dirname(canonicalTargetPath));
               observedDurableTemp = entries.some(
-                (entry) => entry.startsWith(".race.txt.") && entry.endsWith(".tmp"),
+                (entry) => entry.startsWith(".zrode-") && entry.endsWith(".tmp"),
               );
               await NodeFSP.writeFile(canonicalTargetPath, "external\n", "utf8");
             }),
@@ -823,7 +889,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         );
         expect(
           (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some(
-            (entry) => entry.startsWith(".race.txt.") && entry.endsWith(".tmp"),
+            (entry) => entry.startsWith(".zrode-") && entry.endsWith(".tmp"),
           ),
         ).toBe(false);
       }),
@@ -870,7 +936,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             Effect.promise(async () => {
               const entries = await NodeFSP.readdir(path.dirname(canonicalTargetPath));
               observedDurableTemp = entries.some(
-                (entry) => entry.startsWith(".created-during-save.txt.") && entry.endsWith(".tmp"),
+                (entry) => entry.startsWith(".zrode-") && entry.endsWith(".tmp"),
               );
               await NodeFSP.writeFile(canonicalTargetPath, "external creator\n", {
                 encoding: "utf8",
@@ -899,7 +965,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         );
         expect(
           (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some(
-            (entry) => entry.startsWith(".created-during-save.txt.") && entry.endsWith(".tmp"),
+            (entry) => entry.startsWith(".zrode-") && entry.endsWith(".tmp"),
           ),
         ).toBe(false);
       }),
@@ -1015,6 +1081,284 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("permanently deletes files and recursive directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "remove.txt", "remove me\n");
+        yield* writeTextFile(cwd, "nested/child.txt", "remove me too\n");
+        const preparedFile = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "remove.txt",
+          expectedKind: "file",
+          recursive: false,
+        });
+        const preparedDirectory = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "nested",
+          expectedKind: "directory",
+          recursive: true,
+        });
+
+        expect(
+          yield* workspaceFileSystem.deleteEntry({
+            cwd,
+            relativePath: "remove.txt",
+            expectedKind: "file",
+            recursive: false,
+            entryRevision: preparedFile.entryRevision,
+            permanentlyDelete: true,
+          }),
+        ).toEqual({ relativePath: "remove.txt", deletedKind: "file" });
+        yield* workspaceFileSystem.deleteEntry({
+          cwd,
+          relativePath: "nested",
+          expectedKind: "directory",
+          recursive: true,
+          entryRevision: preparedDirectory.entryRevision,
+          permanentlyDelete: true,
+        });
+
+        expect(
+          yield* Effect.promise(() => NodeFSP.stat(path.join(cwd, "remove.txt")).catch(() => null)),
+        ).toBeNull();
+        expect(
+          yield* Effect.promise(() => NodeFSP.stat(path.join(cwd, "nested")).catch(() => null)),
+        ).toBeNull();
+      }),
+    );
+
+    it.effect("restores the original name when removal fails", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "kept/child.txt", "keep\n");
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          removeDeletedEntry: async () => {
+            throw new Error("forced removal failure");
+          },
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "kept",
+          expectedKind: "directory",
+          recursive: true,
+        });
+
+        const error = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "kept",
+            expectedKind: "directory",
+            recursive: true,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+        expect(
+          yield* Effect.promise(() => NodeFSP.readFile(path.join(cwd, "kept/child.txt"), "utf8")),
+        ).toBe("keep\n");
+        expect(
+          (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some((name) =>
+            name.startsWith(".zrode-delete-"),
+          ),
+        ).toBe(false);
+      }),
+    );
+
+    it.effect("rejects type confusion and final symlinks without deleting their targets", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "target.txt", "keep\n");
+        yield* Effect.promise(() => NodeFSP.symlink("target.txt", path.join(cwd, "link.txt")));
+
+        const wrongKind = yield* workspaceFileSystem
+          .prepareDeleteEntry({
+            cwd,
+            relativePath: "target.txt",
+            expectedKind: "directory",
+            recursive: true,
+          })
+          .pipe(Effect.flip);
+        const symlink = yield* workspaceFileSystem
+          .prepareDeleteEntry({
+            cwd,
+            relativePath: "link.txt",
+            expectedKind: "file",
+            recursive: false,
+          })
+          .pipe(Effect.flip);
+
+        expect(wrongKind).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotDirectoryError);
+        expect(symlink).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
+        expect(
+          yield* Effect.promise(() => NodeFSP.readFile(path.join(cwd, "target.txt"), "utf8")),
+        ).toBe("keep\n");
+      }),
+    );
+
+    it.effect("refuses to delete a target replaced after its initial identity check", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const target = path.join(cwd, "target.txt");
+        const original = path.join(cwd, "original.txt");
+        yield* writeTextFile(cwd, "target.txt", "original\n");
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeDelete: () =>
+            Effect.promise(async () => {
+              await NodeFSP.rename(target, original);
+              await NodeFSP.writeFile(target, "replacement\n");
+            }),
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "target.txt",
+          expectedKind: "file",
+          recursive: false,
+        });
+
+        const error = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "target.txt",
+            expectedKind: "file",
+            recursive: false,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryChangedError);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(target, "utf8"))).toBe("replacement\n");
+        expect(yield* Effect.promise(() => NodeFSP.readFile(original, "utf8"))).toBe("original\n");
+      }),
+    );
+
+    it.effect("refuses a recursive delete when a descendant changed after confirmation", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "tree/child.txt", "confirmed\n");
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "tree",
+          expectedKind: "directory",
+          recursive: true,
+        });
+        yield* writeTextFile(cwd, "tree/child.txt", "changed after confirmation\n");
+
+        const error = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "tree",
+            expectedKind: "directory",
+            recursive: true,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryChangedError);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(`${cwd}/tree/child.txt`, "utf8"))).toBe(
+          "changed after confirmation\n",
+        );
+      }),
+    );
+
+    it.effect("exposes a visible recovery path when the original name is reoccupied", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const target = path.join(cwd, "important.txt");
+        yield* writeTextFile(cwd, "important.txt", "original data\n");
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          removeDeletedEntry: async () => {
+            await NodeFSP.writeFile(target, "replacement data\n", "utf8");
+            throw new Error("forced removal failure");
+          },
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "important.txt",
+          expectedKind: "file",
+          recursive: false,
+        });
+
+        const error = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "important.txt",
+            expectedKind: "file",
+            recursive: false,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceDeleteRecoveryError);
+        if (error._tag !== "WorkspaceDeleteRecoveryError") return;
+        expect(error.originalPathOccupied).toBe(true);
+        expect(error.dataMayRemainHidden).toBe(false);
+        expect(path.basename(error.recoveryPath)).toMatch(/^important\.txt\.zrode-recovered-/u);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(error.recoveryPath, "utf8"))).toBe(
+          "original data\n",
+        );
+        expect(yield* Effect.promise(() => NodeFSP.readFile(target, "utf8"))).toBe(
+          "replacement data\n",
+        );
+        expect(
+          (yield* Effect.promise(() => NodeFSP.readdir(cwd))).some((name) =>
+            name.startsWith(".zrode-delete-"),
+          ),
+        ).toBe(false);
+      }),
+    );
+
+    it.effect("falls back to a visible recovery name when direct restoration fails", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "recover.txt", "valuable\n");
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          removeDeletedEntry: async () => {
+            throw new Error("forced removal failure");
+          },
+          renameDeletedEntry: async ({ from, to, purpose }) => {
+            if (purpose === "restore") throw new Error("forced restore failure");
+            await NodeFSP.rename(from, to);
+          },
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "recover.txt",
+          expectedKind: "file",
+          recursive: false,
+        });
+        const error = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "recover.txt",
+            expectedKind: "file",
+            recursive: false,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceDeleteRecoveryError);
+        if (error._tag !== "WorkspaceDeleteRecoveryError") return;
+        expect(error.dataMayRemainHidden).toBe(false);
+        expect(yield* Effect.promise(() => NodeFSP.readFile(error.recoveryPath, "utf8"))).toBe(
+          "valuable\n",
+        );
+      }),
+    );
+
     it.effect("allows exactly one concurrent writer for a shared matching revision", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1047,6 +1391,106 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         expect(["writer-a\n", "writer-b\n"]).toContain(
           yield* fileSystem.readFileString(path.join(cwd, "shared.txt")),
         );
+      }),
+    );
+
+    it.effect("allows independent workspace writes to publish concurrently", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.txt", "a\n");
+        yield* writeTextFile(cwd, "b.txt", "b\n");
+        const started = yield* Ref.make(0);
+        const bothStarted = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforePublish: () =>
+            Effect.gen(function* () {
+              const count = yield* Ref.updateAndGet(started, (value) => value + 1);
+              if (count === 2) yield* Deferred.succeed(bothStarted, undefined);
+              yield* Deferred.await(bothStarted);
+              yield* Deferred.await(release);
+            }),
+        });
+        const revisionA = (yield* workspaceFileSystem.readFile({ cwd, relativePath: "a.txt" }))
+          .diskRevision!;
+        const revisionB = (yield* workspaceFileSystem.readFile({ cwd, relativePath: "b.txt" }))
+          .diskRevision!;
+        const writerA = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "a.txt",
+            contents: "updated a\n",
+            precondition: { _tag: "match", diskRevision: revisionA },
+          })
+          .pipe(Effect.forkChild);
+        const writerB = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "b.txt",
+            contents: "updated b\n",
+            precondition: { _tag: "match", diskRevision: revisionB },
+          })
+          .pipe(Effect.forkChild);
+
+        yield* Deferred.await(bothStarted).pipe(Effect.timeout("2 seconds"));
+        yield* Deferred.succeed(release, undefined);
+        yield* Effect.all([Fiber.join(writerA), Fiber.join(writerB)], {
+          concurrency: "unbounded",
+          discard: true,
+        });
+      }),
+    );
+
+    it.effect("keeps recursive delete exclusive against descendant writes", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "tree/child.txt", "base\n");
+        const deleteEntered = yield* Deferred.make<void>();
+        const releaseDelete = yield* Deferred.make<void>();
+        const writerPublished = yield* Ref.make(false);
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeDelete: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(deleteEntered, undefined);
+              yield* Deferred.await(releaseDelete);
+            }),
+          beforePublish: () => Ref.set(writerPublished, true),
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "tree",
+          expectedKind: "directory",
+          recursive: true,
+        });
+        const childRevision = (yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "tree/child.txt",
+        })).diskRevision!;
+        const deleting = yield* workspaceFileSystem
+          .deleteEntry({
+            cwd,
+            relativePath: "tree",
+            expectedKind: "directory",
+            recursive: true,
+            entryRevision: prepared.entryRevision,
+            permanentlyDelete: true,
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(deleteEntered);
+        const writing = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "tree/child.txt",
+            contents: "racing\n",
+            precondition: { _tag: "match", diskRevision: childRevision },
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        expect(yield* Ref.get(writerPublished)).toBe(false);
+        yield* Deferred.succeed(releaseDelete, undefined);
+        yield* Fiber.join(deleting);
+        expect((yield* Fiber.join(writing))._tag).toBe("Failure");
       }),
     );
   });

@@ -13,6 +13,10 @@ import {
   ProjectWriteFilePrecondition,
   type ProjectCreateDirectoryInput,
   type ProjectCreateDirectoryResult,
+  type ProjectDeleteEntryInput,
+  type ProjectDeleteEntryResult,
+  type ProjectPrepareDeleteEntryInput,
+  type ProjectPrepareDeleteEntryResult,
   type ProjectReadFileInput,
   type ProjectReadFileResult,
   type ProjectWriteFileInput,
@@ -27,6 +31,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as TxReentrantLock from "effect/TxReentrantLock";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { appendBoundedBytes, decodeBoundedBytes } from "../process/boundedOutput.ts";
@@ -90,6 +95,8 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<W
       "close",
       "make-directory",
       "write-file",
+      "delete-entry",
+      "move-entry",
     ]),
     cause: Schema.Defect(),
   },
@@ -166,6 +173,39 @@ export class WorkspaceDirectoryParentChangedError extends Schema.TaggedErrorClas
   }
 }
 
+export class WorkspaceEntryChangedError extends Schema.TaggedErrorClass<WorkspaceEntryChangedError>()(
+  "WorkspaceEntryChangedError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace entry '${this.relativePath}' changed before it could be deleted.`;
+  }
+}
+
+export class WorkspaceDeleteRecoveryError extends Schema.TaggedErrorClass<WorkspaceDeleteRecoveryError>()(
+  "WorkspaceDeleteRecoveryError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+    recoveryPath: Schema.String,
+    originalPathOccupied: Schema.Boolean,
+    dataMayRemainHidden: Schema.Boolean,
+    deletionCause: Schema.Defect(),
+    recoveryCause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.dataMayRemainHidden
+      ? `Deletion failed and recovery could not expose '${this.relativePath}'. Data may remain at '${this.recoveryPath}'.`
+      : `Deletion failed; the entry was recovered at '${this.recoveryPath}'.`;
+  }
+}
+
 export class WorkspaceBinaryFileError extends Schema.TaggedErrorClass<WorkspaceBinaryFileError>()(
   "WorkspaceBinaryFileError",
   {
@@ -216,6 +256,8 @@ export const WorkspaceFileOperationError = Schema.Union([
   WorkspacePathNotDirectoryError,
   WorkspacePathAlreadyExistsError,
   WorkspaceDirectoryParentChangedError,
+  WorkspaceEntryChangedError,
+  WorkspaceDeleteRecoveryError,
   WorkspaceBinaryFileError,
 ]);
 export type WorkspaceFileOperationError = typeof WorkspaceFileOperationError.Type;
@@ -227,6 +269,8 @@ export const WorkspaceFileSystemError = Schema.Union([
   WorkspacePathNotDirectoryError,
   WorkspacePathAlreadyExistsError,
   WorkspaceDirectoryParentChangedError,
+  WorkspaceEntryChangedError,
+  WorkspaceDeleteRecoveryError,
   WorkspaceBinaryFileError,
   WorkspaceFileRevisionConflictError,
   WorkspaceFileContentsTooLargeError,
@@ -242,6 +286,20 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectCreateDirectoryInput,
     ) => Effect.Effect<
       ProjectCreateDirectoryResult,
+      WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** Permanently delete an entry without following a final symlink. */
+    readonly deleteEntry: (
+      input: ProjectDeleteEntryInput,
+    ) => Effect.Effect<
+      ProjectDeleteEntryResult,
+      WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** Capture the exact authoritative entry/tree revision that a user confirms. */
+    readonly prepareDeleteEntry: (
+      input: ProjectPrepareDeleteEntryInput,
+    ) => Effect.Effect<
+      ProjectPrepareDeleteEntryResult,
       WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
     /** Read a UTF-8 text file relative to the workspace root. */
@@ -321,6 +379,22 @@ export interface WorkspaceFileSystemMakeOptions {
     readonly relativePath: string;
     readonly canonicalTargetPath: string;
   }) => Effect.Effect<void>;
+  /** Test-only race barrier, invoked after the initial target identity check. */
+  readonly beforeDelete?: (input: {
+    readonly cwd: string;
+    readonly relativePath: string;
+    readonly canonicalTargetPath: string;
+  }) => Effect.Effect<void>;
+  /** Test hooks for deterministic recovery-failure coverage. */
+  readonly removeDeletedEntry?: (input: {
+    readonly path: string;
+    readonly kind: "file" | "directory";
+  }) => Promise<void>;
+  readonly renameDeletedEntry?: (input: {
+    readonly from: string;
+    readonly to: string;
+    readonly purpose: "detach" | "restore" | "recover";
+  }) => Promise<void>;
 }
 
 type CurrentFileState = {
@@ -334,6 +408,10 @@ type WriteTargetLock = {
   readonly semaphore: Semaphore.Semaphore;
   readonly users: number;
 };
+type WorkspaceMutationLock = {
+  readonly lock: TxReentrantLock.TxReentrantLock;
+  readonly users: number;
+};
 
 export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
   Effect.gen(function* () {
@@ -342,6 +420,9 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
     const writeTargetLocksRef = yield* Ref.make<ReadonlyMap<string, WriteTargetLock>>(new Map());
+    const workspaceMutationLocksRef = yield* Ref.make<ReadonlyMap<string, WorkspaceMutationLock>>(
+      new Map(),
+    );
 
     const operationError = (input: {
       readonly workspaceRoot: string;
@@ -667,6 +748,42 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         Effect.flatMap(acquireWriteTargetLock(key), (semaphore) => semaphore.withPermit(effect)),
       );
 
+    const acquireWorkspaceMutationLock = (key: string) =>
+      Effect.acquireRelease(
+        Effect.gen(function* () {
+          const candidate = yield* TxReentrantLock.make();
+          return yield* Ref.modify(workspaceMutationLocksRef, (locks) => {
+            const existing = locks.get(key);
+            const lock = existing?.lock ?? candidate;
+            const next = new Map(locks);
+            next.set(key, { lock, users: (existing?.users ?? 0) + 1 });
+            return [lock, next] as const;
+          });
+        }),
+        () =>
+          Ref.update(workspaceMutationLocksRef, (locks) => {
+            const existing = locks.get(key);
+            if (!existing) return locks;
+            const next = new Map(locks);
+            if (existing.users === 1) next.delete(key);
+            else next.set(key, { ...existing, users: existing.users - 1 });
+            return next;
+          }),
+      );
+
+    const withWorkspaceMutationLock = <A, E, R>(
+      key: string,
+      mode: "shared" | "exclusive",
+      effect: Effect.Effect<A, E, R>,
+    ): Effect.Effect<A, E, R> =>
+      Effect.scoped(
+        Effect.flatMap(acquireWorkspaceMutationLock(key), (lock) =>
+          mode === "exclusive"
+            ? TxReentrantLock.withWriteLock(lock, effect)
+            : TxReentrantLock.withReadLock(lock, effect),
+        ),
+      );
+
     type CanonicalDirectoryParent = {
       readonly requestedParentPath: string;
       readonly canonicalParentPath: string;
@@ -845,73 +962,80 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       });
       const initialTarget = yield* resolveCanonicalWriteTarget(input, requestedTarget.absolutePath);
 
-      return yield* withWriteTargetLock(
-        initialTarget.canonicalTargetPath,
-        Effect.gen(function* () {
-          const root = yield* realWorkspaceRoot({
-            workspaceRoot: input.cwd,
-            relativePath: input.relativePath,
-            resolvedPath: requestedTarget.absolutePath,
-          });
-          const initialParent = yield* canonicalDirectoryParent(
-            input,
-            requestedTarget.absolutePath,
-            root,
-          );
-
-          yield* (
-            options.beforeCreateDirectory?.({
-              cwd: input.cwd,
-              relativePath: requestedTarget.relativePath,
-              canonicalTargetPath: initialParent.canonicalTargetPath,
-            }) ?? Effect.void
-          );
-
-          // Resolve and identify the parent again immediately before the only
-          // mutation. A parent swapped to a symlink outside the root is rejected
-          // by canonicalDirectoryParent; an in-root replacement is rejected by
-          // the identity comparison.
-          const finalParent = yield* canonicalDirectoryParent(
-            input,
-            requestedTarget.absolutePath,
-            root,
-          );
-          if (
-            finalParent.canonicalParentPath !== initialParent.canonicalParentPath ||
-            finalParent.device !== initialParent.device ||
-            finalParent.inode !== initialParent.inode
-          ) {
-            return yield* new WorkspaceDirectoryParentChangedError({
+      return yield* withWorkspaceMutationLock(
+        initialTarget.realWorkspaceRoot,
+        "shared",
+        withWriteTargetLock(
+          initialTarget.canonicalTargetPath,
+          Effect.gen(function* () {
+            const root = yield* realWorkspaceRoot({
               workspaceRoot: input.cwd,
-              relativePath: requestedTarget.relativePath,
-              initialParentPath: initialParent.canonicalParentPath,
-              currentParentPath: finalParent.canonicalParentPath,
+              relativePath: input.relativePath,
+              resolvedPath: requestedTarget.absolutePath,
             });
-          }
+            const initialParent = yield* canonicalDirectoryParent(
+              input,
+              requestedTarget.absolutePath,
+              root,
+            );
 
-          yield* (
-            options.afterCreateDirectoryValidation?.({
-              cwd: input.cwd,
-              relativePath: requestedTarget.relativePath,
-              canonicalTargetPath: finalParent.canonicalTargetPath,
-            }) ?? Effect.void
-          );
+            yield* (
+              options.beforeCreateDirectory?.({
+                cwd: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                canonicalTargetPath: initialParent.canonicalTargetPath,
+              }) ?? Effect.void
+            );
 
-          // The child opens `canonicalParentPath` as its cwd, verifies the
-          // pinned directory's dev+ino via stat("."), then performs one
-          // non-recursive mkdir(basename). A path swapped to an outside symlink
-          // before spawn therefore fails identity validation, while a swap
-          // after spawn cannot redirect the relative mkdir through that path.
-          // Residual platform risk: Node exposes no mkdirat(dirfd), so an actor
-          // able to rename the already-pinned parent inode itself can move that
-          // inode elsewhere while the child still creates inside the same inode.
-          yield* Effect.scoped(createDirectoryRelativeToPinnedParent(input, finalParent));
+            // Resolve and identify the parent again immediately before the only
+            // mutation. A parent swapped to a symlink outside the root is rejected
+            // by canonicalDirectoryParent; an in-root replacement is rejected by
+            // the identity comparison.
+            const finalParent = yield* canonicalDirectoryParent(
+              input,
+              requestedTarget.absolutePath,
+              root,
+            );
+            if (
+              finalParent.canonicalParentPath !== initialParent.canonicalParentPath ||
+              finalParent.device !== initialParent.device ||
+              finalParent.inode !== initialParent.inode
+            ) {
+              return yield* new WorkspaceDirectoryParentChangedError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                initialParentPath: initialParent.canonicalParentPath,
+                currentParentPath: finalParent.canonicalParentPath,
+              });
+            }
 
-          yield* workspaceEntries
-            .refresh(input.cwd)
-            .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach({ startImmediately: true }));
-          return { relativePath: requestedTarget.relativePath };
-        }),
+            yield* (
+              options.afterCreateDirectoryValidation?.({
+                cwd: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                canonicalTargetPath: finalParent.canonicalTargetPath,
+              }) ?? Effect.void
+            );
+
+            // The child opens `canonicalParentPath` as its cwd, verifies the
+            // pinned directory's dev+ino via stat("."), then performs one
+            // non-recursive mkdir(basename). A path swapped to an outside symlink
+            // before spawn therefore fails identity validation, while a swap
+            // after spawn cannot redirect the relative mkdir through that path.
+            // Residual platform risk: Node exposes no mkdirat(dirfd), so an actor
+            // able to rename the already-pinned parent inode itself can move that
+            // inode elsewhere while the child still creates inside the same inode.
+            yield* Effect.scoped(createDirectoryRelativeToPinnedParent(input, finalParent));
+
+            yield* workspaceEntries
+              .refresh(input.cwd)
+              .pipe(
+                Effect.ignoreCause({ log: true }),
+                Effect.forkDetach({ startImmediately: true }),
+              );
+            return { relativePath: requestedTarget.relativePath };
+          }),
+        ),
       );
     });
 
@@ -961,7 +1085,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
             }),
         });
         if (!directoryStat.isDirectory()) {
-          return yield* new WorkspacePathNotFileError({
+          return yield* new WorkspacePathNotDirectoryError({
             workspaceRoot: input.cwd,
             relativePath: input.relativePath,
             resolvedPath: realTargetDirectory,
@@ -990,7 +1114,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         try: async () => {
           const tempPath = path.join(
             targetDirectory,
-            `.${path.basename(canonicalTargetPath)}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`,
+            `.zrode-${process.pid}-${NodeCrypto.randomUUID()}.tmp`,
           );
           let handle: NodeFSP.FileHandle | null = null;
           let prepared = false;
@@ -1018,6 +1142,407 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
             cause,
           }),
       });
+    });
+
+    const entryTreeRevision = Effect.fn("WorkspaceFileSystem.entryTreeRevision")(function* (
+      input: ProjectPrepareDeleteEntryInput,
+      targetPath: string,
+      root: string,
+      rootCtimeOverride?: bigint,
+    ) {
+      return yield* Effect.tryPromise({
+        try: async () => {
+          const hash = NodeCrypto.createHash("sha256");
+          hash.update(root);
+          hash.update("\0");
+          hash.update(input.relativePath);
+          hash.update("\0");
+          hash.update(input.expectedKind);
+          hash.update(input.recursive ? "\x001" : "\x000");
+          let descendantCount = 0;
+          const visit = async (absolutePath: string, relativePath: string): Promise<void> => {
+            const stat = await NodeFSP.lstat(absolutePath, { bigint: true });
+            const kind = stat.isFile()
+              ? "file"
+              : stat.isDirectory()
+                ? "directory"
+                : stat.isSymbolicLink()
+                  ? "symlink"
+                  : "other";
+            hash.update("\0");
+            hash.update(relativePath);
+            hash.update("\0");
+            hash.update(
+              `${kind}:${stat.dev.toString()}:${stat.ino.toString()}:${(relativePath === "" &&
+              rootCtimeOverride !== undefined
+                ? rootCtimeOverride
+                : stat.ctimeNs
+              ).toString()}`,
+            );
+            if (!stat.isDirectory()) return;
+            const names = await NodeFSP.readdir(absolutePath);
+            names.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+            for (const name of names) {
+              descendantCount += 1;
+              await visit(
+                path.join(absolutePath, name),
+                relativePath ? `${relativePath}/${name}` : name,
+              );
+            }
+          };
+          await visit(targetPath, "");
+          return { entryRevision: hash.digest("hex"), descendantCount };
+        },
+        catch: (cause) =>
+          operationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: targetPath,
+            operationPath: targetPath,
+            operation: "stat",
+            cause,
+          }),
+      });
+    });
+
+    const prepareDeleteEntry: WorkspaceFileSystem["Service"]["prepareDeleteEntry"] = Effect.fn(
+      "WorkspaceFileSystem.prepareDeleteEntry",
+    )(function* (input) {
+      const requestedTarget = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+      });
+      const root = yield* realWorkspaceRoot({
+        workspaceRoot: input.cwd,
+        relativePath: requestedTarget.relativePath,
+        resolvedPath: requestedTarget.absolutePath,
+      });
+      return yield* withWorkspaceMutationLock(
+        root,
+        "shared",
+        Effect.gen(function* () {
+          const parent = yield* canonicalDirectoryParent(input, requestedTarget.absolutePath, root);
+          const stat = yield* Effect.tryPromise({
+            try: () => NodeFSP.lstat(parent.canonicalTargetPath, { bigint: true }),
+            catch: (cause) =>
+              operationError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                resolvedPath: parent.canonicalTargetPath,
+                operationPath: parent.canonicalTargetPath,
+                operation: "stat",
+                cause,
+              }),
+          });
+          if (input.expectedKind === "file" ? !stat.isFile() : !stat.isDirectory()) {
+            return yield* input.expectedKind === "file"
+              ? new WorkspacePathNotFileError({
+                  workspaceRoot: input.cwd,
+                  relativePath: requestedTarget.relativePath,
+                  resolvedPath: parent.canonicalTargetPath,
+                })
+              : new WorkspacePathNotDirectoryError({
+                  workspaceRoot: input.cwd,
+                  relativePath: requestedTarget.relativePath,
+                  resolvedPath: parent.canonicalTargetPath,
+                });
+          }
+          const snapshot = yield* entryTreeRevision(input, parent.canonicalTargetPath, root);
+          return {
+            relativePath: requestedTarget.relativePath,
+            expectedKind: input.expectedKind,
+            recursive: input.recursive,
+            ...snapshot,
+          };
+        }),
+      );
+    });
+
+    const deleteEntry: WorkspaceFileSystem["Service"]["deleteEntry"] = Effect.fn(
+      "WorkspaceFileSystem.deleteEntry",
+    )(function* (input) {
+      const requestedTarget = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+      });
+      const root = yield* realWorkspaceRoot({
+        workspaceRoot: input.cwd,
+        relativePath: requestedTarget.relativePath,
+        resolvedPath: requestedTarget.absolutePath,
+      });
+      const initialParent = yield* canonicalDirectoryParent(
+        input,
+        requestedTarget.absolutePath,
+        root,
+      );
+
+      return yield* withWorkspaceMutationLock(
+        root,
+        "exclusive",
+        withWriteTargetLock(
+          initialParent.canonicalTargetPath,
+          Effect.gen(function* () {
+            const readIdentity = (targetPath: string) =>
+              Effect.tryPromise({
+                try: () => NodeFSP.lstat(targetPath, { bigint: true }),
+                catch: (cause) =>
+                  operationError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: initialParent.canonicalTargetPath,
+                    operationPath: targetPath,
+                    operation: "stat",
+                    cause,
+                  }),
+              });
+            const initialStat = yield* readIdentity(initialParent.canonicalTargetPath);
+            const expectedTypeMatches =
+              input.expectedKind === "file" ? initialStat.isFile() : initialStat.isDirectory();
+            if (!expectedTypeMatches) {
+              return yield* input.expectedKind === "file"
+                ? new WorkspacePathNotFileError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: initialParent.canonicalTargetPath,
+                  })
+                : new WorkspacePathNotDirectoryError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: initialParent.canonicalTargetPath,
+                  });
+            }
+            const initialSnapshot = yield* entryTreeRevision(
+              input,
+              initialParent.canonicalTargetPath,
+              root,
+            );
+            if (initialSnapshot.entryRevision !== input.entryRevision) {
+              return yield* new WorkspaceEntryChangedError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                resolvedPath: initialParent.canonicalTargetPath,
+              });
+            }
+
+            yield* (
+              options.beforeDelete?.({
+                cwd: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                canonicalTargetPath: initialParent.canonicalTargetPath,
+              }) ?? Effect.void
+            );
+
+            const finalParent = yield* canonicalDirectoryParent(
+              input,
+              requestedTarget.absolutePath,
+              root,
+            );
+            if (
+              finalParent.canonicalParentPath !== initialParent.canonicalParentPath ||
+              finalParent.device !== initialParent.device ||
+              finalParent.inode !== initialParent.inode
+            ) {
+              return yield* new WorkspaceDirectoryParentChangedError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                initialParentPath: initialParent.canonicalParentPath,
+                currentParentPath: finalParent.canonicalParentPath,
+              });
+            }
+
+            const finalStat = yield* readIdentity(finalParent.canonicalTargetPath);
+            if (
+              finalStat.dev !== initialStat.dev ||
+              finalStat.ino !== initialStat.ino ||
+              finalStat.isFile() !== initialStat.isFile() ||
+              finalStat.isDirectory() !== initialStat.isDirectory()
+            ) {
+              return yield* new WorkspaceEntryChangedError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                resolvedPath: finalParent.canonicalTargetPath,
+              });
+            }
+            const finalSnapshot = yield* entryTreeRevision(
+              input,
+              finalParent.canonicalTargetPath,
+              root,
+            );
+            if (finalSnapshot.entryRevision !== input.entryRevision) {
+              return yield* new WorkspaceEntryChangedError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedTarget.relativePath,
+                resolvedPath: finalParent.canonicalTargetPath,
+              });
+            }
+
+            // Atomically detach the validated entry from its user-visible name.
+            // Removal then operates on the private tombstone. The post-rename
+            // identity check detects a final-name replacement racing the rename.
+            const tombstonePath = path.join(
+              finalParent.canonicalParentPath,
+              `.zrode-delete-${process.pid}-${NodeCrypto.randomUUID()}`,
+            );
+            // Once the entry is detached, interruption must wait for removal
+            // or restoration; otherwise a canceled RPC could strand a hidden
+            // tombstone and make the original path appear deleted.
+            yield* Effect.uninterruptible(
+              Effect.gen(function* () {
+                const renameDeletedEntry = (
+                  from: string,
+                  to: string,
+                  purpose: "detach" | "restore" | "recover",
+                ) =>
+                  options.renameDeletedEntry?.({ from, to, purpose }) ?? NodeFSP.rename(from, to);
+                yield* Effect.tryPromise({
+                  try: () =>
+                    renameDeletedEntry(finalParent.canonicalTargetPath, tombstonePath, "detach"),
+                  catch: (cause) =>
+                    operationError({
+                      workspaceRoot: input.cwd,
+                      relativePath: requestedTarget.relativePath,
+                      resolvedPath: finalParent.canonicalTargetPath,
+                      operationPath: finalParent.canonicalTargetPath,
+                      operation: "move-entry",
+                      cause,
+                    }),
+                });
+
+                const recoverTombstone = (deletionCause: unknown) =>
+                  Effect.promise(async () => {
+                    let originalPathOccupied = true;
+                    try {
+                      await NodeFSP.lstat(finalParent.canonicalTargetPath);
+                    } catch (cause) {
+                      if (!isNotFound(cause)) throw cause;
+                      originalPathOccupied = false;
+                    }
+                    let recoveryCause: unknown;
+                    if (!originalPathOccupied) {
+                      try {
+                        await renameDeletedEntry(
+                          tombstonePath,
+                          finalParent.canonicalTargetPath,
+                          "restore",
+                        );
+                        return { restored: true as const };
+                      } catch (cause) {
+                        recoveryCause = cause;
+                      }
+                    }
+                    const basename = path.basename(finalParent.canonicalTargetPath);
+                    const recoveryPath = path.join(
+                      finalParent.canonicalParentPath,
+                      `${basename}.zrode-recovered-${NodeCrypto.randomUUID()}`,
+                    );
+                    try {
+                      await renameDeletedEntry(tombstonePath, recoveryPath, "recover");
+                      return {
+                        restored: false as const,
+                        error: new WorkspaceDeleteRecoveryError({
+                          workspaceRoot: input.cwd,
+                          relativePath: requestedTarget.relativePath,
+                          resolvedPath: finalParent.canonicalTargetPath,
+                          recoveryPath,
+                          originalPathOccupied,
+                          dataMayRemainHidden: false,
+                          deletionCause,
+                          recoveryCause,
+                        }),
+                      };
+                    } catch (cause) {
+                      return {
+                        restored: false as const,
+                        error: new WorkspaceDeleteRecoveryError({
+                          workspaceRoot: input.cwd,
+                          relativePath: requestedTarget.relativePath,
+                          resolvedPath: finalParent.canonicalTargetPath,
+                          recoveryPath: tombstonePath,
+                          originalPathOccupied,
+                          dataMayRemainHidden: true,
+                          deletionCause,
+                          recoveryCause: cause,
+                        }),
+                      };
+                    }
+                  });
+
+                const tombstoneStat = yield* readIdentity(tombstonePath);
+                if (
+                  tombstoneStat.dev !== initialStat.dev ||
+                  tombstoneStat.ino !== initialStat.ino
+                ) {
+                  const recovery = yield* recoverTombstone(new Error("Detached identity changed."));
+                  if (!recovery.restored) return yield* recovery.error;
+                  return yield* new WorkspaceEntryChangedError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: finalParent.canonicalTargetPath,
+                  });
+                }
+                const tombstoneSnapshot = yield* entryTreeRevision(
+                  input,
+                  tombstonePath,
+                  root,
+                  initialStat.ctimeNs,
+                );
+                if (tombstoneSnapshot.entryRevision !== input.entryRevision) {
+                  const recovery = yield* recoverTombstone(new Error("Detached tree changed."));
+                  if (!recovery.restored) return yield* recovery.error;
+                  return yield* new WorkspaceEntryChangedError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: finalParent.canonicalTargetPath,
+                  });
+                }
+
+                const deletion = yield* Effect.tryPromise({
+                  try: () =>
+                    options.removeDeletedEntry?.({
+                      path: tombstonePath,
+                      kind: input.expectedKind,
+                    }) ??
+                    (input.expectedKind === "directory"
+                      ? NodeFSP.rm(tombstonePath, { recursive: true })
+                      : NodeFSP.unlink(tombstonePath)),
+                  catch: (cause) =>
+                    new WorkspaceFileSystemOperationError({
+                      workspaceRoot: input.cwd,
+                      relativePath: requestedTarget.relativePath,
+                      resolvedPath: finalParent.canonicalTargetPath,
+                      operationPath: tombstonePath,
+                      operation: "delete-entry",
+                      cause,
+                    }),
+                }).pipe(Effect.result);
+                if (deletion._tag === "Failure") {
+                  const recovery = yield* recoverTombstone(deletion.failure);
+                  if (!recovery.restored) return yield* recovery.error;
+                  return yield* operationError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    resolvedPath: finalParent.canonicalTargetPath,
+                    operationPath: finalParent.canonicalTargetPath,
+                    operation: "delete-entry",
+                    cause: deletion.failure,
+                  });
+                }
+              }),
+            );
+
+            yield* workspaceEntries
+              .refresh(input.cwd)
+              .pipe(
+                Effect.ignoreCause({ log: true }),
+                Effect.forkDetach({ startImmediately: true }),
+              );
+            return {
+              relativePath: requestedTarget.relativePath,
+              deletedKind: input.expectedKind,
+            };
+          }),
+        ),
+      );
     });
 
     const syncDirectoryBestEffort = (targetDirectory: string) =>
@@ -1291,128 +1816,142 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       });
       const initialTarget = yield* resolveCanonicalWriteTarget(input, requestedTarget.absolutePath);
 
-      return yield* withWriteTargetLock(
-        initialTarget.canonicalTargetPath,
-        Effect.gen(function* () {
-          // Resolve again while holding the per-target lock. This catches
-          // in-process creates queued behind an earlier writer and revalidates
-          // canonical containment immediately before mutation.
-          const target = yield* resolveCanonicalWriteTarget(input, requestedTarget.absolutePath);
-          const unpreparedCurrent = yield* currentFileState(input, target);
-          if (preconditionFailed(input.precondition, unpreparedCurrent)) {
-            return yield* revisionConflict(
-              input,
-              requestedTarget.relativePath,
-              target.canonicalTargetPath,
-              unpreparedCurrent,
-            );
-          }
-          const preparedTarget = yield* prepareTargetDirectory(input, target);
-          const current = yield* currentFileState(input, preparedTarget);
+      return yield* withWorkspaceMutationLock(
+        initialTarget.realWorkspaceRoot,
+        "shared",
+        withWriteTargetLock(
+          initialTarget.canonicalTargetPath,
+          Effect.gen(function* () {
+            // Resolve again while holding the per-target lock. This catches
+            // in-process creates queued behind an earlier writer and revalidates
+            // canonical containment immediately before mutation.
+            const target = yield* resolveCanonicalWriteTarget(input, requestedTarget.absolutePath);
+            const unpreparedCurrent = yield* currentFileState(input, target);
+            if (preconditionFailed(input.precondition, unpreparedCurrent)) {
+              return yield* revisionConflict(
+                input,
+                requestedTarget.relativePath,
+                target.canonicalTargetPath,
+                unpreparedCurrent,
+              );
+            }
+            const preparedTarget = yield* prepareTargetDirectory(input, target);
+            const current = yield* currentFileState(input, preparedTarget);
 
-          if (preconditionFailed(input.precondition, current)) {
-            return yield* revisionConflict(
-              input,
-              requestedTarget.relativePath,
-              preparedTarget.canonicalTargetPath,
-              current,
-            );
-          }
+            if (preconditionFailed(input.precondition, current)) {
+              return yield* revisionConflict(
+                input,
+                requestedTarget.relativePath,
+                preparedTarget.canonicalTargetPath,
+                current,
+              );
+            }
 
-          const canonicalTargetPath =
-            current?.canonicalTargetPath ?? preparedTarget.canonicalTargetPath;
-          const contents = Buffer.from(input.contents, "utf8");
-          const diskRevision = revisionFromBytes(contents);
+            const canonicalTargetPath =
+              current?.canonicalTargetPath ?? preparedTarget.canonicalTargetPath;
+            const contents = Buffer.from(input.contents, "utf8");
+            const diskRevision = revisionFromBytes(contents);
 
-          const created = yield* Effect.acquireUseRelease(
-            prepareAtomicWrite(input, canonicalTargetPath, current?.mode ?? null),
-            (durableWrite) =>
-              Effect.gen(function* () {
-                yield* (
-                  options.beforePublish?.({
-                    cwd: input.cwd,
-                    relativePath: requestedTarget.relativePath,
-                    canonicalTargetPath,
-                  }) ?? Effect.void
-                );
-
-                // The potentially slow write and fsync are complete. Re-resolve
-                // the parent identity and re-hash the target as close as portable
-                // Node APIs permit to publication.
-                const finalTarget = yield* resolveCanonicalWriteTarget(
-                  input,
-                  requestedTarget.absolutePath,
-                );
-                const finalUnpreparedCurrent = yield* currentFileState(input, finalTarget);
-                if (preconditionFailed(input.precondition, finalUnpreparedCurrent)) {
-                  return yield* revisionConflict(
-                    input,
-                    requestedTarget.relativePath,
-                    finalTarget.canonicalTargetPath,
-                    finalUnpreparedCurrent,
+            const created = yield* Effect.acquireUseRelease(
+              prepareAtomicWrite(input, canonicalTargetPath, current?.mode ?? null),
+              (durableWrite) =>
+                Effect.gen(function* () {
+                  yield* (
+                    options.beforePublish?.({
+                      cwd: input.cwd,
+                      relativePath: requestedTarget.relativePath,
+                      canonicalTargetPath,
+                    }) ?? Effect.void
                   );
-                }
-                const finalPreparedTarget = yield* prepareTargetDirectory(input, finalTarget);
-                const finalCurrent = yield* currentFileState(input, finalPreparedTarget);
-                const targetIdentityChanged =
-                  finalPreparedTarget.canonicalTargetPath !== preparedTarget.canonicalTargetPath ||
-                  finalPreparedTarget.canonicalTargetDirectory !==
-                    preparedTarget.canonicalTargetDirectory ||
-                  finalPreparedTarget.directoryDevice !== preparedTarget.directoryDevice ||
-                  finalPreparedTarget.directoryInode !== preparedTarget.directoryInode;
-                if (targetIdentityChanged || preconditionFailed(input.precondition, finalCurrent)) {
-                  return yield* revisionConflict(
-                    input,
-                    requestedTarget.relativePath,
-                    finalPreparedTarget.canonicalTargetPath,
-                    finalCurrent,
-                  );
-                }
 
-                yield* updatePreparedMode(input, durableWrite, finalCurrent?.mode ?? null);
-                if (finalCurrent === null) {
-                  const published = yield* publishNewFile(
+                  // The potentially slow write and fsync are complete. Re-resolve
+                  // the parent identity and re-hash the target as close as portable
+                  // Node APIs permit to publication.
+                  const finalTarget = yield* resolveCanonicalWriteTarget(
                     input,
-                    durableWrite,
-                    finalPreparedTarget.canonicalTargetPath,
+                    requestedTarget.absolutePath,
                   );
-                  if (!published) {
-                    const collided = yield* currentFileState(input, finalPreparedTarget);
+                  const finalUnpreparedCurrent = yield* currentFileState(input, finalTarget);
+                  if (preconditionFailed(input.precondition, finalUnpreparedCurrent)) {
+                    return yield* revisionConflict(
+                      input,
+                      requestedTarget.relativePath,
+                      finalTarget.canonicalTargetPath,
+                      finalUnpreparedCurrent,
+                    );
+                  }
+                  const finalPreparedTarget = yield* prepareTargetDirectory(input, finalTarget);
+                  const finalCurrent = yield* currentFileState(input, finalPreparedTarget);
+                  const targetIdentityChanged =
+                    finalPreparedTarget.canonicalTargetPath !==
+                      preparedTarget.canonicalTargetPath ||
+                    finalPreparedTarget.canonicalTargetDirectory !==
+                      preparedTarget.canonicalTargetDirectory ||
+                    finalPreparedTarget.directoryDevice !== preparedTarget.directoryDevice ||
+                    finalPreparedTarget.directoryInode !== preparedTarget.directoryInode;
+                  if (
+                    targetIdentityChanged ||
+                    preconditionFailed(input.precondition, finalCurrent)
+                  ) {
                     return yield* revisionConflict(
                       input,
                       requestedTarget.relativePath,
                       finalPreparedTarget.canonicalTargetPath,
-                      collided,
+                      finalCurrent,
                     );
                   }
-                  return true;
-                }
 
-                yield* publishReplacement(input, durableWrite, finalCurrent.canonicalTargetPath);
-                return false;
-              }),
-            cleanupPreparedWrite,
-          );
+                  yield* updatePreparedMode(input, durableWrite, finalCurrent?.mode ?? null);
+                  if (finalCurrent === null) {
+                    const published = yield* publishNewFile(
+                      input,
+                      durableWrite,
+                      finalPreparedTarget.canonicalTargetPath,
+                    );
+                    if (!published) {
+                      const collided = yield* currentFileState(input, finalPreparedTarget);
+                      return yield* revisionConflict(
+                        input,
+                        requestedTarget.relativePath,
+                        finalPreparedTarget.canonicalTargetPath,
+                        collided,
+                      );
+                    }
+                    return true;
+                  }
 
-          if (created) {
-            yield* workspaceEntries
-              .refresh(input.cwd)
-              .pipe(
-                Effect.ignoreCause({ log: true }),
-                Effect.forkDetach({ startImmediately: true }),
-              );
-          }
+                  yield* publishReplacement(input, durableWrite, finalCurrent.canonicalTargetPath);
+                  return false;
+                }),
+              cleanupPreparedWrite,
+            );
 
-          return {
-            relativePath: requestedTarget.relativePath,
-            diskRevision,
-            created,
-          };
-        }),
+            if (created) {
+              yield* workspaceEntries
+                .refresh(input.cwd)
+                .pipe(
+                  Effect.ignoreCause({ log: true }),
+                  Effect.forkDetach({ startImmediately: true }),
+                );
+            }
+
+            return {
+              relativePath: requestedTarget.relativePath,
+              diskRevision,
+              created,
+            };
+          }),
+        ),
       );
     });
 
-    return WorkspaceFileSystem.of({ createDirectory, readFile, writeFile });
+    return WorkspaceFileSystem.of({
+      createDirectory,
+      deleteEntry,
+      prepareDeleteEntry,
+      readFile,
+      writeFile,
+    });
   });
 
 export const make = makeWithOptions();

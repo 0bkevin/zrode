@@ -68,6 +68,11 @@ import {
   ProjectCreateDirectoryError,
   ProjectCreateDirectoryInput,
   ProjectCreateDirectoryResult,
+  ProjectDeleteEntryError,
+  ProjectDeleteEntryInput,
+  ProjectDeleteEntryResult,
+  ProjectPrepareDeleteEntryInput,
+  ProjectPrepareDeleteEntryResult,
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
@@ -167,6 +172,8 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
   projectsCreateDirectory: "projects.createDirectory",
+  projectsPrepareDeleteEntry: "projects.prepareDeleteEntry",
+  projectsDeleteEntry: "projects.deleteEntry",
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsSearchText: "projects.searchText",
@@ -421,6 +428,18 @@ export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDi
   payload: ProjectCreateDirectoryInput,
   success: ProjectCreateDirectoryResult,
   error: Schema.Union([ProjectCreateDirectoryError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsDeleteEntryRpc = Rpc.make(WS_METHODS.projectsDeleteEntry, {
+  payload: ProjectDeleteEntryInput,
+  success: ProjectDeleteEntryResult,
+  error: Schema.Union([ProjectDeleteEntryError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsPrepareDeleteEntryRpc = Rpc.make(WS_METHODS.projectsPrepareDeleteEntry, {
+  payload: ProjectPrepareDeleteEntryInput,
+  success: ProjectPrepareDeleteEntryResult,
+  error: Schema.Union([ProjectDeleteEntryError, EnvironmentAuthorizationError]),
 });
 
 export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
@@ -779,6 +798,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlPublishRepositoryRpc,
   WsProjectsListEntriesRpc,
   WsProjectsCreateDirectoryRpc,
+  WsProjectsPrepareDeleteEntryRpc,
+  WsProjectsDeleteEntryRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsSearchTextRpc,

@@ -3330,6 +3330,26 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeProject, activeThreadRef, activeWorkspaceRoot, requestFileDocumentCloseDecision],
   );
+  const capturedFileSurfacesAreSafe = useCallback(
+    (surfaces: readonly RightPanelSurface[]): boolean =>
+      !activeProject ||
+      !activeWorkspaceRoot ||
+      capturedFileDocumentsAreSafe(selectOrderedFileSurfaces(surfaces), (relativePath) =>
+        fileDocumentStore.getSnapshot({
+          environmentId: activeProject.environmentId,
+          cwd: activeWorkspaceRoot,
+          relativePath,
+        }),
+      ),
+    [activeProject, activeWorkspaceRoot],
+  );
+  const warnCapturedFileChanged = useCallback(() => {
+    toastManager.add({
+      type: "warning",
+      title: "Tabs kept open",
+      description: "A file changed while the close action was being confirmed. Try again.",
+    });
+  }, []);
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
@@ -3412,6 +3432,13 @@ function ChatViewContent(props: ChatViewProps) {
           );
           return;
         }
+        // Opening a separate window is asynchronous. The source document may
+        // become dirty/conflicted while that window is created; never close the
+        // authoritative source editor based on the earlier safety decision.
+        if (!capturedFileSurfacesAreSafe([surface])) {
+          warnCapturedFileChanged();
+          return;
+        }
         // A moved preview tab counts as claimed until the new window's
         // claim arrives, so this window neither re-adopts nor closes it.
         if (target.kind === "preview") {
@@ -3423,25 +3450,38 @@ function ChatViewContent(props: ChatViewProps) {
         syncActivePreviewSurface();
       })();
     },
-    [activeThreadRef, prepareFileSurfacesForRemoval, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      capturedFileSurfacesAreSafe,
+      prepareFileSurfacesForRemoval,
+      syncActivePreviewSurface,
+      warnCapturedFileChanged,
+    ],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
+      const capturedSurfaceIds = surfaces.map((entry) => entry.id);
       void (async () => {
         if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        if (!capturedFileSurfacesAreSafe(surfaces)) {
+          warnCapturedFileChanged();
+          return;
+        }
         cleanupRightPanelSurfaces(surfaces);
-        useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
+        useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
         syncActivePreviewSurface();
       })();
     },
     [
       activeThreadRef,
+      capturedFileSurfacesAreSafe,
       cleanupRightPanelSurfaces,
       prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
+      warnCapturedFileChanged,
     ],
   );
   const closeRightPanelSurfacesToRight = useCallback(
@@ -3450,33 +3490,48 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
+      const capturedSurfaceIds = surfaces.map((entry) => entry.id);
       void (async () => {
         if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+        if (!capturedFileSurfacesAreSafe(surfaces)) {
+          warnCapturedFileChanged();
+          return;
+        }
         cleanupRightPanelSurfaces(surfaces);
-        useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
+        useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
         syncActivePreviewSurface();
       })();
     },
     [
       activeThreadRef,
+      capturedFileSurfacesAreSafe,
       cleanupRightPanelSurfaces,
       prepareFileSurfacesForRemoval,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
+      warnCapturedFileChanged,
     ],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
+    const surfaces = rightPanelState.surfaces;
+    const capturedSurfaceIds = surfaces.map((surface) => surface.id);
     void (async () => {
-      if (!(await prepareFileSurfacesForRemoval(rightPanelState.surfaces))) return;
-      cleanupRightPanelSurfaces(rightPanelState.surfaces);
-      useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
+      if (!(await prepareFileSurfacesForRemoval(surfaces))) return;
+      if (!capturedFileSurfacesAreSafe(surfaces)) {
+        warnCapturedFileChanged();
+        return;
+      }
+      cleanupRightPanelSurfaces(surfaces);
+      useRightPanelStore.getState().closeSurfaces(activeThreadRef, capturedSurfaceIds);
     })();
   }, [
     activeThreadRef,
+    capturedFileSurfacesAreSafe,
     cleanupRightPanelSurfaces,
     prepareFileSurfacesForRemoval,
     rightPanelState.surfaces,
+    warnCapturedFileChanged,
   ]);
   const closeAllFileSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
@@ -3487,17 +3542,7 @@ function ChatViewContent(props: ChatViewProps) {
       // Prepare the complete set before one atomic store mutation. Canceling
       // any prompt therefore leaves every editor surface open.
       if (!(await prepareFileSurfacesForRemoval(fileSurfaces))) return;
-      const capturedDocumentsAreSafe =
-        !activeProject || !activeWorkspaceRoot
-          ? true
-          : capturedFileDocumentsAreSafe(fileSurfaces, (relativePath) =>
-              fileDocumentStore.getSnapshot({
-                environmentId: activeProject.environmentId,
-                cwd: activeWorkspaceRoot,
-                relativePath,
-              }),
-            );
-      if (!capturedDocumentsAreSafe) {
+      if (!capturedFileSurfacesAreSafe(fileSurfaces)) {
         toastManager.add({
           type: "warning",
           title: "Editors kept open",
@@ -3510,9 +3555,8 @@ function ChatViewContent(props: ChatViewProps) {
       useRightPanelStore.getState().closeFileSurfaces(activeThreadRef, capturedSurfaceIds);
     })();
   }, [
-    activeProject,
     activeThreadRef,
-    activeWorkspaceRoot,
+    capturedFileSurfacesAreSafe,
     prepareFileSurfacesForRemoval,
     rightPanelState.surfaces,
   ]);

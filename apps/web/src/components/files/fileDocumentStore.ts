@@ -71,6 +71,8 @@ export interface FileDocumentStoreOptions {
   readonly retryMinDelayMs?: number;
   readonly retryMaxDelayMs?: number;
   readonly cleanTtlMs?: number;
+  /** Maximum number of safe, unmounted documents retained before LRU eviction. */
+  readonly maxCachedDocuments?: number;
   /** Set to null to disable visible-document reconciliation polling. */
   readonly pollIntervalMs?: { readonly min: number; readonly max: number } | null;
   readonly random?: () => number;
@@ -215,6 +217,7 @@ export class FileDocumentStore {
   private readonly retryMinDelayMs: number;
   private readonly retryMaxDelayMs: number;
   private readonly cleanTtlMs: number;
+  private readonly maxCachedDocuments: number;
   private readonly pollIntervalMs: { readonly min: number; readonly max: number } | null;
   private readonly random: () => number;
   private browserPollingPaused = false;
@@ -230,6 +233,7 @@ export class FileDocumentStore {
     this.retryMinDelayMs = options.retryMinDelayMs ?? DEFAULT_RETRY_MIN_DELAY_MS;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
     this.cleanTtlMs = options.cleanTtlMs ?? DEFAULT_CLEAN_TTL_MS;
+    this.maxCachedDocuments = Math.max(0, Math.trunc(options.maxCachedDocuments ?? 64));
     this.pollIntervalMs =
       options.pollIntervalMs === undefined ? DEFAULT_POLL_INTERVAL_MS : options.pollIntervalMs;
     this.random = options.random ?? Math.random;
@@ -238,6 +242,11 @@ export class FileDocumentStore {
 
   acquire(key: FileDocumentKey): FileDocumentHandle {
     const session = this.getOrCreateSession(key);
+    // Map insertion order is the LRU order. Active and unsafe sessions are
+    // never evicted, but touching a session keeps a recently reopened clean
+    // document ahead of older idle entries.
+    this.sessions.delete(session.identity);
+    this.sessions.set(session.identity, session);
     const viewId = this.nextViewId++;
     session.pollingViewIds.add(viewId);
     this.clearTimer(session, "evictionTimer");
@@ -613,11 +622,17 @@ export class FileDocumentStore {
       const remoteChanged =
         result.diskRevision === null && session.snapshot.baseDiskRevision === null
           ? remote.contents !== session.snapshot.latestRemote?.contents ||
-            remote.byteLength !== session.snapshot.latestRemote?.byteLength
+            remote.byteLength !== session.snapshot.latestRemote?.byteLength ||
+            remote.truncated !== session.snapshot.latestRemote?.truncated
           : result.diskRevision !== session.snapshot.baseDiskRevision;
       if (!session.snapshot.isDirty) {
-        if (remoteChanged) this.adoptRemote(session, remote);
-        else this.updateSnapshot(session, { latestRemote: remote, error: null });
+        if (
+          remoteChanged ||
+          session.snapshot.status !== "clean" ||
+          session.snapshot.error !== null
+        ) {
+          this.adoptRemote(session, remote);
+        }
       } else if (remoteChanged) {
         this.clearTimer(session, "debounceTimer");
         this.clearTimer(session, "retryTimer");
@@ -626,8 +641,24 @@ export class FileDocumentStore {
           latestRemote: remote,
           error: null,
         });
+      } else if (session.snapshot.status === "conflict" || session.snapshot.status === "orphaned") {
+        this.updateSnapshot(session, {
+          status: "dirty",
+          latestRemote: remote,
+          error: null,
+        });
+        this.scheduleDebouncedSave(session);
       } else {
-        this.updateSnapshot(session, { latestRemote: remote });
+        const latestRemote = session.snapshot.latestRemote;
+        if (
+          latestRemote === null ||
+          latestRemote.contents !== remote.contents ||
+          latestRemote.byteLength !== remote.byteLength ||
+          latestRemote.truncated !== remote.truncated ||
+          latestRemote.diskRevision !== remote.diskRevision
+        ) {
+          this.updateSnapshot(session, { latestRemote: remote });
+        }
       }
     } catch (error: unknown) {
       if (
@@ -813,6 +844,24 @@ export class FileDocumentStore {
     this.clearTimer(session, "pollTimer");
     if (session.snapshot.isDirty) await this.flushSession(session);
     this.scheduleEvictionIfSafe(session);
+    this.enforceCacheBudget();
+  }
+
+  private enforceCacheBudget(): void {
+    const idleSafe = [...this.sessions.values()].filter(
+      (candidate) =>
+        candidate.snapshot.viewCount === 0 &&
+        !snapshotIsUnsafe(candidate.snapshot) &&
+        !candidate.savePromise &&
+        !candidate.readPromise,
+    );
+    const overflow = idleSafe.length - this.maxCachedDocuments;
+    if (overflow <= 0) return;
+    for (const candidate of idleSafe.slice(0, overflow)) {
+      this.clearTimer(candidate, "evictionTimer");
+      this.sessions.delete(candidate.identity);
+    }
+    this.emitStore();
   }
 
   private adoptRemote(session: DocumentSession, remote: FileDocumentRemoteSnapshot): void {
@@ -952,21 +1001,23 @@ export class FileDocumentStore {
 
   private scheduleDebouncedSave(session: DocumentSession): void {
     this.clearTimer(session, "debounceTimer");
-    if (session.autosavePauseCount > 0) return;
+    if (this.disposed || session.autosavePauseCount > 0) return;
     session.debounceTimer = setTimeout(() => {
       session.debounceTimer = null;
+      if (this.disposed) return;
       void this.flushSession(session);
     }, this.debounceMs);
   }
 
   private scheduleRetry(session: DocumentSession): void {
-    if (session.retryTimer || session.autosavePauseCount > 0) return;
+    if (this.disposed || session.retryTimer || session.autosavePauseCount > 0) return;
     session.retryDelayMs = Math.min(
       Math.max(session.retryDelayMs * 2, this.retryMinDelayMs),
       this.retryMaxDelayMs,
     );
     session.retryTimer = setTimeout(() => {
       session.retryTimer = null;
+      if (this.disposed) return;
       if (session.snapshot.status === "retrying" && session.snapshot.isDirty) {
         const operation = session.retryOperation;
         if (operation === "overwrite") {

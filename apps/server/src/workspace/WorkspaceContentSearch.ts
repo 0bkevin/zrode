@@ -3,10 +3,12 @@
 import { rgPath } from "@vscode/ripgrep-universal";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import type {
-  ProjectSearchTextEvent,
-  ProjectSearchTextInput,
-  ProjectSearchTextMatch,
+import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
+  type ProjectSearchTextEvent,
+  type ProjectSearchTextInput,
+  type ProjectSearchTextMatch,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -236,6 +238,13 @@ function normalizeRelativePath(input: string): string {
 
 /** Convert ripgrep's UTF-8 byte offsets to JS/browser UTF-16 slice offsets. */
 function matchesFromRipgrepRecord(record: RipgrepMatch): ReadonlyArray<ProjectSearchTextMatch> {
+  const relativePath = normalizeRelativePath(record.path);
+  if (
+    relativePath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
+    Buffer.byteLength(relativePath, "utf8") > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+  ) {
+    return [];
+  }
   const lineBytes = Buffer.from(record.lineText, "utf8");
   const lineText = record.lineText.replace(/\r?\n$/, "");
   const byteOffsets = new Set<number>([0]);
@@ -271,7 +280,7 @@ function matchesFromRipgrepRecord(record: RipgrepMatch): ReadonlyArray<ProjectSe
     );
     const previewEnd = Math.min(lineText.length, previewStart + SEARCH_LINE_PREVIEW_CODE_UNITS);
     return {
-      relativePath: normalizeRelativePath(record.path),
+      relativePath,
       line: record.line,
       column: matchStart + 1,
       endColumn: matchEnd + 1,

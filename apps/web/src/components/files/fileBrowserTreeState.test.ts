@@ -6,6 +6,7 @@ import {
   activeFileAncestorPaths,
   resetFileTreePathsPreservingExpansion,
   revealActiveFile,
+  shouldRevealActiveFile,
 } from "./fileBrowserTreeState";
 
 function directoryHandle(path: string, expanded: boolean): FileTreeDirectoryHandle {
@@ -52,6 +53,33 @@ function treeModel(
 }
 
 describe("file browser tree state", () => {
+  it("defers hidden reveals and forces one when the tree becomes visible", () => {
+    expect(
+      shouldRevealActiveFile({
+        activePathChanged: true,
+        pathsChanged: true,
+        previouslyVisible: true,
+        visible: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRevealActiveFile({
+        activePathChanged: false,
+        pathsChanged: false,
+        previouslyVisible: false,
+        visible: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRevealActiveFile({
+        activePathChanged: false,
+        pathsChanged: false,
+        previouslyVisible: true,
+        visible: true,
+      }),
+    ).toBe(false);
+  });
+
   it("does not reset identical paths and preserves surviving expanded directories", () => {
     const src = directoryHandle("src/", true);
     const removed = directoryHandle("removed/", true);

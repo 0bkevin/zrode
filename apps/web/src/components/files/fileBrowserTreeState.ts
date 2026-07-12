@@ -27,6 +27,17 @@ export function activeFileAncestorPaths(relativePath: string): string[] {
   return segments.slice(0, -1).map((_, index) => `${segments.slice(0, index + 1).join("/")}/`);
 }
 
+export function shouldRevealActiveFile(input: {
+  readonly activePathChanged: boolean;
+  readonly pathsChanged: boolean;
+  readonly previouslyVisible: boolean;
+  readonly visible: boolean;
+}): boolean {
+  return (
+    input.visible && (input.pathsChanged || input.activePathChanged || !input.previouslyVisible)
+  );
+}
+
 /**
  * Rebuild the coarse tree snapshot only when its canonical path set changed.
  * Pierre preserves selection/focus itself; passing the currently expanded

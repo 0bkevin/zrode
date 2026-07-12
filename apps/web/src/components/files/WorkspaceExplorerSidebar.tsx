@@ -19,6 +19,8 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import FileBrowserPanel from "./FileBrowserPanel";
 import WorkspaceOpenEditors from "./WorkspaceOpenEditors";
 import WorkspaceSearchView from "./WorkspaceSearchView";
+import { fileDocumentStore } from "./fileDocumentRuntime";
+import { isFileDocumentSnapshotUnsafe } from "./fileDocumentStore";
 
 type FileSurface = Extract<RightPanelSurface, { kind: "file" }>;
 
@@ -55,6 +57,10 @@ function WorkspaceExplorerSidebar({
   const view = panelState.workspaceSidebarView;
   const writeFile = useAtomCommand(projectEnvironment.writeFile, { reportFailure: false });
   const createDirectory = useAtomCommand(projectEnvironment.createDirectory, {
+    reportFailure: false,
+  });
+  const deleteEntry = useAtomCommand(projectEnvironment.deleteEntry, { reportFailure: false });
+  const prepareDeleteEntry = useAtomCommand(projectEnvironment.prepareDeleteEntry, {
     reportFailure: false,
   });
 
@@ -96,6 +102,95 @@ function WorkspaceExplorerSidebar({
       throw error instanceof Error ? error : new Error("Could not create the folder.");
     },
     [createDirectory, cwd, environmentId],
+  );
+
+  const permanentlyDeleteEntry = useCallback(
+    async (relativePath: string, kind: "file" | "directory") => {
+      const includesPath = (candidate: string) =>
+        candidate === relativePath ||
+        (kind === "directory" && candidate.startsWith(`${relativePath}/`));
+      const unsafe = fileDocumentStore
+        .getUnsafeSnapshots()
+        .filter(
+          (snapshot) =>
+            snapshot.key.environmentId === environmentId &&
+            snapshot.key.cwd === cwd &&
+            includesPath(snapshot.key.relativePath) &&
+            isFileDocumentSnapshotUnsafe(snapshot),
+        );
+      if (unsafe.length > 0) {
+        throw new Error(
+          `Save or discard unsaved changes before deleting ${unsafe.length === 1 ? "this file" : "these files"}.`,
+        );
+      }
+
+      const prepared = await prepareDeleteEntry({
+        environmentId,
+        input:
+          kind === "directory"
+            ? { cwd, relativePath, expectedKind: "directory", recursive: true }
+            : { cwd, relativePath, expectedKind: "file", recursive: false },
+      });
+      if (prepared._tag !== "Success") {
+        if (isAtomCommandInterrupted(prepared))
+          throw new Error("Deletion preparation was canceled.");
+        const error = squashAtomCommandFailure(prepared);
+        throw error instanceof Error
+          ? error
+          : new Error("Could not inspect the item for deletion.");
+      }
+
+      const confirmed = window.confirm(
+        kind === "directory"
+          ? `Permanently delete “${relativePath}” and its ${prepared.value.descendantCount.toLocaleString()} descendant${prepared.value.descendantCount === 1 ? "" : "s"}? This cannot be undone.`
+          : `Permanently delete “${relativePath}”? This cannot be undone.`,
+      );
+      if (!confirmed) return { status: "canceled" } as const;
+
+      const result = await deleteEntry({
+        environmentId,
+        input:
+          kind === "directory"
+            ? {
+                cwd,
+                relativePath,
+                expectedKind: "directory",
+                recursive: true,
+                entryRevision: prepared.value.entryRevision,
+                permanentlyDelete: true,
+              }
+            : {
+                cwd,
+                relativePath,
+                expectedKind: "file",
+                recursive: false,
+                entryRevision: prepared.value.entryRevision,
+                permanentlyDelete: true,
+              },
+      });
+      if (result._tag !== "Success") {
+        if (isAtomCommandInterrupted(result)) throw new Error("Deletion was canceled.");
+        const error = squashAtomCommandFailure(result);
+        throw error instanceof Error ? error : new Error("Could not permanently delete the item.");
+      }
+
+      const affectedSurfaceIds = panelState.surfaces.flatMap((surface) => {
+        if (surface.kind !== "file" || !includesPath(surface.relativePath)) return [];
+        // A clean document can become dirty while the RPC is in flight. Keep
+        // that view open as an orphan instead of discarding its in-memory text.
+        const current = fileDocumentStore.getSnapshot({
+          environmentId,
+          cwd,
+          relativePath: surface.relativePath,
+        });
+        return current && isFileDocumentSnapshotUnsafe(current) ? [] : [surface.id];
+      });
+      if (affectedSurfaceIds.length > 0) {
+        useRightPanelStore.getState().closeFileSurfaces(threadRef, affectedSurfaceIds);
+      }
+      return { status: "deleted" } as const;
+    },
+    [cwd, deleteEntry, environmentId, panelState.surfaces, prepareDeleteEntry, threadRef],
   );
 
   return (
@@ -163,29 +258,33 @@ function WorkspaceExplorerSidebar({
           focusRequestId={panelState.workspaceSidebarFocusRequestId}
           onOpenFile={(relativePath, target) => onOpenFile(relativePath, target)}
         />
-      ) : (
-        <>
-          {onCloseFile && onCloseAllFiles ? (
-            <WorkspaceOpenEditors
-              threadRef={threadRef}
-              pendingSurfaceIds={pendingSurfaceIds}
-              onCloseFile={onCloseFile}
-              onCloseAllFiles={onCloseAllFiles}
-            />
-          ) : null}
-          <FileBrowserPanel
-            key={`${environmentId}:${cwd}`}
-            environmentId={environmentId}
-            cwd={cwd}
-            projectName={projectName}
-            activeRelativePath={activeRelativePath}
-            onOpenFile={(relativePath) => onOpenFile(relativePath)}
-            onCreateFile={createFile}
-            onCreateDirectory={createFolder}
-            onShowSearch={showSearch}
+      ) : null}
+      <div
+        className={cn("min-h-0 flex-1 flex-col", view === "explorer" ? "flex" : "hidden")}
+        aria-hidden={view === "explorer" ? undefined : true}
+      >
+        {onCloseFile && onCloseAllFiles ? (
+          <WorkspaceOpenEditors
+            threadRef={threadRef}
+            pendingSurfaceIds={pendingSurfaceIds}
+            onCloseFile={onCloseFile}
+            onCloseAllFiles={onCloseAllFiles}
           />
-        </>
-      )}
+        ) : null}
+        <FileBrowserPanel
+          key={`${environmentId}:${cwd}`}
+          environmentId={environmentId}
+          cwd={cwd}
+          projectName={projectName}
+          activeRelativePath={activeRelativePath}
+          onOpenFile={(relativePath) => onOpenFile(relativePath)}
+          onCreateFile={createFile}
+          onCreateDirectory={createFolder}
+          onDeleteEntry={permanentlyDeleteEntry}
+          onShowSearch={showSearch}
+          visible={view === "explorer"}
+        />
+      </div>
     </div>
   );
 }

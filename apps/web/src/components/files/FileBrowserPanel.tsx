@@ -8,6 +8,7 @@ import {
   ListFilter,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,7 +17,11 @@ import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
 import { ZRODE_PIERRE_ICONS } from "~/pierre-icons";
 
-import { resetFileTreePathsPreservingExpansion, revealActiveFile } from "./fileBrowserTreeState";
+import {
+  resetFileTreePathsPreservingExpansion,
+  revealActiveFile,
+  shouldRevealActiveFile,
+} from "./fileBrowserTreeState";
 import {
   clearFailedPierreCreation,
   type OptimisticWorkspaceEntry,
@@ -35,7 +40,12 @@ interface FileBrowserPanelProps {
   onOpenFile: (relativePath: string) => void;
   onCreateFile: (relativePath: string) => Promise<void>;
   onCreateDirectory: (relativePath: string) => Promise<void>;
+  onDeleteEntry: (
+    relativePath: string,
+    kind: ProjectEntry["kind"],
+  ) => Promise<{ readonly status: "deleted" | "canceled" }>;
   onShowSearch: () => void;
+  visible: boolean;
 }
 
 const OPTIMISTIC_ENTRY_TTL_MS = 10_000;
@@ -122,7 +132,9 @@ function FileBrowserPanel({
   onOpenFile,
   onCreateFile,
   onCreateDirectory,
+  onDeleteEntry,
   onShowSearch,
+  visible,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
   const entriesQuery = useProjectEntriesQuery(environmentId, cwd);
@@ -135,6 +147,8 @@ function FileBrowserPanel({
     [],
   );
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [selectedEntry, setSelectedEntry] = useState<ProjectEntry | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const filterInputRef = useRef<HTMLInputElement>(null);
   const creationSessionRef = useRef<WorkspaceCreationSession | null>(creationSession);
   const modelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
@@ -170,6 +184,11 @@ function FileBrowserPanel({
     onSelectionChange: (selectedPaths) => {
       if (suppressSelectionChangeRef.current) return;
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
+      setSelectedEntry(
+        selectedPath && entryKindsRef.current.has(selectedPath)
+          ? { path: selectedPath, kind: entryKindsRef.current.get(selectedPath)! }
+          : null,
+      );
       if (
         selectedPath &&
         selectedPath !== activeRelativePathRef.current &&
@@ -263,6 +282,7 @@ function FileBrowserPanel({
   const previousTreePathsRef = useRef<readonly string[]>([]);
   const previousDirectoryPathsRef = useRef<readonly string[]>([]);
   const previousActivePathRef = useRef<string | null>(null);
+  const previousVisibleRef = useRef(visible);
 
   useEffect(() => {
     suppressSelectionChangeRef.current = true;
@@ -278,14 +298,23 @@ function FileBrowserPanel({
       previousTreePathsRef.current = treePaths;
       previousDirectoryPathsRef.current = directoryPaths;
       previousActivePathRef.current = activeRelativePath;
+      const previouslyVisible = previousVisibleRef.current;
+      previousVisibleRef.current = visible;
 
-      if (pathsChanged || activePathChanged) {
+      if (
+        shouldRevealActiveFile({
+          activePathChanged,
+          pathsChanged,
+          previouslyVisible,
+          visible,
+        })
+      ) {
         revealActiveFile({ activeRelativePath, entryKinds, model });
       }
     } finally {
       suppressSelectionChangeRef.current = false;
     }
-  }, [activeRelativePath, directoryPaths, entryKinds, model, treePaths]);
+  }, [activeRelativePath, directoryPaths, entryKinds, model, treePaths, visible]);
 
   useEffect(() => {
     if (optimisticEntries.length === 0) return;
@@ -374,6 +403,27 @@ function FileBrowserPanel({
   );
   const creationBusy = creationSession?.status === "committing";
 
+  const deleteSelectedEntry = useCallback(() => {
+    if (!selectedEntry || deleting || creationSession !== null) return;
+    setDeleting(true);
+    setCreationError(null);
+    void onDeleteEntry(selectedEntry.path, selectedEntry.kind).then(
+      (outcome) => {
+        if (outcome.status === "canceled") {
+          setDeleting(false);
+          return;
+        }
+        setSelectedEntry(null);
+        refreshEntries();
+        setDeleting(false);
+      },
+      (error: unknown) => {
+        setCreationError(error instanceof Error ? error.message : "Could not delete the item.");
+        setDeleting(false);
+      },
+    );
+  }, [creationSession, deleting, onDeleteEntry, refreshEntries, selectedEntry]);
+
   return (
     <div
       className="flex min-h-0 flex-1 flex-col bg-background"
@@ -391,6 +441,16 @@ function FileBrowserPanel({
             {entriesQuery.data?.truncated ? " · partial" : ""}
           </div>
         </div>
+        <button
+          type="button"
+          className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+          aria-label="Permanently delete selected item"
+          title="Delete Permanently"
+          disabled={selectedEntry === null || creationSession !== null || deleting}
+          onClick={deleteSelectedEntry}
+        >
+          <Trash2 className="size-3.5" />
+        </button>
         <button
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
@@ -483,8 +543,10 @@ function FileBrowserPanel({
           ) : null}
         </div>
       ) : null}
-      {creationBusy ? (
-        <div className="shrink-0 px-2 py-1 text-[10px] text-muted-foreground">Creating…</div>
+      {creationBusy || deleting ? (
+        <div className="shrink-0 px-2 py-1 text-[10px] text-muted-foreground">
+          {deleting ? "Deleting permanently…" : "Creating…"}
+        </div>
       ) : null}
       {creationError ? (
         <div className="shrink-0 border-b border-destructive/20 px-2 py-1.5 text-[11px] leading-relaxed text-destructive">

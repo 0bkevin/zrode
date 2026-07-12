@@ -14,6 +14,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import { isWindowsAbsolutePath } from "@t3tools/shared/path";
+import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
+} from "@t3tools/contracts";
 
 export class WorkspaceRootNotExistsError extends Schema.TaggedErrorClass<WorkspaceRootNotExistsError>()(
   "WorkspaceRootNotExistsError",
@@ -201,8 +206,15 @@ export const make = Effect.gen(function* () {
 
   const resolveRelativePathWithinRoot: WorkspacePaths["Service"]["resolveRelativePathWithinRoot"] =
     Effect.fn("WorkspacePaths.resolveRelativePathWithinRoot")(function* (input) {
-      const normalizedInputPath = input.relativePath.trim();
-      if (path.isAbsolute(normalizedInputPath)) {
+      const trimmedInputPath = input.relativePath.trim();
+      const normalizedInputPath = toPosixRelativePath(trimmedInputPath);
+      if (
+        normalizedInputPath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
+        Buffer.byteLength(normalizedInputPath, "utf8") >
+          PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES ||
+        isWindowsAbsolutePath(trimmedInputPath) ||
+        path.isAbsolute(normalizedInputPath)
+      ) {
         return yield* new WorkspacePathOutsideRootError({
           workspaceRoot: input.workspaceRoot,
           relativePath: input.relativePath,

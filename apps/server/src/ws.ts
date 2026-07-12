@@ -38,6 +38,7 @@ import {
   type ProjectFileFailure,
   type ProjectFileOperation,
   ProjectCreateDirectoryError,
+  ProjectDeleteEntryError,
   ProjectListEntriesError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
@@ -226,6 +227,9 @@ function projectFileFailureContext(
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
+  readonly recoveryPath?: string;
+  readonly originalPathOccupied?: boolean;
+  readonly dataMayRemainHidden?: boolean;
   readonly byteLength?: number;
   readonly maxByteLength?: number;
 } {
@@ -234,10 +238,13 @@ function projectFileFailureContext(
       return { failure: "workspace_path_outside_root" };
     case "WorkspaceFileSystemOperationError":
       return {
-        failure:
-          error.cause instanceof Error && (error.cause as NodeJS.ErrnoException).code === "ENOENT"
-            ? "path_not_found"
-            : "operation_failed",
+        failure: (() => {
+          const code =
+            error.cause instanceof Error ? (error.cause as NodeJS.ErrnoException).code : undefined;
+          if (code === "ENOENT") return "path_not_found";
+          if (code === "ENOTEMPTY" || code === "EEXIST") return "directory_not_empty";
+          return "operation_failed";
+        })(),
         resolvedPath: error.resolvedPath,
         operation: error.operation,
         operationPath: error.operationPath,
@@ -254,6 +261,16 @@ function projectFileFailureContext(
       return { failure: "path_already_exists", resolvedPath: error.resolvedPath };
     case "WorkspaceDirectoryParentChangedError":
       return { failure: "directory_parent_changed" };
+    case "WorkspaceEntryChangedError":
+      return { failure: "entry_changed", resolvedPath: error.resolvedPath };
+    case "WorkspaceDeleteRecoveryError":
+      return {
+        failure: "delete_recovery_partial",
+        resolvedPath: error.resolvedPath,
+        recoveryPath: error.recoveryPath,
+        originalPathOccupied: error.originalPathOccupied,
+        dataMayRemainHidden: error.dataMayRemainHidden,
+      };
     case "WorkspacePathNotDirectoryError":
       return { failure: "path_not_directory", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
@@ -366,6 +383,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.sourceControlPublishRepository, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsListEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsPrepareDeleteEntry, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsDeleteEntry, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchText, AuthOrchestrationReadScope],
@@ -1483,6 +1502,36 @@ const makeWsRpcLayer = (
               Effect.mapError(
                 (cause) =>
                   new ProjectCreateDirectoryError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsDeleteEntry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsDeleteEntry,
+            workspaceFileSystem.deleteEntry(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectDeleteEntryError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsPrepareDeleteEntry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsPrepareDeleteEntry,
+            workspaceFileSystem.prepareDeleteEntry(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectDeleteEntryError({
                     ...input,
                     ...projectFileFailureContext(cause),
                     cause,

@@ -1,8 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentId,
-  ProjectSearchTextInput,
-  ProjectSearchTextMatch,
+import {
+  PROJECT_SEARCH_TEXT_QUERY_MAX_LENGTH,
+  type EnvironmentId,
+  type ProjectSearchTextInput,
+  type ProjectSearchTextMatch,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
@@ -26,6 +27,16 @@ import { projectEnvironment } from "~/state/projects";
 import type { FileRevealTarget } from "~/rightPanelStore";
 
 import { PierreEntryIcon } from "../chat/PierreEntryIcon";
+import {
+  normalizeWorkspaceSearchGlobInput,
+  normalizeWorkspaceSearchQuery,
+  parseWorkspaceSearchGlobs,
+  WORKSPACE_SEARCH_GLOB_INPUT_MAX_LENGTH,
+} from "./workspaceSearchInput";
+import {
+  calculateWorkspaceSearchVirtualWindow,
+  WORKSPACE_SEARCH_ROW_HEIGHT,
+} from "./workspaceSearchVirtualization";
 
 interface WorkspaceSearchViewProps {
   environmentId: EnvironmentId;
@@ -37,14 +48,6 @@ interface WorkspaceSearchViewProps {
 interface SearchRequest {
   readonly id: number;
   readonly input: ProjectSearchTextInput;
-}
-
-function parseGlobs(value: string): string[] {
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .slice(0, 64);
 }
 
 function resultError(result: AsyncResult.AsyncResult<unknown, unknown>): string | null {
@@ -98,6 +101,28 @@ function SearchResults({
     }
     return [...grouped.entries()];
   }, [snapshot?.matches]);
+  const [collapsedPaths, setCollapsedPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const rows = useMemo(() => {
+    const flattened: SearchResultRow[] = [];
+    for (const [relativePath, matches] of groups) {
+      flattened.push({ kind: "group", relativePath, matches });
+      if (collapsedPaths.has(relativePath)) continue;
+
+      const occurrences = new Map<string, number>();
+      for (const match of matches) {
+        const signature = `${match.line}:${match.column}:${match.endColumn}:${match.lineTextStartColumn}:${match.matchText}:${match.lineText}`;
+        const occurrence = occurrences.get(signature) ?? 0;
+        occurrences.set(signature, occurrence + 1);
+        flattened.push({
+          kind: "match",
+          key: `${relativePath}:${signature}:${occurrence}`,
+          relativePath,
+          match,
+        });
+      }
+    }
+    return flattened;
+  }, [collapsedPaths, groups]);
   const running = error === null && snapshot?.complete !== true;
   const displayedCount = snapshot?.complete ? snapshot.matchCount : (snapshot?.matches.length ?? 0);
 
@@ -130,90 +155,182 @@ function SearchResults({
       ) : groups.length === 0 && !running ? (
         <div className="p-4 text-center text-xs text-muted-foreground">No results found.</div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto py-0.5">
-          {groups.map(([relativePath, matches]) => (
-            <SearchResultGroup
-              key={relativePath}
-              relativePath={relativePath}
-              matches={matches}
-              onOpenFile={onOpenFile}
-            />
-          ))}
-        </div>
+        <VirtualSearchResults
+          rows={rows}
+          collapsedPaths={collapsedPaths}
+          onToggleGroup={(relativePath) => {
+            setCollapsedPaths((current) => {
+              const next = new Set(current);
+              if (next.has(relativePath)) next.delete(relativePath);
+              else next.add(relativePath);
+              return next;
+            });
+          }}
+          onOpenFile={onOpenFile}
+        />
       )}
     </div>
   );
 }
 
-function SearchResultGroup({
-  relativePath,
-  matches,
+type SearchResultRow =
+  | {
+      readonly kind: "group";
+      readonly relativePath: string;
+      readonly matches: readonly ProjectSearchTextMatch[];
+    }
+  | {
+      readonly kind: "match";
+      readonly key: string;
+      readonly relativePath: string;
+      readonly match: ProjectSearchTextMatch;
+    };
+
+function VirtualSearchResults({
+  rows,
+  collapsedPaths,
+  onToggleGroup,
   onOpenFile,
 }: {
-  relativePath: string;
-  matches: readonly ProjectSearchTextMatch[];
+  rows: readonly SearchResultRow[];
+  collapsedPaths: ReadonlySet<string>;
+  onToggleGroup: (relativePath: string) => void;
   onOpenFile: WorkspaceSearchViewProps["onOpenFile"];
 }) {
   const { resolvedTheme } = useTheme();
-  const [expanded, setExpanded] = useState(true);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  useEffect(() => {
+    const element = scrollContainerRef.current;
+    if (!element) return;
+
+    const measure = () => setViewportHeight(element.clientHeight);
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollRafRef.current !== null) window.cancelAnimationFrame(scrollRafRef.current);
+    },
+    [],
+  );
+
+  const virtualWindow = calculateWorkspaceSearchVirtualWindow({
+    rowCount: rows.length,
+    scrollTop,
+    viewportHeight,
+  });
+  const visibleRows = rows.slice(virtualWindow.startIndex, virtualWindow.endIndex);
+
+  return (
+    <div
+      ref={scrollContainerRef}
+      className="min-h-0 flex-1 overflow-y-auto py-0.5"
+      onScroll={() => {
+        if (scrollRafRef.current !== null) return;
+        scrollRafRef.current = window.requestAnimationFrame(() => {
+          scrollRafRef.current = null;
+          setScrollTop(scrollContainerRef.current?.scrollTop ?? 0);
+        });
+      }}
+    >
+      <div className="relative" style={{ height: virtualWindow.totalHeight }}>
+        <div
+          className="absolute inset-x-0 top-0"
+          style={{ transform: `translateY(${virtualWindow.offsetTop}px)` }}
+        >
+          {visibleRows.map((row) =>
+            row.kind === "group" ? (
+              <SearchResultGroupRow
+                key={`group:${row.relativePath}`}
+                relativePath={row.relativePath}
+                matchCount={row.matches.length}
+                expanded={!collapsedPaths.has(row.relativePath)}
+                theme={resolvedTheme}
+                onToggle={() => onToggleGroup(row.relativePath)}
+              />
+            ) : (
+              <SearchResultMatchRow key={row.key} row={row} onOpenFile={onOpenFile} />
+            ),
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SearchResultGroupRow({
+  relativePath,
+  matchCount,
+  expanded,
+  theme,
+  onToggle,
+}: {
+  relativePath: string;
+  matchCount: number;
+  expanded: boolean;
+  theme: "light" | "dark";
+  onToggle: () => void;
+}) {
   const name = relativePath.slice(relativePath.lastIndexOf("/") + 1);
   const directory = relativePath === name ? "" : relativePath.slice(0, -(name.length + 1));
-  const keyedMatches = useMemo(() => {
-    const occurrences = new Map<string, number>();
-    return matches.map((match) => {
-      const signature = `${match.line}:${match.column}:${match.endColumn}:${match.lineTextStartColumn}:${match.matchText}:${match.lineText}`;
-      const occurrence = occurrences.get(signature) ?? 0;
-      occurrences.set(signature, occurrence + 1);
-      return { key: `${signature}:${occurrence}`, match };
-    });
-  }, [matches]);
   return (
-    <div>
-      <button
-        type="button"
-        className="flex h-6 w-full min-w-0 items-center gap-1 px-1.5 text-left text-xs hover:bg-accent/60"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-        title={relativePath}
-      >
-        {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-        <PierreEntryIcon
-          pathValue={relativePath}
-          kind="file"
-          theme={resolvedTheme}
-          className="size-3.5"
-        />
-        <span className="truncate font-medium text-foreground">{name}</span>
-        {directory ? (
-          <span className="truncate text-[10px] text-muted-foreground">{directory}</span>
-        ) : null}
-        <span className="ml-auto rounded-full bg-muted px-1.5 text-[9px] text-muted-foreground">
-          {matches.length}
-        </span>
-      </button>
-      {expanded
-        ? keyedMatches.map(({ key, match }) => (
-            <button
-              key={key}
-              type="button"
-              className="flex h-6 w-full min-w-0 items-center gap-2 pl-7 pr-2 text-left text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-              onClick={() =>
-                onOpenFile(relativePath, {
-                  kind: "range",
-                  start: { line: match.line, column: match.column },
-                  end: { line: match.line, column: match.endColumn },
-                })
-              }
-              title={`${relativePath}:${match.line}:${match.column}`}
-            >
-              <span className="w-8 shrink-0 text-right font-mono text-[10px] opacity-70">
-                {match.line}
-              </span>
-              <MatchPreview match={match} />
-            </button>
-          ))
-        : null}
-    </div>
+    <button
+      type="button"
+      className="flex w-full min-w-0 items-center gap-1 px-1.5 text-left text-xs hover:bg-accent/60"
+      style={{ height: WORKSPACE_SEARCH_ROW_HEIGHT }}
+      aria-expanded={expanded}
+      onClick={onToggle}
+      title={relativePath}
+    >
+      {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+      <PierreEntryIcon pathValue={relativePath} kind="file" theme={theme} className="size-3.5" />
+      <span className="truncate font-medium text-foreground">{name}</span>
+      {directory ? (
+        <span className="truncate text-[10px] text-muted-foreground">{directory}</span>
+      ) : null}
+      <span className="ml-auto rounded-full bg-muted px-1.5 text-[9px] text-muted-foreground">
+        {matchCount}
+      </span>
+    </button>
+  );
+}
+
+function SearchResultMatchRow({
+  row,
+  onOpenFile,
+}: {
+  row: Extract<SearchResultRow, { kind: "match" }>;
+  onOpenFile: WorkspaceSearchViewProps["onOpenFile"];
+}) {
+  const { relativePath, match } = row;
+  return (
+    <button
+      type="button"
+      className="flex w-full min-w-0 items-center gap-2 pl-7 pr-2 text-left text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+      style={{ height: WORKSPACE_SEARCH_ROW_HEIGHT }}
+      onClick={() =>
+        onOpenFile(relativePath, {
+          kind: "range",
+          start: { line: match.line, column: match.column },
+          end: { line: match.line, column: match.endColumn },
+        })
+      }
+      title={`${relativePath}:${match.line}:${match.column}`}
+    >
+      <span className="w-8 shrink-0 text-right font-mono text-[10px] opacity-70">{match.line}</span>
+      <MatchPreview match={match} />
+    </button>
   );
 }
 
@@ -244,7 +361,8 @@ function WorkspaceSearchView({
       window.clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
-    if (query.length === 0) {
+    const normalizedQuery = normalizeWorkspaceSearchQuery(query);
+    if (normalizedQuery.length === 0) {
       setRequest(null);
       return;
     }
@@ -253,12 +371,12 @@ function WorkspaceSearchView({
       id: nextRequestIdRef.current,
       input: {
         cwd,
-        query,
+        query: normalizedQuery,
         isRegex,
         matchCase,
         wholeWord,
-        includes: parseGlobs(include),
-        excludes: parseGlobs(exclude),
+        includes: parseWorkspaceSearchGlobs(include),
+        excludes: parseWorkspaceSearchGlobs(exclude),
         limit: 2_000,
       },
     });
@@ -295,8 +413,9 @@ function WorkspaceSearchView({
             <input
               ref={queryRef}
               value={query}
+              maxLength={PROJECT_SEARCH_TEXT_QUERY_MAX_LENGTH}
               onChange={(event) => {
-                setQuery(event.target.value);
+                setQuery(normalizeWorkspaceSearchQuery(event.target.value));
                 setRequest(null);
               }}
               onKeyDown={(event) => {
@@ -370,8 +489,9 @@ function WorkspaceSearchView({
           <div className="space-y-1">
             <input
               value={include}
+              maxLength={WORKSPACE_SEARCH_GLOB_INPUT_MAX_LENGTH}
               onChange={(event) => {
-                setInclude(event.target.value);
+                setInclude(normalizeWorkspaceSearchGlobInput(event.target.value));
                 setRequest(null);
               }}
               placeholder="files to include (e.g. src/**, *.ts)"
@@ -380,8 +500,9 @@ function WorkspaceSearchView({
             />
             <input
               value={exclude}
+              maxLength={WORKSPACE_SEARCH_GLOB_INPUT_MAX_LENGTH}
               onChange={(event) => {
-                setExclude(event.target.value);
+                setExclude(normalizeWorkspaceSearchGlobInput(event.target.value));
                 setRequest(null);
               }}
               placeholder="files to exclude (e.g. dist/**)"
@@ -401,7 +522,7 @@ function WorkspaceSearchView({
         />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center text-xs leading-relaxed text-muted-foreground">
-          Search across files in this workspace.
+          Search saved files on disk in this workspace. Unsaved editor changes are not included.
         </div>
       )}
     </div>

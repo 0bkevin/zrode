@@ -713,6 +713,21 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("closes only the surfaces captured by a close-others confirmation", () => {
+    useRightPanelStore.getState().openBrowser(refA, "tab-a");
+    useRightPanelStore.getState().openFile(refA, "src/index.ts");
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    const capturedIds = ["browser:tab-a", "terminal:term-1"];
+
+    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().closeSurfaces(refA, capturedIds);
+
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.isOpen).toBe(true);
+    expect(state.activeSurfaceId).toBe("plan");
+    expect(state.surfaces.map((surface) => surface.id)).toEqual(["file:src/index.ts", "plan"]);
+  });
+
   it("closing surfaces to the right activates the selected surface when active was removed", () => {
     useRightPanelStore.getState().openBrowser(refA, "tab-a");
     useRightPanelStore.getState().openFile(refA, "src/index.ts");
@@ -728,6 +743,21 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("does not close a surface opened after close-to-right captured its ids", () => {
+    useRightPanelStore.getState().openBrowser(refA, "tab-a");
+    useRightPanelStore.getState().openFile(refA, "src/index.ts");
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    const capturedIds = ["file:src/index.ts", "terminal:term-1"];
+
+    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().closeSurfaces(refA, capturedIds);
+
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.isOpen).toBe(true);
+    expect(state.activeSurfaceId).toBe("plan");
+    expect(state.surfaces.map((surface) => surface.id)).toEqual(["browser:tab-a", "plan"]);
+  });
+
   it("closing all surfaces closes the panel", () => {
     useRightPanelStore.getState().openBrowser(refA, "tab-a");
     useRightPanelStore.getState().openFile(refA, "src/index.ts");
@@ -738,6 +768,30 @@ describe("rightPanelStore", () => {
       isOpen: false,
       activeSurfaceId: null,
       surfaces: [],
+      ...defaultWorkspaceSidebarState,
+    });
+  });
+
+  it("does not close a surface opened after close-all captured its ids", () => {
+    useRightPanelStore.getState().openBrowser(refA, "tab-a");
+    useRightPanelStore.getState().openFile(refA, "src/index.ts");
+    const capturedIds = ["browser:tab-a", "file:src/index.ts"];
+
+    useRightPanelStore.getState().openTerminal(refA, "term-1");
+    useRightPanelStore.getState().closeSurfaces(refA, capturedIds);
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "terminal:term-1",
+      surfaces: [
+        {
+          id: "terminal:term-1",
+          kind: "terminal",
+          resourceId: "term-1",
+          terminalIds: ["term-1"],
+          activeTerminalId: "term-1",
+        },
+      ],
       ...defaultWorkspaceSidebarState,
     });
   });

@@ -37,8 +37,8 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileEvents", (it) =
         ),
       );
 
-      expect(received[0]).toMatchObject({ version: 1, sequence: 0, type: "ready", cwd });
-      expect(received[1]).toMatchObject({ version: 1, sequence: 1, type: "changed", cwd });
+      expect(received[0]).toMatchObject({ version: 2, sequence: 0, type: "ready", cwd });
+      expect(received[1]).toMatchObject({ version: 2, sequence: 1, type: "changed", cwd });
       expect(received[1]?.type === "changed" ? received[1].structuralPaths : []).toContain(
         "notes.md",
       );
@@ -136,32 +136,29 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileEvents", (it) =
     }),
   );
 
-  it.effect("collapses an over-capacity change burst into a bounded resync marker", () =>
-    Effect.gen(function* () {
-      const fileEvents = yield* WorkspaceFileEvents.WorkspaceFileEvents;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "zrode-file-events-" });
-      const stream = yield* fileEvents.subscribe({ cwd });
+  it.effect("marks an over-capacity path-hint set for resynchronization", () =>
+    Effect.sync(() => {
+      const contentPaths = new Set<string>();
+      const structuralPaths = new Set<string>();
 
-      const received = Array.from(
-        yield* stream.pipe(
-          Stream.tap((event) =>
-            event.type === "ready"
-              ? Effect.forEach(
-                  Array.from({ length: 300 }, (_, index) => index),
-                  (index) => fileSystem.writeFileString(path.join(cwd, `file-${index}.txt`), "x\n"),
-                  { concurrency: "unbounded", discard: true },
-                )
-              : Effect.void,
-          ),
-          Stream.take(2),
-          Stream.runCollect,
-          Effect.timeout("10 seconds"),
-        ),
-      );
-
-      expect(received[1]).toMatchObject({ type: "resync", reason: "overflow" });
+      for (let index = 0; index < 256; index += 1) {
+        expect(
+          WorkspaceFileEvents.recordWorkspaceFileEventPathHint({
+            contentPaths,
+            structuralPaths,
+            eventName: "add",
+            relativePath: `file-${index}.txt`,
+          }),
+        ).toBe("recorded");
+      }
+      expect(
+        WorkspaceFileEvents.recordWorkspaceFileEventPathHint({
+          contentPaths,
+          structuralPaths,
+          eventName: "add",
+          relativePath: "overflow.txt",
+        }),
+      ).toBe("overflow");
     }),
   );
 
@@ -191,7 +188,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileEvents", (it) =
       );
 
       expect(received[1]).toMatchObject({ type: "resync", reason: "root-deleted" });
-      expect(received[2]).toMatchObject({ type: "ready" });
+      expect(received[2]).toMatchObject({ type: "ready", sequence: 2 });
     }),
   );
 });

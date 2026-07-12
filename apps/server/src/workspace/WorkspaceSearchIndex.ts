@@ -6,10 +6,12 @@ import * as LayerMap from "effect/LayerMap";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
-import type {
-  ProjectEntry,
-  ProjectListEntriesResult,
-  ProjectSearchEntriesResult,
+import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
+  type ProjectEntry,
+  type ProjectListEntriesResult,
+  type ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
@@ -120,6 +122,12 @@ function parentPathOf(input: string): string | undefined {
 function toProjectEntry(item: MixedItem): ProjectEntry | null {
   const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath));
   if (!normalizedPath) {
+    return null;
+  }
+  if (
+    normalizedPath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
+    Buffer.byteLength(normalizedPath, "utf8") > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+  ) {
     return null;
   }
 

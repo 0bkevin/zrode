@@ -187,7 +187,7 @@ index 5c34e1837..5033a6ec4 100644
 +		const liveLineCount = textDocument?.lineCount ?? linesFromFileContents(liveText).length;
 +		const { options: currentOptions } = this.getRenderOptions(canonicalFile);
 +		if (source.contents !== liveText || !areFileRenderOptionsEqual(options, currentOptions) || result.code.length !== liveLineCount) return;
-+		const triggerRenderUpdate = !renderCache.highlighted || !areFileRenderOptionsEqual(options, renderCache.options);
++		const triggerRenderUpdate = renderCache.result !== result || !renderCache.highlighted || !areFileRenderOptionsEqual(options, renderCache.options);
 @@ -380 +406 @@ var FileRenderer = class {
 -			file,
 +			file: canonicalFile,

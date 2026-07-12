@@ -10,22 +10,27 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
-import type { ProjectFileEvent, ProjectWatchFilesInput } from "@t3tools/contracts";
+import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
+  type ProjectFileEvent,
+  type ProjectWatchFilesInput,
+} from "@t3tools/contracts";
 
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const COALESCE_WINDOW_MS = 75;
 const RESTART_DELAY_MS = 250;
 const MAX_PATHS_PER_EVENT = 256;
-const MAX_RELATIVE_PATH_LENGTH = 512;
 const IGNORED_DIRECTORY_NAMES = new Set([".git", "node_modules"]);
 
-type ChangedEvent = Extract<ProjectFileEvent, { readonly type: "changed" }>;
+type SequencedEvent = Extract<ProjectFileEvent, { readonly version: 2 }>;
+type ChangedEvent = Extract<SequencedEvent, { readonly type: "changed" }>;
 type ResyncReason = Extract<ProjectFileEvent, { readonly type: "resync" }>["reason"];
 type SharedEvent =
-  | Omit<Extract<ProjectFileEvent, { readonly type: "ready" }>, "cwd">
+  | Omit<Extract<SequencedEvent, { readonly type: "ready" }>, "cwd">
   | Omit<ChangedEvent, "cwd">
-  | Omit<Extract<ProjectFileEvent, { readonly type: "resync" }>, "cwd">;
+  | Omit<Extract<SequencedEvent, { readonly type: "resync" }>, "cwd">;
 
 type SharedWatcher = {
   readonly canonicalRoot: string;
@@ -41,6 +46,28 @@ type SharedWatcher = {
   flushTimer: ReturnType<typeof setTimeout> | null;
   restartTimer: ReturnType<typeof setTimeout> | null;
 };
+
+/** @internal Exported for deterministic boundary testing without OS watcher timing. */
+export function recordWorkspaceFileEventPathHint(input: {
+  readonly contentPaths: Set<string>;
+  readonly structuralPaths: Set<string>;
+  readonly eventName: string;
+  readonly relativePath: string;
+  readonly maxPaths?: number;
+}): "recorded" | "overflow" {
+  if (input.eventName === "change") {
+    if (!input.structuralPaths.has(input.relativePath)) {
+      input.contentPaths.add(input.relativePath);
+    }
+  } else {
+    input.contentPaths.delete(input.relativePath);
+    input.structuralPaths.add(input.relativePath);
+  }
+  return input.contentPaths.size + input.structuralPaths.size >
+    (input.maxPaths ?? MAX_PATHS_PER_EVENT)
+    ? "overflow"
+    : "recorded";
+}
 
 export class WorkspaceFileEvents extends Context.Service<
   WorkspaceFileEvents,
@@ -97,7 +124,7 @@ export const make = Effect.gen(function* () {
       const reason = shared.pendingResyncReason;
       shared.pendingResyncReason = null;
       shared.sequence += 1;
-      emit(shared, { version: 1, sequence: shared.sequence, type: "resync", reason });
+      emit(shared, { version: 2, sequence: shared.sequence, type: "resync", reason });
       return;
     }
     if (shared.pendingContentPaths.size === 0 && shared.pendingStructuralPaths.size === 0) return;
@@ -107,7 +134,7 @@ export const make = Effect.gen(function* () {
     shared.pendingStructuralPaths.clear();
     shared.sequence += 1;
     emit(shared, {
-      version: 1,
+      version: 2,
       sequence: shared.sequence,
       type: "changed",
       contentPaths,
@@ -142,22 +169,21 @@ export const make = Effect.gen(function* () {
       return;
     }
     if (shared.pendingResyncReason !== null) return;
-    if (relativePath.length > MAX_RELATIVE_PATH_LENGTH) {
+    if (
+      relativePath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
+      Buffer.byteLength(relativePath, "utf8") > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+    ) {
       requireResync(shared, "overflow");
       return;
     }
 
-    if (eventName === "change") {
-      if (!shared.pendingStructuralPaths.has(relativePath)) {
-        shared.pendingContentPaths.add(relativePath);
-      }
-    } else {
-      shared.pendingContentPaths.delete(relativePath);
-      shared.pendingStructuralPaths.add(relativePath);
-    }
     if (
-      shared.pendingContentPaths.size + shared.pendingStructuralPaths.size >
-      MAX_PATHS_PER_EVENT
+      recordWorkspaceFileEventPathHint({
+        contentPaths: shared.pendingContentPaths,
+        structuralPaths: shared.pendingStructuralPaths,
+        eventName,
+        relativePath,
+      }) === "overflow"
     ) {
       requireResync(shared, "overflow");
       return;
@@ -184,7 +210,7 @@ export const make = Effect.gen(function* () {
     watcher.once("ready", () => {
       if (shared.closed || shared.watcher !== watcher) return;
       shared.ready = true;
-      emit(shared, { version: 1, sequence: shared.sequence, type: "ready" });
+      emit(shared, { version: 2, sequence: shared.sequence, type: "ready" });
     });
   };
 
@@ -301,13 +327,19 @@ export const make = Effect.gen(function* () {
       Effect.acquireRelease(
         Effect.sync(() => {
           const shared = acquireSharedWatcher(canonicalRoot);
+          let sequence = 0;
           const listener = (event: SharedEvent) => {
-            Queue.offerUnsafe(queue, { ...event, cwd: input.cwd } as ProjectFileEvent);
+            Queue.offerUnsafe(queue, {
+              ...event,
+              sequence,
+              cwd: input.cwd,
+            } as ProjectFileEvent);
+            sequence += 1;
           };
           shared.listeners.add(listener);
           // Every subscription, including a transport reconnect reusing an
           // existing shared watcher, starts with an authoritative refresh.
-          if (shared.ready) listener({ version: 1, sequence: shared.sequence, type: "ready" });
+          if (shared.ready) listener({ version: 2, sequence: shared.sequence, type: "ready" });
           return { listener, shared };
         }),
         ({ listener, shared }) =>
