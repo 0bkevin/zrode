@@ -57,6 +57,7 @@ export interface ServerProviderPresentation {
   readonly badgeLabel?: string;
   readonly showInteractionModeToggle?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
+  readonly supportsImageAttachments?: boolean;
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -233,6 +234,9 @@ export function buildServerProvider(input: {
       : {}),
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
+      : {}),
+    ...(typeof input.presentation.supportsImageAttachments === "boolean"
+      ? { supportsImageAttachments: input.presentation.supportsImageAttachments }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

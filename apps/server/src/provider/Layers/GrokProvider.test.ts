@@ -6,7 +6,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { GrokSettings } from "@t3tools/contracts";
 
-import { buildInitialGrokProviderSnapshot, checkGrokProviderStatus } from "./GrokProvider.ts";
+import {
+  buildInitialGrokProviderSnapshot,
+  checkGrokProviderStatus,
+  grokModelCapabilitiesFromAcpModel,
+  parseGrokReasoningEffortsFromHelp,
+} from "./GrokProvider.ts";
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
@@ -31,9 +36,87 @@ describe("buildInitialGrokProviderSnapshot", () => {
       expect(snapshot.status).toBe("warning");
       expect(snapshot.version).toBeNull();
       expect(snapshot.message).toContain("Checking Grok");
-      expect(snapshot.requiresNewThreadForModelChange).toBe(true);
+      expect(snapshot.requiresNewThreadForModelChange).toBe(false);
+      expect(snapshot.showInteractionModeToggle).toBe(true);
+      expect(snapshot.supportsImageAttachments).toBe(false);
     }),
   );
+});
+
+describe("grokModelCapabilitiesFromAcpModel", () => {
+  it("publishes reasoning effort only when Grok advertises support", () => {
+    expect(
+      grokModelCapabilitiesFromAcpModel(
+        {
+          modelId: "grok-build",
+          name: "Grok Build",
+        },
+        ["low", "medium", "high"],
+      ).optionDescriptors,
+    ).toEqual([]);
+
+    expect(
+      grokModelCapabilitiesFromAcpModel(
+        {
+          modelId: "grok-4.5",
+          name: "Grok 4.5",
+          _meta: { supportsReasoningEffort: true, reasoningEffort: "medium" },
+        },
+        ["low", "medium", "high", "xhigh", "max"],
+      ).optionDescriptors,
+    ).toEqual([
+      expect.objectContaining({
+        id: "effort",
+        type: "select",
+        currentValue: "medium",
+        options: [
+          { id: "low", label: "low" },
+          { id: "medium", label: "medium", isDefault: true },
+          { id: "high", label: "high" },
+          { id: "xhigh", label: "xhigh" },
+          { id: "max", label: "max" },
+        ],
+      }),
+    ]);
+
+    expect(
+      grokModelCapabilitiesFromAcpModel(
+        {
+          modelId: "grok-4.5",
+          name: "Grok 4.5",
+          _meta: { supportsReasoningEffort: true, reasoningEffort: "high" },
+        },
+        [],
+      ).optionDescriptors,
+    ).toEqual([]);
+  });
+});
+
+describe("parseGrokReasoningEffortsFromHelp", () => {
+  it("derives ordered, unique effort values from the installed CLI help format", () => {
+    expect(
+      parseGrokReasoningEffortsFromHelp(`
+Options:
+      --effort <LEVEL>
+          Effort level [possible values: low, medium, high, xhigh, max, high]
+      --output-format <FORMAT>
+          Output format [possible values: plain, json]
+`),
+    ).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("returns no choices when this CLI does not advertise effort values", () => {
+    expect(parseGrokReasoningEffortsFromHelp("--reasoning-effort <EFFORT>")).toEqual([]);
+    expect(
+      parseGrokReasoningEffortsFromHelp(`
+      --effort <LEVEL>
+          Reasoning effort
+      --output-format <FORMAT>
+          Output format [possible values: plain, json]
+`),
+    ).toEqual([]);
+    expect(parseGrokReasoningEffortsFromHelp("unrelated output")).toEqual([]);
+  });
 });
 
 it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {

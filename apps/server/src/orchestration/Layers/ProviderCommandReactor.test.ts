@@ -51,6 +51,7 @@ import {
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
+  shouldRestartGrokSessionConfiguration,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
@@ -139,6 +140,135 @@ describe("ProviderCommandReactor", () => {
       expect(providerErrorLabel("third_party_driver")).toBe("third_party_driver");
     });
   });
+
+  it("restarts Grok only when process-level effort or interaction mode changes", () => {
+    const high = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
+      { id: "effort", value: "high" },
+    ]);
+    const medium = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
+      { id: "effort", value: "medium" },
+    ]);
+
+    expect(
+      shouldRestartGrokSessionConfiguration({
+        previousModelSelection: high,
+        requestedModelSelection: medium,
+        previousInteractionMode: "default",
+        requestedInteractionMode: "default",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRestartGrokSessionConfiguration({
+        previousModelSelection: high,
+        requestedModelSelection: high,
+        previousInteractionMode: "default",
+        requestedInteractionMode: "plan",
+      }),
+    ).toBe(true);
+    expect(
+      shouldRestartGrokSessionConfiguration({
+        previousModelSelection: high,
+        requestedModelSelection: high,
+        previousInteractionMode: "default",
+        requestedInteractionMode: "default",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRestartGrokSessionConfiguration({
+        previousModelSelection: {
+          ...high,
+          options: [
+            { id: "effort", value: "high" },
+            { id: "futureTrait", value: "a" },
+          ],
+        },
+        requestedModelSelection: {
+          ...high,
+          options: [
+            { id: "futureTrait", value: "b" },
+            { id: "effort", value: "high" },
+          ],
+        },
+        previousInteractionMode: "default",
+        requestedInteractionMode: "default",
+      }),
+    ).toBe(false);
+  });
+
+  effectIt.effect(
+    "restarts and resumes Grok before sending a turn with changed effort and Plan mode",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            threadModelSelection: createModelSelection(
+              ProviderInstanceId.make("grok"),
+              "grok-4.5",
+              [{ id: "effort", value: "high" }],
+            ),
+          }),
+        );
+        const now = "2026-01-01T00:00:00.000Z";
+        const startTurn = (input: {
+          readonly commandId: string;
+          readonly messageId: string;
+          readonly text: string;
+          readonly effort: "high" | "medium";
+          readonly interactionMode: "default" | "plan";
+        }) =>
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(input.commandId),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: asMessageId(input.messageId),
+              role: "user",
+              text: input.text,
+              attachments: [],
+            },
+            modelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
+              { id: "effort", value: input.effort },
+            ]),
+            interactionMode: input.interactionMode,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          });
+
+        yield* startTurn({
+          commandId: "cmd-grok-high-default",
+          messageId: "message-grok-high-default",
+          text: "inspect first",
+          effort: "high",
+          interactionMode: "default",
+        });
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+        yield* harness.engine.dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("cmd-grok-plan-mode"),
+          threadId: ThreadId.make("thread-1"),
+          interactionMode: "plan",
+          createdAt: now,
+        });
+        yield* startTurn({
+          commandId: "cmd-grok-medium-plan",
+          messageId: "message-grok-medium-plan",
+          text: "plan next",
+          effort: "medium",
+          interactionMode: "plan",
+        });
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          interactionMode: "plan",
+          modelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
+            { id: "effort", value: "medium" },
+          ]),
+          resumeCursor: { opaque: "resume-1" },
+        });
+      }),
+  );
 
   async function createHarness(input?: {
     readonly baseDir?: string;
@@ -937,6 +1067,9 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      interactionMode: "plan",
+    });
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
       interactionMode: "plan",
@@ -1459,6 +1592,91 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect("preserves Grok Plan mode when a runtime mode update restarts the session", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          threadModelSelection: createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
+            { id: "effort", value: "high" },
+          ]),
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("cmd-grok-runtime-initial-full-access"),
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-grok-runtime-turn-1"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-runtime-1"),
+          role: "user",
+          text: "make a plan",
+          attachments: [],
+        },
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        createdAt: now,
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 1));
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        interactionMode: "default",
+        runtimeMode: "full-access",
+      });
+
+      yield* harness.engine.dispatch({
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("cmd-grok-runtime-plan-mode"),
+        threadId: ThreadId.make("thread-1"),
+        interactionMode: "plan",
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("cmd-grok-runtime-approval-required"),
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 2));
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        interactionMode: "plan",
+        resumeCursor: { opaque: "resume-1" },
+        runtimeMode: "approval-required",
+      });
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-grok-runtime-turn-2"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-runtime-2"),
+          role: "user",
+          text: "continue planning",
+          attachments: [],
+        },
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+        interactionMode: "plan",
+      });
+    }),
+  );
 
   it("does not inject derived model options when restarting claude on runtime mode changes", async () => {
     const harness = await createHarness({

@@ -15,6 +15,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -117,6 +118,24 @@ function canReplaceThreadTitle(currentTitle: string, titleSeed?: string): boolea
   return trimmedTitleSeed !== undefined && trimmedTitleSeed.length > 0
     ? trimmedCurrentTitle === trimmedTitleSeed
     : false;
+}
+
+export function shouldRestartGrokSessionConfiguration(input: {
+  readonly previousModelSelection: ModelSelection | undefined;
+  readonly requestedModelSelection: ModelSelection | undefined;
+  readonly previousInteractionMode: "default" | "plan" | undefined;
+  readonly requestedInteractionMode: "default" | "plan" | undefined;
+}): boolean {
+  const effortChanged =
+    input.previousModelSelection !== undefined &&
+    input.requestedModelSelection !== undefined &&
+    getModelSelectionStringOptionValue(input.previousModelSelection, "effort") !==
+      getModelSelectionStringOptionValue(input.requestedModelSelection, "effort");
+  const interactionModeChanged =
+    input.previousInteractionMode !== undefined &&
+    input.requestedInteractionMode !== undefined &&
+    input.previousInteractionMode !== input.requestedInteractionMode;
+  return effortChanged || interactionModeChanged;
 }
 
 function findProviderAdapterRequestError(
@@ -253,6 +272,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const threadInteractionModes = new Map<string, "default" | "plan">();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -402,6 +422,7 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
+      readonly interactionMode?: "default" | "plan";
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -410,6 +431,7 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
+    const desiredInteractionMode = options?.interactionMode ?? thread.interactionMode;
     const requestedModelSelection = options?.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
@@ -531,6 +553,7 @@ const make = Effect.gen(function* () {
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
+        interactionMode: desiredInteractionMode,
       });
 
     const bindSessionToThread = (session: ProviderSession) =>
@@ -574,6 +597,15 @@ const make = Effect.gen(function* () {
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
       const previousModelSelection = threadModelSelections.get(threadId);
+      const previousInteractionMode = threadInteractionModes.get(threadId);
+      const restartGrokConfiguration =
+        preferredProvider === "grok" &&
+        shouldRestartGrokSessionConfiguration({
+          previousModelSelection,
+          requestedModelSelection,
+          previousInteractionMode,
+          requestedInteractionMode: desiredInteractionMode,
+        });
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
@@ -584,7 +616,8 @@ const make = Effect.gen(function* () {
         !cwdChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        !restartGrokConfiguration
       ) {
         return existingSessionThreadId;
       }
@@ -609,6 +642,7 @@ const make = Effect.gen(function* () {
         instanceChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
+        restartGrokConfiguration,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(
@@ -647,15 +681,17 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
+    const requestedModelSelection =
+      input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
     if (input.expectedTurnId === undefined) {
-      yield* ensureSessionForThread(
-        input.threadId,
-        input.createdAt,
-        input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
-      );
+      yield* ensureSessionForThread(input.threadId, input.createdAt, {
+        modelSelection: requestedModelSelection,
+        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      });
     }
-    if (input.modelSelection !== undefined) {
-      threadModelSelections.set(input.threadId, input.modelSelection);
+    threadModelSelections.set(input.threadId, requestedModelSelection);
+    if (input.interactionMode !== undefined) {
+      threadInteractionModes.set(input.threadId, input.interactionMode);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];
@@ -675,8 +711,6 @@ const make = Effect.gen(function* () {
             })
           : (yield* providerService.getCapabilities(activeSession.providerInstanceId))
               .sessionModelSwitch;
-    const requestedModelSelection =
-      input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
     const modelForTurn =
       sessionModelSwitch === "unsupported" && input.modelSelection === undefined
         ? activeSession?.model !== undefined
@@ -1163,11 +1197,16 @@ const make = Effect.gen(function* () {
           return;
         }
         const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.occurredAt,
-          cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
-        );
+        yield* ensureSessionForThread(event.payload.threadId, event.occurredAt, {
+          ...(cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {}),
+          // The projection is authoritative here: interaction-mode changes do
+          // not flow through this reactor, so its turn cache can be stale.
+          interactionMode: thread.interactionMode,
+        });
+        // The restart above applies the projected mode to the process. Update
+        // the cache only after it succeeds so the next turn does not restart
+        // the same configuration a second time.
+        threadInteractionModes.set(event.payload.threadId, thread.interactionMode);
         return;
       }
       case "thread.turn-start-requested":

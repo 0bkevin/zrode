@@ -104,7 +104,11 @@ import {
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
-import { getProviderDisplayName, getProviderInteractionModeToggle } from "../../providerModels";
+import {
+  getProviderDisplayName,
+  getProviderInteractionModeToggle,
+  getProviderSupportsImageAttachments,
+} from "../../providerModels";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -788,6 +792,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedProviderStatus = useMemo(
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
+  );
+  const supportsImageAttachments = getProviderSupportsImageAttachments(
+    providerStatuses,
+    selectedInstanceId,
   );
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
@@ -1697,14 +1705,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     showPlanFollowUpPrompt,
   ]);
 
+  const rejectUnsupportedComposerImages = useCallback((): boolean => {
+    if (supportsImageAttachments || composerImagesRef.current.length === 0) {
+      return false;
+    }
+    toastManager.add({
+      type: "error",
+      title: `${selectedProviderStatus?.displayName ?? "This provider"} does not support image attachments.`,
+    });
+    return true;
+  }, [composerImagesRef, selectedProviderStatus?.displayName, supportsImageAttachments]);
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (rejectUnsupportedComposerImages()) {
+        event?.preventDefault();
+        return;
+      }
       onSend(event);
       if (shouldBlurMobileComposerOnSubmit()) {
         blurMobileComposerAfterSend();
       }
     },
-    [blurMobileComposerAfterSend, onSend, shouldBlurMobileComposerOnSubmit],
+    [
+      blurMobileComposerAfterSend,
+      onSend,
+      rejectUnsupportedComposerImages,
+      shouldBlurMobileComposerOnSubmit,
+    ],
   );
   const expandMobileComposer = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
@@ -1770,6 +1797,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   const addComposerImages = (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
+    if (!supportsImageAttachments) {
+      toastManager.add({
+        type: "error",
+        title: `${selectedProviderStatus?.displayName ?? "This provider"} does not support image attachments.`,
+      });
+      return;
+    }
     if (isEditingLastUserMessage) {
       setThreadError(activeThreadId, "Message editing only supports text.");
       return;
@@ -1882,8 +1916,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [onImplementPlanInNewThread]);
 
   const handleSteerPrimaryAction = useCallback(() => {
+    if (rejectUnsupportedComposerImages()) return;
     onSend(undefined, "steer");
-  }, [onSend]);
+  }, [onSend, rejectUnsupportedComposerImages]);
   const handleQueuePrimaryAction = useCallback(() => {
     submitComposer();
   }, [submitComposer]);

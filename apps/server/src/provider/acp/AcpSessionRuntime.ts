@@ -69,6 +69,7 @@ export interface AcpSessionRuntimeOptions {
     readonly version: string;
   };
   readonly authMethodId: string;
+  readonly authenticateMeta?: NonNullable<EffectAcpSchema.AuthenticateRequest["_meta"]>;
   readonly skipAuthenticate?: boolean;
   readonly authenticateOnSessionAuthFailure?: boolean;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
@@ -547,6 +548,7 @@ export const make = (
     ): Effect.Effect<EffectAcpSchema.AuthenticateResponse, EffectAcpErrors.AcpError> => {
       const authenticatePayload = {
         methodId,
+        ...(options.authenticateMeta ? { _meta: options.authenticateMeta } : {}),
       } satisfies EffectAcpSchema.AuthenticateRequest;
 
       return runLoggedRequest(

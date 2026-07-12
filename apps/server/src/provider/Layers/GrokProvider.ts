@@ -1,6 +1,7 @@
 import {
   type GrokSettings,
   type ModelCapabilities,
+  type ProviderOptionChoice,
   ProviderDriverKind,
   type ServerProvider,
   type ServerProviderModel,
@@ -34,8 +35,9 @@ import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSup
 const GROK_PRESENTATION = {
   displayName: "Grok",
   badgeLabel: "Early Access",
-  showInteractionModeToggle: false,
-  requiresNewThreadForModelChange: true,
+  showInteractionModeToggle: true,
+  requiresNewThreadForModelChange: false,
+  supportsImageAttachments: false,
 } as const;
 const PROVIDER = ProviderDriverKind.make("grok");
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
@@ -53,6 +55,42 @@ const GROK_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
     capabilities: EMPTY_CAPABILITIES,
   },
 ];
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function grokModelCapabilitiesFromAcpModel(
+  model: EffectAcpSchema.ModelInfo,
+  reasoningEfforts: ReadonlyArray<string>,
+): ModelCapabilities {
+  const meta = isRecord(model._meta) ? model._meta : undefined;
+  if (meta?.supportsReasoningEffort !== true || reasoningEfforts.length === 0) {
+    return EMPTY_CAPABILITIES;
+  }
+  const advertisedCurrentEffort =
+    typeof meta.reasoningEffort === "string" ? meta.reasoningEffort.trim() : "";
+  const currentValue = reasoningEfforts.includes(advertisedCurrentEffort)
+    ? advertisedCurrentEffort
+    : reasoningEfforts[0];
+  const options: ReadonlyArray<ProviderOptionChoice> = reasoningEfforts.map((effort) => ({
+    id: effort,
+    label: effort,
+    ...(effort === currentValue ? { isDefault: true } : {}),
+  }));
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "effort",
+        label: "Reasoning effort",
+        description: "Controls how much reasoning Grok uses for each response.",
+        type: "select",
+        currentValue,
+        options,
+      },
+    ],
+  });
+}
 
 export function buildInitialGrokProviderSnapshot(
   grokSettings: GrokSettings,
@@ -107,6 +145,7 @@ function grokModelsFromSettings(
 
 function buildGrokDiscoveredModelsFromSessionModelState(
   modelState: EffectAcpSchema.SessionModelState | null | undefined,
+  reasoningEfforts: ReadonlyArray<string>,
 ): ReadonlyArray<ServerProviderModel> {
   if (!modelState || modelState.availableModels.length === 0) {
     return [];
@@ -123,7 +162,7 @@ function buildGrokDiscoveredModelsFromSessionModelState(
         slug,
         name: model.name.trim() || slug,
         isCustom: false,
-        capabilities: EMPTY_CAPABILITIES,
+        capabilities: grokModelCapabilitiesFromAcpModel(model, reasoningEfforts),
       };
     })
     .filter((model): model is ServerProviderModel => model !== undefined);
@@ -131,6 +170,7 @@ function buildGrokDiscoveredModelsFromSessionModelState(
 
 const discoverGrokModelsViaAcp = (
   grokSettings: GrokSettings,
+  reasoningEfforts: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
 ) =>
   Effect.gen(function* () {
@@ -143,7 +183,14 @@ const discoverGrokModelsViaAcp = (
       clientInfo: { name: "zrode-provider-probe", version: "0.0.0" },
     });
     const started = yield* acp.start();
-    return buildGrokDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
+    return {
+      models: buildGrokDiscoveredModelsFromSessionModelState(
+        started.sessionSetupResult.models,
+        reasoningEfforts,
+      ),
+      supportsImageAttachments:
+        started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
+    };
   }).pipe(Effect.scoped);
 
 const runGrokVersionCommand = (
@@ -153,6 +200,48 @@ const runGrokVersionCommand = (
   Effect.gen(function* () {
     const command = grokSettings.binaryPath || "grok";
     const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+      env: environment,
+    });
+    return yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: environment,
+        shell: spawnCommand.shell,
+      }),
+    );
+  });
+
+export function parseGrokReasoningEffortsFromHelp(output: string): ReadonlyArray<string> {
+  const lines = output.split(/\r?\n/);
+  const effortOptionIndex = lines.findIndex((line) => /(?:^|\s)--effort(?:\s|$)/i.test(line));
+  if (effortOptionIndex < 0) return [];
+  const optionLine = /^\s*(?:-[a-z0-9],\s*)?--?[a-z0-9][a-z0-9-]*(?:\s|$)/i;
+  const effortBlock: Array<string> = [];
+  for (let index = effortOptionIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line === undefined) break;
+    if (index > effortOptionIndex && optionLine.test(line)) break;
+    effortBlock.push(line);
+  }
+  const possibleValues = effortBlock.join("\n").match(/\[possible values:\s*([^\]]+)\]/i)?.[1];
+  if (!possibleValues) return [];
+  return Array.from(
+    new Set(
+      possibleValues
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => /^[a-z0-9][a-z0-9_-]*$/i.test(value)),
+    ),
+  ).slice(0, 32);
+}
+
+const runGrokHelpCommand = (
+  grokSettings: GrokSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  Effect.gen(function* () {
+    const command = grokSettings.binaryPath || "grok";
+    const spawnCommand = yield* resolveSpawnCommand(command, ["--help"], {
       env: environment,
     });
     return yield* spawnAndCollect(
@@ -253,10 +342,25 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     });
   }
 
-  const discoveryExit = yield* discoverGrokModelsViaAcp(grokSettings, environment).pipe(
-    Effect.timeoutOption(GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
-    Effect.exit,
+  const helpResult = yield* runGrokHelpCommand(grokSettings, environment).pipe(
+    Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
+    Effect.result,
   );
+  const reasoningEfforts =
+    Result.isSuccess(helpResult) && Option.isSome(helpResult.success)
+      ? parseGrokReasoningEffortsFromHelp(
+          `${helpResult.success.value.stdout}\n${helpResult.success.value.stderr}`,
+        )
+      : [];
+  if (reasoningEfforts.length === 0) {
+    yield* Effect.logWarning("Grok CLI did not advertise reasoning effort choices in --help.");
+  }
+
+  const discoveryExit = yield* discoverGrokModelsViaAcp(
+    grokSettings,
+    reasoningEfforts,
+    environment,
+  ).pipe(Effect.timeoutOption(GROK_ACP_MODEL_DISCOVERY_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(discoveryExit)) {
     yield* Effect.logWarning("Grok ACP model discovery failed", {
       errorTag: causeErrorTag(discoveryExit.cause),
@@ -293,14 +397,18 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       },
     });
   }
-  const discoveredModels = discoveryExit.value.value;
+  const discovery = discoveryExit.value.value;
+  const discoveredModels = discovery.models;
   const models =
     discoveredModels.length > 0
       ? grokModelsFromSettings(grokSettings.customModels, discoveredModels)
       : fallbackModels;
 
   return buildServerProvider({
-    presentation: GROK_PRESENTATION,
+    presentation: {
+      ...GROK_PRESENTATION,
+      supportsImageAttachments: discovery.supportsImageAttachments,
+    },
     enabled: grokSettings.enabled,
     checkedAt,
     models,

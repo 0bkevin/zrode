@@ -12,6 +12,7 @@
 import {
   ModelSelection,
   NonNegativeInt,
+  ProviderInteractionMode,
   ThreadId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -56,6 +57,7 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 const isModelSelection = Schema.is(ModelSelection);
+const isProviderInteractionMode = Schema.is(ProviderInteractionMode);
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -123,6 +125,7 @@ function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
+    readonly interactionMode?: ProviderInteractionMode;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
   },
@@ -133,6 +136,7 @@ function toRuntimePayloadFromSession(
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
+    ...(extra?.interactionMode !== undefined ? { interactionMode: extra.interactionMode } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
@@ -148,6 +152,16 @@ function readPersistedModelSelection(
   }
   const raw = "modelSelection" in runtimePayload ? runtimePayload.modelSelection : undefined;
   return isModelSelection(raw) ? raw : undefined;
+}
+
+function readPersistedInteractionMode(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): ProviderInteractionMode | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const raw = "interactionMode" in runtimePayload ? runtimePayload.interactionMode : undefined;
+  return isProviderInteractionMode(raw) ? raw : undefined;
 }
 
 function readPersistedCwd(
@@ -261,6 +275,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
     extra?: {
       readonly modelSelection?: unknown;
+      readonly interactionMode?: ProviderInteractionMode;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
     },
@@ -396,6 +411,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const persistedInteractionMode = readPersistedInteractionMode(input.binding.runtimePayload);
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
@@ -405,6 +421,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           providerInstanceId: bindingInstanceId,
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
+          ...(persistedInteractionMode ? { interactionMode: persistedInteractionMode } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
@@ -618,6 +635,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          // Adapters default an omitted startup mode to `default`; persist the
+          // effective value so a prior Plan binding cannot leak into recovery.
+          interactionMode: input.interactionMode ?? "default",
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
@@ -699,6 +719,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
         runtimePayload: {
           ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          ...(input.interactionMode !== undefined
+            ? { interactionMode: input.interactionMode }
+            : {}),
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,

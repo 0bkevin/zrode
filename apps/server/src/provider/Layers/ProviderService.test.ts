@@ -70,6 +70,8 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const GROK_DRIVER = ProviderDriverKind.make("grok");
+const grokInstanceId = ProviderInstanceId.make("grok");
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -271,10 +273,12 @@ function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
   const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+  const grok = makeFakeCodexAdapter(GROK_DRIVER);
   const registry = makeAdapterRegistryMock({
     [ProviderDriverKind.make("codex")]: codex.adapter,
     [ProviderDriverKind.make("claudeAgent")]: claude.adapter,
     [ProviderDriverKind.make("cursor")]: cursor.adapter,
+    [GROK_DRIVER]: grok.adapter,
   });
 
   const providerAdapterLayer = Layer.succeed(
@@ -311,6 +315,7 @@ function makeProviderServiceLayer() {
     codex,
     claude,
     cursor,
+    grok,
     layer,
   };
 }
@@ -1213,6 +1218,133 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("recovers stale Grok sessions with persisted Plan mode and effort", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const modelSelection = createModelSelection(grokInstanceId, "grok-4.5", [
+        { id: "effort", value: "max" },
+      ]);
+      const initial = yield* provider.startSession(asThreadId("thread-grok-plan-recovery"), {
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        threadId: asThreadId("thread-grok-plan-recovery"),
+        cwd: "/tmp/project-grok-plan-recovery",
+        modelSelection,
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+      });
+
+      yield* routing.grok.stopAll();
+      routing.grok.startSession.mockClear();
+      routing.grok.sendTurn.mockClear();
+
+      yield* provider.sendTurn({
+        threadId: initial.threadId,
+        input: "resume the plan",
+        attachments: [],
+        modelSelection,
+        interactionMode: "plan",
+      });
+
+      assert.equal(routing.grok.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.grok.startSession.mock.calls[0]?.[0], {
+        threadId: initial.threadId,
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        cwd: "/tmp/project-grok-plan-recovery",
+        modelSelection,
+        interactionMode: "plan",
+        resumeCursor: initial.resumeCursor,
+        runtimeMode: "approval-required",
+      });
+      assert.equal(routing.grok.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("overwrites a stale persisted Plan mode when a new session uses defaults", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-grok-default-recovery");
+
+      yield* provider.startSession(threadId, {
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        threadId,
+        cwd: "/tmp/project-grok-default-recovery",
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+      });
+      const defaultSession = yield* provider.startSession(threadId, {
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        threadId,
+        cwd: "/tmp/project-grok-default-recovery",
+        runtimeMode: "approval-required",
+      });
+
+      yield* routing.grok.stopAll();
+      routing.grok.startSession.mockClear();
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "resume with defaults",
+        attachments: [],
+      });
+
+      assert.equal(routing.grok.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.grok.startSession.mock.calls[0]?.[0], {
+        threadId,
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        cwd: "/tmp/project-grok-default-recovery",
+        interactionMode: "default",
+        resumeCursor: defaultSession.resumeCursor,
+        runtimeMode: "approval-required",
+      });
+    }),
+  );
+
+  it.effect("persists an accepted sendTurn interaction mode for later recovery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-grok-turn-mode-recovery");
+      const initial = yield* provider.startSession(threadId, {
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        threadId,
+        cwd: "/tmp/project-grok-turn-mode-recovery",
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+      });
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "switch to default",
+        attachments: [],
+        interactionMode: "default",
+      });
+      yield* routing.grok.stopAll();
+      routing.grok.startSession.mockClear();
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "resume with persisted turn mode",
+        attachments: [],
+      });
+
+      assert.equal(routing.grok.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.grok.startSession.mock.calls[0]?.[0], {
+        threadId,
+        provider: GROK_DRIVER,
+        providerInstanceId: grokInstanceId,
+        cwd: "/tmp/project-grok-turn-mode-recovery",
+        interactionMode: "default",
+        resumeCursor: initial.resumeCursor,
+        runtimeMode: "approval-required",
+      });
+    }),
+  );
+
   it.effect("lists no sessions after adapter runtime clears", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -1232,6 +1364,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       yield* routing.codex.stopAll();
       yield* routing.claude.stopAll();
+      yield* routing.grok.stopAll();
 
       const remaining = yield* provider.listSessions();
       assert.equal(remaining.length, 0);

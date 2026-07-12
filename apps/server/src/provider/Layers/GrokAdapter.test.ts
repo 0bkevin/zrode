@@ -26,7 +26,11 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
-import { grokPromptSettlementBelongsToContext, makeGrokAdapter } from "./GrokAdapter.ts";
+import {
+  grokPromptSettlementBelongsToContext,
+  makeGrokAdapter,
+  shouldAutoApproveGrokPermission,
+} from "./GrokAdapter.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -38,6 +42,7 @@ async function makeMockGrokWrapper(extraEnv?: Record<string, string>) {
   const wrapperPath = NodePath.join(dir, "fake-grok.sh");
   const envExports = Object.entries({
     ZRODE_ACP_AUTH_METHOD_ID: "cached_token",
+    ZRODE_ACP_SUPPORTS_IMAGES: "1",
     ...extraEnv,
   })
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
@@ -126,6 +131,22 @@ it("requires a settlement to match the live Grok turn", () => {
       turnId: staleTurnId,
     }),
   );
+});
+
+it("auto-approves only file mutations in auto-accept-edits mode", () => {
+  const request = (kind: "edit" | "delete" | "move" | "execute") => ({
+    sessionId: "session-1",
+    toolCall: { toolCallId: "tool-1", title: "Tool", kind },
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" as const }],
+  });
+
+  assert.isTrue(shouldAutoApproveGrokPermission("auto-accept-edits", request("edit")));
+  assert.isTrue(shouldAutoApproveGrokPermission("auto-accept-edits", request("delete")));
+  assert.isTrue(shouldAutoApproveGrokPermission("auto-accept-edits", request("move")));
+  assert.isFalse(shouldAutoApproveGrokPermission("auto-accept-edits", request("execute")));
+  assert.isFalse(shouldAutoApproveGrokPermission("approval-required", request("edit")));
+  assert.isTrue(shouldAutoApproveGrokPermission("full-access", request("execute")));
+  assert.isFalse(shouldAutoApproveGrokPermission("full-access", request("execute"), "plan"));
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
@@ -330,6 +351,89 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
       yield* Fiber.interrupt(runtimeEventsFiber);
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("rejects images when the Grok ACP agent does not advertise image support", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-images-unsupported");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ ZRODE_ACP_SUPPORTS_IMAGES: "0" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "inspect this image",
+          attachments: [
+            {
+              type: "image",
+              id: "unsupported-image",
+              name: "unsupported.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+        }),
+      );
+
+      assert.equal(error._tag, "ProviderAdapterValidationError");
+      assert.include(error.message, "does not support image attachments");
+    }),
+  );
+
+  it.effect("requires a restarted Grok process for effort or Plan mode changes", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-process-options-change");
+      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("grok"),
+          model: "grok-build",
+          options: [{ id: "effort", value: "high" }],
+        },
+      });
+
+      const effortError = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "use medium effort",
+          attachments: [],
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("grok"),
+            model: "grok-build",
+            options: [{ id: "effort", value: "medium" }],
+          },
+        }),
+      );
+      const planError = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId,
+          input: "switch to plan",
+          attachments: [],
+          interactionMode: "plan",
+        }),
+      );
+
+      assert.equal(effortError._tag, "ProviderAdapterValidationError");
+      assert.include(effortError.message, "reasoning effort requires restarting");
+      assert.equal(planError._tag, "ProviderAdapterValidationError");
+      assert.include(planError.message, "Plan mode requires restarting");
     }),
   );
 
