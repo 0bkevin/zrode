@@ -386,6 +386,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsPrepareDeleteEntry, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsDeleteEntry, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
+  [WS_METHODS.projectsInspectFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchText, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
@@ -1555,6 +1556,27 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.projectsInspectFile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsInspectFile,
+            workspaceFileSystem.readFile(input).pipe(
+              Effect.map(({ relativePath, byteLength, truncated, diskRevision }) => ({
+                relativePath,
+                byteLength,
+                truncated,
+                diskRevision,
+              })),
+              Effect.mapError(
+                (cause) =>
+                  new ProjectReadFileError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
         [WS_METHODS.projectsSearchText]: (input) =>
           observeRpcStream(
             WS_METHODS.projectsSearchText,
@@ -1599,6 +1621,15 @@ const makeWsRpcLayer = (
           observeRpcStreamEffect(
             WS_METHODS.projectsWatchFiles,
             workspaceFileEvents.subscribe(input).pipe(
+              Effect.map((events) =>
+                events.pipe(
+                  Stream.mapEffect((event) =>
+                    event.type !== "changed" || event.structuralPaths.length > 0
+                      ? workspaceEntries.refresh(input.cwd).pipe(Effect.as(event))
+                      : Effect.succeed(event),
+                  ),
+                ),
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProjectWatchFilesError({

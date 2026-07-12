@@ -318,6 +318,9 @@ export const ProjectReadFileInput = Schema.Struct({
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
+export const ProjectInspectFileInput = ProjectReadFileInput;
+export type ProjectInspectFileInput = typeof ProjectInspectFileInput.Type;
+
 export const ProjectCreateDirectoryInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(
@@ -404,6 +407,15 @@ export const ProjectReadFileResult = Schema.Struct({
   diskRevision: Schema.NullOr(ProjectFileDiskRevision),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
+
+/** Revision-only file state used by editor reconciliation polling. */
+export const ProjectInspectFileResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  byteLength: NonNegativeInt,
+  truncated: Schema.Boolean,
+  diskRevision: Schema.NullOr(ProjectFileDiskRevision),
+});
+export type ProjectInspectFileResult = typeof ProjectInspectFileResult.Type;
 
 export const ProjectFileFailure = Schema.Literals([
   "workspace_path_outside_root",

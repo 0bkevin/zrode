@@ -4428,45 +4428,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
-  it.effect("routes websocket rpc projects.listEntries and projects.readFile", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-files-" });
-      yield* fs.makeDirectory(path.join(workspaceDir, "src"), { recursive: true });
-      yield* fs.writeFileString(
-        path.join(workspaceDir, "src", "index.ts"),
-        "export const answer = 42;\n",
-      );
+  it.effect(
+    "routes websocket rpc projects.listEntries, projects.readFile, and projects.inspectFile",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-files-" });
+        yield* fs.makeDirectory(path.join(workspaceDir, "src"), { recursive: true });
+        yield* fs.writeFileString(
+          path.join(workspaceDir, "src", "index.ts"),
+          "export const answer = 42;\n",
+        );
 
-      yield* buildAppUnderTest();
+        yield* buildAppUnderTest();
 
-      const wsUrl = yield* getWsServerUrl("/ws");
-      const response = yield* Effect.scoped(
-        withWsRpcClient(wsUrl, (client) =>
-          Effect.all({
-            listing: client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir }),
-            file: client[WS_METHODS.projectsReadFile]({
-              cwd: workspaceDir,
-              relativePath: "src/index.ts",
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const response = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.all({
+              listing: client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir }),
+              file: client[WS_METHODS.projectsReadFile]({
+                cwd: workspaceDir,
+                relativePath: "src/index.ts",
+              }),
+              inspection: client[WS_METHODS.projectsInspectFile]({
+                cwd: workspaceDir,
+                relativePath: "src/index.ts",
+              }),
             }),
-          }),
-        ),
-      );
+          ),
+        );
 
-      assert.isTrue(response.listing.entries.some((entry) => entry.path === "src/index.ts"));
-      assert.deepEqual(response.file, {
-        relativePath: "src/index.ts",
-        contents: "export const answer = 42;\n",
-        byteLength: 26,
-        truncated: false,
-        diskRevision: ProjectFileDiskRevision.make(
-          `sha256:${NodeCrypto.createHash("sha256")
-            .update("export const answer = 42;\n")
-            .digest("hex")}:26`,
-        ),
-      });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+        assert.isTrue(response.listing.entries.some((entry) => entry.path === "src/index.ts"));
+        assert.deepEqual(response.file, {
+          relativePath: "src/index.ts",
+          contents: "export const answer = 42;\n",
+          byteLength: 26,
+          truncated: false,
+          diskRevision: ProjectFileDiskRevision.make(
+            `sha256:${NodeCrypto.createHash("sha256")
+              .update("export const answer = 42;\n")
+              .digest("hex")}:26`,
+          ),
+        });
+        assert.deepEqual(response.inspection, {
+          relativePath: "src/index.ts",
+          byteLength: 26,
+          truncated: false,
+          diskRevision: response.file.diskRevision,
+        });
+      }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
   it.effect("routes websocket rpc project creation, deletion, and text search", () =>
@@ -4574,28 +4586,46 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest();
 
       const wsUrl = yield* getWsServerUrl("/ws");
-      const events = Array.from(
-        yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
-            client[WS_METHODS.projectsWatchFiles]({ cwd: workspaceDir }).pipe(
-              Stream.tap((event) =>
-                event.type === "ready"
-                  ? fs.writeFileString(path.join(workspaceDir, "streamed.txt"), "changed\n")
-                  : Effect.void,
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const before = yield* client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir });
+            const events = Array.from(
+              yield* client[WS_METHODS.projectsWatchFiles]({ cwd: workspaceDir }).pipe(
+                Stream.tap((event) =>
+                  event.type === "ready"
+                    ? fs.writeFileString(path.join(workspaceDir, "streamed.txt"), "changed\n")
+                    : Effect.void,
+                ),
+                Stream.take(2),
+                Stream.runCollect,
+                Effect.timeout("5 seconds"),
               ),
-              Stream.take(2),
-              Stream.runCollect,
-              Effect.timeout("5 seconds"),
-            ),
-          ),
+            );
+            const after = yield* client[WS_METHODS.projectsListEntries]({ cwd: workspaceDir });
+            return { before, events, after };
+          }),
         ),
       );
 
-      assert.deepInclude(events[0], { version: 2, sequence: 0, type: "ready", cwd: workspaceDir });
-      assert.equal(events[1]?.type, "changed");
-      if (events[1]?.type === "changed") {
-        assert.include(events[1].structuralPaths, "streamed.txt");
+      assert.notInclude(
+        response.before.entries.map((entry) => entry.path),
+        "streamed.txt",
+      );
+      assert.deepInclude(response.events[0], {
+        version: 2,
+        sequence: 0,
+        type: "ready",
+        cwd: workspaceDir,
+      });
+      assert.equal(response.events[1]?.type, "changed");
+      if (response.events[1]?.type === "changed") {
+        assert.include(response.events[1].structuralPaths, "streamed.txt");
       }
+      assert.include(
+        response.after.entries.map((entry) => entry.path),
+        "streamed.txt",
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 

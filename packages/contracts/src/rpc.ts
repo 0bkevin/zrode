@@ -78,6 +78,8 @@ import {
   ProjectListEntriesResult,
   ProjectFileEvent,
   ProjectReadFileError,
+  ProjectInspectFileInput,
+  ProjectInspectFileResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectSearchEntriesError,
@@ -175,6 +177,7 @@ export const WS_METHODS = {
   projectsPrepareDeleteEntry: "projects.prepareDeleteEntry",
   projectsDeleteEntry: "projects.deleteEntry",
   projectsReadFile: "projects.readFile",
+  projectsInspectFile: "projects.inspectFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsSearchText: "projects.searchText",
   projectsWriteFile: "projects.writeFile",
@@ -445,6 +448,12 @@ export const WsProjectsPrepareDeleteEntryRpc = Rpc.make(WS_METHODS.projectsPrepa
 export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   payload: ProjectReadFileInput,
   success: ProjectReadFileResult,
+  error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsInspectFileRpc = Rpc.make(WS_METHODS.projectsInspectFile, {
+  payload: ProjectInspectFileInput,
+  success: ProjectInspectFileResult,
   error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
 });
 
@@ -801,6 +810,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsPrepareDeleteEntryRpc,
   WsProjectsDeleteEntryRpc,
   WsProjectsReadFileRpc,
+  WsProjectsInspectFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsSearchTextRpc,
   WsProjectsWriteFileRpc,

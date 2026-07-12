@@ -16,6 +16,23 @@ const TestLayer = Layer.empty.pipe(
 );
 
 it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileEvents", (it) => {
+  it.effect("conservatively checks nullable parent-watcher filenames", () =>
+    Effect.sync(() => {
+      expect(WorkspaceFileEvents.workspaceParentWatchEventMayAffectRoot(null, "workspace")).toBe(
+        true,
+      );
+      expect(
+        WorkspaceFileEvents.workspaceParentWatchEventMayAffectRoot(
+          Buffer.from("workspace"),
+          "workspace",
+        ),
+      ).toBe(true);
+      expect(
+        WorkspaceFileEvents.workspaceParentWatchEventMayAffectRoot("unrelated", "workspace"),
+      ).toBe(false);
+    }),
+  );
+
   it.effect("emits a ready marker followed by coalesced relative path hints", () =>
     Effect.gen(function* () {
       const fileEvents = yield* WorkspaceFileEvents.WorkspaceFileEvents;

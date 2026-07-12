@@ -362,6 +362,72 @@ describe("FileDocumentStore", () => {
     unsubscribe();
   });
 
+  it("uses a revision probe without retransferring unchanged file contents", async () => {
+    const read = vi.fn<FileDocumentAdapters["read"]>().mockResolvedValue(readResult("first", "r0"));
+    const inspect = vi.fn<NonNullable<FileDocumentAdapters["inspect"]>>().mockResolvedValue({
+      relativePath: baseKey.relativePath,
+      byteLength: 5,
+      truncated: false,
+      diskRevision: "r0" as ProjectFileDiskRevision,
+    });
+    const store = createStore({
+      inspect,
+      read,
+      write: async () => writeResult("unused"),
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+
+    await handle.refresh();
+
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("fetches full contents after a revision probe detects a change", async () => {
+    const read = vi
+      .fn<FileDocumentAdapters["read"]>()
+      .mockResolvedValueOnce(readResult("first", "r0"))
+      .mockResolvedValueOnce(readResult("changed", "r1"));
+    const inspect = vi.fn<NonNullable<FileDocumentAdapters["inspect"]>>().mockResolvedValue({
+      relativePath: baseKey.relativePath,
+      byteLength: 7,
+      truncated: false,
+      diskRevision: "r1" as ProjectFileDiskRevision,
+    });
+    const store = createStore({
+      inspect,
+      read,
+      write: async () => writeResult("unused"),
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+
+    await handle.refresh();
+
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(handle.getSnapshot()).toMatchObject({ contents: "changed", baseDiskRevision: "r1" });
+  });
+
+  it("falls back to a full read when the revision probe is unavailable", async () => {
+    const read = vi
+      .fn<FileDocumentAdapters["read"]>()
+      .mockResolvedValueOnce(readResult("first", "r0"))
+      .mockResolvedValueOnce(readResult("changed", "r1"));
+    const store = createStore({
+      inspect: async () => Promise.reject(new Error("unsupported rpc")),
+      read,
+      write: async () => writeResult("unused"),
+      classifyError,
+    });
+    const handle = await store.open(baseKey);
+
+    await handle.refresh();
+
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(handle.getSnapshot()).toMatchObject({ contents: "changed", baseDiskRevision: "r1" });
+  });
+
   it.each(["conflict", "orphaned"] as const)(
     "resumes a dirty %s document when disk returns to its baseline",
     async (terminalStatus) => {

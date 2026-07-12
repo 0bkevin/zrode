@@ -304,8 +304,15 @@ Active documents retain bounded polling as a reliability backstop:
 - polling pauses while the page is hidden;
 - polling pauses while the owning environment is disconnected;
 - at most one read is in flight for a document;
+- unchanged revision probes return metadata only; complete contents are fetched
+  only after the opaque disk revision changes, with a full-read fallback for
+  older peers and unrevisionable oversized files;
 - focus and visibility restoration trigger an immediate check;
 - the explorer's 25,000-entry snapshot is event-invalidated, not polled.
+
+Before the server emits a ready, resync, or structural invalidation, it awaits
+the workspace index refresh (or invalidates a failed index). The client's first
+subsequent list therefore cannot race the index's independent native watcher.
 
 A changed clean document adopts disk text. A changed dirty/saving document
 keeps local text and enters conflict. Missing files become orphaned or

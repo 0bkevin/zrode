@@ -301,6 +301,44 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         );
       }),
     );
+
+    it.effect("bounds concurrent directory helper processes", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "parent"));
+        const acquired = yield* Ref.make(0);
+        const limitReached = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          createDirectoryHelperConcurrency: 2,
+          onCreateDirectoryHelperPermitAcquired: () =>
+            Effect.gen(function* () {
+              const count = yield* Ref.updateAndGet(acquired, (value) => value + 1);
+              if (count === 2) yield* Deferred.succeed(limitReached, undefined);
+              yield* Deferred.await(release);
+            }),
+        });
+
+        const creations = yield* Effect.all(
+          Array.from({ length: 6 }, (_, index) =>
+            workspaceFileSystem.createDirectory({
+              cwd,
+              relativePath: `parent/child-${index}`,
+            }),
+          ),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.forkChild);
+
+        yield* Deferred.await(limitReached).pipe(Effect.timeout("2 seconds"));
+        yield* Effect.yieldNow;
+        expect(yield* Ref.get(acquired)).toBe(2);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(creations);
+        expect(yield* Ref.get(acquired)).toBe(6);
+      }),
+    );
   });
 
   describe("readFile", () => {
@@ -1126,6 +1164,38 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         expect(
           yield* Effect.promise(() => NodeFSP.stat(path.join(cwd, "nested")).catch(() => null)),
         ).toBeNull();
+      }),
+    );
+
+    it.effect("uses only two validation scans while exclusively deleting a tree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "tree/a.txt", "a\n");
+        yield* writeTextFile(cwd, "tree/nested/b.txt", "b\n");
+        const completedScans = yield* Ref.make<ReadonlyArray<number>>([]);
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          onEntryTreeRevisionCompleted: ({ descendantCount }) =>
+            Ref.update(completedScans, (counts) => [...counts, descendantCount]),
+        });
+        const prepared = yield* workspaceFileSystem.prepareDeleteEntry({
+          cwd,
+          relativePath: "tree",
+          expectedKind: "directory",
+          recursive: true,
+        });
+
+        yield* workspaceFileSystem.deleteEntry({
+          cwd,
+          relativePath: "tree",
+          expectedKind: "directory",
+          recursive: true,
+          entryRevision: prepared.entryRevision,
+          permanentlyDelete: true,
+        });
+
+        // One preparation scan, then one immediately before detach and one on
+        // the private tombstone. The former duplicate pre-detach scan is gone.
+        expect(yield* Ref.get(completedScans)).toEqual([3, 3, 3]);
       }),
     );
 

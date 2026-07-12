@@ -41,6 +41,8 @@ import * as WorkspacePaths from "./WorkspacePaths.ts";
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 const REVISION_READ_BUFFER_BYTES = 64 * 1024;
 const CREATE_DIRECTORY_STDERR_MAX_BYTES = 4_096;
+const CREATE_DIRECTORY_HELPER_MAX_CONCURRENCY = 4;
+const ENTRY_TREE_REVISION_CONCURRENCY = 32;
 const CREATE_DIRECTORY_EXIT_ALREADY_EXISTS = ChildProcessSpawner.ExitCode(17);
 const CREATE_DIRECTORY_EXIT_PARENT_CHANGED = ChildProcessSpawner.ExitCode(18);
 const CREATE_DIRECTORY_HELPER_SOURCE = String.raw`
@@ -379,6 +381,19 @@ export interface WorkspaceFileSystemMakeOptions {
     readonly relativePath: string;
     readonly canonicalTargetPath: string;
   }) => Effect.Effect<void>;
+  /** Test-only hook, invoked while holding one bounded directory-helper permit. */
+  readonly onCreateDirectoryHelperPermitAcquired?: (input: {
+    readonly cwd: string;
+    readonly relativePath: string;
+    readonly canonicalTargetPath: string;
+  }) => Effect.Effect<void>;
+  /** Test-only override for the maximum number of directory helpers running concurrently. */
+  readonly createDirectoryHelperConcurrency?: number;
+  /** Test-only hook, invoked after one complete tree revision scan. */
+  readonly onEntryTreeRevisionCompleted?: (input: {
+    readonly relativePath: string;
+    readonly descendantCount: number;
+  }) => Effect.Effect<void>;
   /** Test-only race barrier, invoked after the initial target identity check. */
   readonly beforeDelete?: (input: {
     readonly cwd: string;
@@ -419,6 +434,14 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+    const createDirectoryHelperSemaphore = yield* Semaphore.make(
+      Math.max(
+        1,
+        Math.floor(
+          options.createDirectoryHelperConcurrency ?? CREATE_DIRECTORY_HELPER_MAX_CONCURRENCY,
+        ),
+      ),
+    );
     const writeTargetLocksRef = yield* Ref.make<ReadonlyMap<string, WriteTargetLock>>(new Map());
     const workspaceMutationLocksRef = yield* Ref.make<ReadonlyMap<string, WorkspaceMutationLock>>(
       new Map(),
@@ -1025,7 +1048,18 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
             // Residual platform risk: Node exposes no mkdirat(dirfd), so an actor
             // able to rename the already-pinned parent inode itself can move that
             // inode elsewhere while the child still creates inside the same inode.
-            yield* Effect.scoped(createDirectoryRelativeToPinnedParent(input, finalParent));
+            yield* createDirectoryHelperSemaphore.withPermit(
+              Effect.gen(function* () {
+                yield* (
+                  options.onCreateDirectoryHelperPermitAcquired?.({
+                    cwd: input.cwd,
+                    relativePath: requestedTarget.relativePath,
+                    canonicalTargetPath: finalParent.canonicalTargetPath,
+                  }) ?? Effect.void
+                );
+                yield* Effect.scoped(createDirectoryRelativeToPinnedParent(input, finalParent));
+              }),
+            );
 
             yield* workspaceEntries
               .refresh(input.cwd)
@@ -1159,9 +1193,15 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
           hash.update("\0");
           hash.update(input.expectedKind);
           hash.update(input.recursive ? "\x001" : "\x000");
-          let descendantCount = 0;
-          const visit = async (absolutePath: string, relativePath: string): Promise<void> => {
+          const loadEntry = async (absolutePath: string, relativePath: string) => {
             const stat = await NodeFSP.lstat(absolutePath, { bigint: true });
+            const names = stat.isDirectory() ? await NodeFSP.readdir(absolutePath) : [];
+            names.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+            return { absolutePath, relativePath, stat, names };
+          };
+          let descendantCount = 0;
+          const visit = async (entry: Awaited<ReturnType<typeof loadEntry>>): Promise<void> => {
+            const { absolutePath, relativePath, stat, names } = entry;
             const kind = stat.isFile()
               ? "file"
               : stat.isDirectory()
@@ -1179,18 +1219,22 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
                 : stat.ctimeNs
               ).toString()}`,
             );
-            if (!stat.isDirectory()) return;
-            const names = await NodeFSP.readdir(absolutePath);
-            names.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
-            for (const name of names) {
-              descendantCount += 1;
-              await visit(
-                path.join(absolutePath, name),
-                relativePath ? `${relativePath}/${name}` : name,
+            for (let offset = 0; offset < names.length; offset += ENTRY_TREE_REVISION_CONCURRENCY) {
+              const children = await Promise.all(
+                names
+                  .slice(offset, offset + ENTRY_TREE_REVISION_CONCURRENCY)
+                  .map((name) =>
+                    loadEntry(
+                      path.join(absolutePath, name),
+                      relativePath ? `${relativePath}/${name}` : name,
+                    ),
+                  ),
               );
+              descendantCount += children.length;
+              for (const child of children) await visit(child);
             }
           };
-          await visit(targetPath, "");
+          await visit(await loadEntry(targetPath, ""));
           return { entryRevision: hash.digest("hex"), descendantCount };
         },
         catch: (cause) =>
@@ -1202,7 +1246,15 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
             operation: "stat",
             cause,
           }),
-      });
+      }).pipe(
+        Effect.tap(
+          (snapshot) =>
+            options.onEntryTreeRevisionCompleted?.({
+              relativePath: input.relativePath,
+              descendantCount: snapshot.descendantCount,
+            }) ?? Effect.void,
+        ),
+      );
     });
 
     const prepareDeleteEntry: WorkspaceFileSystem["Service"]["prepareDeleteEntry"] = Effect.fn(
@@ -1311,19 +1363,6 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
                     resolvedPath: initialParent.canonicalTargetPath,
                   });
             }
-            const initialSnapshot = yield* entryTreeRevision(
-              input,
-              initialParent.canonicalTargetPath,
-              root,
-            );
-            if (initialSnapshot.entryRevision !== input.entryRevision) {
-              return yield* new WorkspaceEntryChangedError({
-                workspaceRoot: input.cwd,
-                relativePath: requestedTarget.relativePath,
-                resolvedPath: initialParent.canonicalTargetPath,
-              });
-            }
-
             yield* (
               options.beforeDelete?.({
                 cwd: input.cwd,

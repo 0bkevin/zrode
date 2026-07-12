@@ -19,7 +19,7 @@ import {
   type FileDocumentOperation,
   type FileDocumentSnapshot,
 } from "./fileDocumentStore";
-import { getProjectFileQueryAtom } from "./projectFilesQueryState";
+import { getProjectFileInspectQueryAtom, getProjectFileQueryAtom } from "./projectFilesQueryState";
 
 function taggedError(error: unknown): {
   readonly _tag?: unknown;
@@ -67,6 +67,21 @@ export function classifyFileDocumentError(
 
 export const fileDocumentStore = new FileDocumentStore(
   {
+    inspect: async (key) => {
+      const atom = getProjectFileInspectQueryAtom(
+        key.environmentId as EnvironmentId,
+        key.cwd,
+        key.relativePath,
+      );
+      appAtomRegistry.refresh(atom);
+      const result = await executeAtomQuery(appAtomRegistry, atom, {
+        label: "workspace-file:inspect",
+        reportDefect: false,
+        reportFailure: false,
+      });
+      if (result._tag === "Success") return result.value;
+      throw squashAtomCommandFailure(result);
+    },
     read: async (key) => {
       const atom = getProjectFileQueryAtom(
         key.environmentId as EnvironmentId,

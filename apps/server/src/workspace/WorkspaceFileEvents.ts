@@ -20,7 +20,9 @@ import {
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const COALESCE_WINDOW_MS = 75;
+const READY_SETTLE_MS = 50;
 const RESTART_DELAY_MS = 250;
+const ROOT_HEALTH_CHECK_MS = 1_000;
 const MAX_PATHS_PER_EVENT = 256;
 const IGNORED_DIRECTORY_NAMES = new Set([".git", "node_modules"]);
 
@@ -44,7 +46,10 @@ type SharedWatcher = {
   pendingStructuralPaths: Set<string>;
   pendingResyncReason: ResyncReason | null;
   flushTimer: ReturnType<typeof setTimeout> | null;
+  readyTimer: ReturnType<typeof setTimeout> | null;
   restartTimer: ReturnType<typeof setTimeout> | null;
+  parentRestartTimer: ReturnType<typeof setTimeout> | null;
+  rootHealthTimer: ReturnType<typeof setTimeout> | null;
 };
 
 /** @internal Exported for deterministic boundary testing without OS watcher timing. */
@@ -67,6 +72,14 @@ export function recordWorkspaceFileEventPathHint(input: {
     (input.maxPaths ?? MAX_PATHS_PER_EVENT)
     ? "overflow"
     : "recorded";
+}
+
+/** @internal Exported for deterministic testing of Node's nullable filename contract. */
+export function workspaceParentWatchEventMayAffectRoot(
+  filename: string | Buffer | null,
+  rootName: string,
+): boolean {
+  return filename === null || filename.toString() === rootName;
 }
 
 export class WorkspaceFileEvents extends Context.Service<
@@ -209,8 +222,19 @@ export const make = Effect.gen(function* () {
     });
     watcher.once("ready", () => {
       if (shared.closed || shared.watcher !== watcher) return;
-      shared.ready = true;
-      emit(shared, { version: 2, sequence: shared.sequence, type: "ready" });
+      // Chokidar emits `ready` synchronously while it is still unwinding its
+      // own listener stack. Publishing our marker in that stack lets a
+      // subscriber mutate the workspace before every underlying watcher has
+      // completely settled, which can lose that first event. Give the native
+      // watcher a short settling window so `ready` is a reliable hand-off
+      // boundary even under rapid watcher churn.
+      // @effect-diagnostics-next-line globalTimers:off
+      shared.readyTimer = setTimeout(() => {
+        shared.readyTimer = null;
+        if (shared.closed || shared.watcher !== watcher) return;
+        shared.ready = true;
+        emit(shared, { version: 2, sequence: shared.sequence, type: "ready" });
+      }, READY_SETTLE_MS);
     });
   };
 
@@ -219,7 +243,9 @@ export const make = Effect.gen(function* () {
     const parentPath = path.dirname(shared.canonicalRoot);
     const rootName = path.basename(shared.canonicalRoot);
     const parentWatcher = NodeFS.watch(parentPath, { persistent: true }, (_event, filename) => {
-      if (filename === null || filename.toString() !== rootName || shared.closed) return;
+      if (shared.closed || !workspaceParentWatchEventMayAffectRoot(filename, rootName)) {
+        return;
+      }
       void NodeFSP.stat(shared.canonicalRoot)
         .then((stat) => {
           if (!stat.isDirectory()) {
@@ -239,8 +265,23 @@ export const make = Effect.gen(function* () {
       requireResync(shared, "watcher-error");
       parentWatcher.close();
       if (shared.parentWatcher === parentWatcher) shared.parentWatcher = null;
+      scheduleParentWatcherRestart(shared);
     });
   };
+
+  function scheduleParentWatcherRestart(shared: SharedWatcher) {
+    if (shared.closed || shared.parentRestartTimer !== null) return;
+    // @effect-diagnostics-next-line globalTimers:off
+    shared.parentRestartTimer = setTimeout(() => {
+      shared.parentRestartTimer = null;
+      if (shared.closed) return;
+      try {
+        startParentWatcher(shared);
+      } catch {
+        scheduleParentWatcherRestart(shared);
+      }
+    }, RESTART_DELAY_MS);
+  }
 
   const scheduleRestart = (shared: SharedWatcher) => {
     if (shared.closed || shared.restartTimer !== null) return;
@@ -257,9 +298,41 @@ export const make = Effect.gen(function* () {
     }, RESTART_DELAY_MS);
   };
 
+  const scheduleRootHealthCheck = (shared: SharedWatcher) => {
+    if (shared.closed || shared.rootHealthTimer !== null) return;
+    // Both Chokidar and `fs.watch` are intentionally lossy. A metadata-only
+    // probe gives root deletion/recreation bounded convergence without polling
+    // or scanning workspace contents.
+    // @effect-diagnostics-next-line globalTimers:off
+    shared.rootHealthTimer = setTimeout(() => {
+      shared.rootHealthTimer = null;
+      if (shared.closed) return;
+      void NodeFSP.stat(shared.canonicalRoot)
+        .then((stat) => {
+          if (!stat.isDirectory()) {
+            if (shared.ready) {
+              requireResync(shared, "root-deleted");
+              restart(shared);
+            }
+          } else if (!shared.ready) {
+            scheduleRestart(shared);
+          }
+        })
+        .catch(() => {
+          if (shared.ready) {
+            requireResync(shared, "root-deleted");
+            restart(shared);
+          }
+        })
+        .finally(() => scheduleRootHealthCheck(shared));
+    }, ROOT_HEALTH_CHECK_MS);
+  };
+
   function restart(shared: SharedWatcher) {
     if (shared.closed) return;
     shared.ready = false;
+    if (shared.readyTimer !== null) clearTimeout(shared.readyTimer);
+    shared.readyTimer = null;
     const watcher = shared.watcher;
     shared.watcher = null;
     if (watcher === null) {
@@ -284,11 +357,15 @@ export const make = Effect.gen(function* () {
       pendingStructuralPaths: new Set(),
       pendingResyncReason: null,
       flushTimer: null,
+      readyTimer: null,
       restartTimer: null,
+      parentRestartTimer: null,
+      rootHealthTimer: null,
     };
     sharedWatchers.set(canonicalRoot, shared);
     startParentWatcher(shared);
     start(shared);
+    scheduleRootHealthCheck(shared);
     return shared;
   };
 
@@ -298,9 +375,15 @@ export const make = Effect.gen(function* () {
       shared.closed = true;
       sharedWatchers.delete(shared.canonicalRoot);
       if (shared.flushTimer !== null) clearTimeout(shared.flushTimer);
+      if (shared.readyTimer !== null) clearTimeout(shared.readyTimer);
       if (shared.restartTimer !== null) clearTimeout(shared.restartTimer);
+      if (shared.parentRestartTimer !== null) clearTimeout(shared.parentRestartTimer);
+      if (shared.rootHealthTimer !== null) clearTimeout(shared.rootHealthTimer);
       shared.flushTimer = null;
+      shared.readyTimer = null;
       shared.restartTimer = null;
+      shared.parentRestartTimer = null;
+      shared.rootHealthTimer = null;
       const watcher = shared.watcher;
       shared.watcher = null;
       shared.parentWatcher?.close();

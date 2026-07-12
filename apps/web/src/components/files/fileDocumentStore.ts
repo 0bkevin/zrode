@@ -1,5 +1,6 @@
 import type {
   ProjectFileDiskRevision as ContractProjectFileDiskRevision,
+  ProjectInspectFileResult,
   ProjectReadFileResult,
   ProjectWriteFilePrecondition,
   ProjectWriteFileResult,
@@ -27,6 +28,7 @@ export type FileDocumentOperation = "read" | "write";
 
 export interface FileDocumentAdapters {
   readonly read: (key: FileDocumentKey) => Promise<FileDocumentReadResult>;
+  readonly inspect?: (key: FileDocumentKey) => Promise<ProjectInspectFileResult>;
   readonly write: (request: FileDocumentWriteRequest) => Promise<FileDocumentWriteResult>;
   readonly classifyError?: (
     error: unknown,
@@ -599,6 +601,31 @@ export class FileDocumentStore {
     const capturedBaseDiskRevision = session.snapshot.baseDiskRevision;
 
     try {
+      if (this.adapters.inspect && session.uncertainWrite === null) {
+        const inspected = await this.adapters.inspect(session.key).catch(() => null);
+        if (
+          session.controlEpoch !== capturedControlEpoch ||
+          session.snapshot.editVersion !== capturedEditVersion ||
+          session.snapshot.baseDiskRevision !== capturedBaseDiskRevision ||
+          session.savePromise !== null
+        ) {
+          return session.snapshot;
+        }
+        if (
+          inspected !== null &&
+          inspected.diskRevision !== null &&
+          inspected.diskRevision === session.snapshot.baseDiskRevision
+        ) {
+          if (
+            session.snapshot.isDirty &&
+            (session.snapshot.status === "conflict" || session.snapshot.status === "orphaned")
+          ) {
+            this.updateSnapshot(session, { status: "dirty", error: null });
+            this.scheduleDebouncedSave(session);
+          }
+          return session.snapshot;
+        }
+      }
       const result = await this.fetchRemote(session);
       if (
         session.controlEpoch !== capturedControlEpoch ||

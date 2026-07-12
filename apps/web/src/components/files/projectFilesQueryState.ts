@@ -29,6 +29,17 @@ export function getProjectFileQueryAtom(
   });
 }
 
+export function getProjectFileInspectQueryAtom(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+) {
+  return projectEnvironment.inspectFile({
+    environmentId,
+    input: { cwd, relativePath },
+  });
+}
+
 function errorMessage<A>(result: AsyncResult.AsyncResult<A, unknown>): string | null {
   if (result._tag !== "Failure") return null;
   const cause = Cause.squash(result.cause);

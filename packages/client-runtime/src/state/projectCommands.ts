@@ -98,6 +98,12 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
+    inspectFile: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:inspect-file",
+      tag: WS_METHODS.projectsInspectFile,
+      staleTimeMs: 0,
+      idleTtlMs: 5 * 60_000,
+    }),
     fileEvents: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:projects:file-events",
       tag: WS_METHODS.projectsWatchFiles,
