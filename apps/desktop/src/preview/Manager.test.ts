@@ -264,6 +264,86 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("intercepts preview reload shortcuts before Electron can reload the host", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const listeners = new Map<string, (...args: unknown[]) => void>();
+        const reload = vi.fn();
+        const reloadIgnoringCache = vi.fn();
+        fromId.mockReturnValue({
+          id: 42,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "https://example.com",
+          getTitle: () => "Example",
+          isLoading: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          reload,
+          reloadIgnoringCache,
+          on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+            listeners.set(event, listener);
+          }),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler: vi.fn(),
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand: vi.fn(async () => undefined),
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+        } as never);
+
+        yield* manager.createTab("tab_reload");
+        yield* manager.registerWebview("tab_reload", 42);
+
+        const beforeInput = listeners.get("before-input-event");
+        expect(beforeInput).toBeDefined();
+        if (!beforeInput) return;
+
+        const input = {
+          type: "keyDown",
+          key: "r",
+          code: "KeyR",
+          isAutoRepeat: false,
+          isComposing: false,
+          shift: false,
+          control: true,
+          alt: false,
+          meta: false,
+        };
+        const reloadEvent = { preventDefault: vi.fn() };
+        beforeInput(reloadEvent, input);
+
+        // preventDefault must happen in the event callback, not in the forked
+        // Effect, or Electron's native host-window accelerator can win.
+        expect(reloadEvent.preventDefault).toHaveBeenCalledOnce();
+        yield* Effect.yieldNow;
+        expect(reload).toHaveBeenCalledOnce();
+
+        const repeatEvent = { preventDefault: vi.fn() };
+        beforeInput(repeatEvent, { ...input, isAutoRepeat: true });
+        expect(repeatEvent.preventDefault).toHaveBeenCalledOnce();
+        yield* Effect.yieldNow;
+        expect(reload).toHaveBeenCalledOnce();
+
+        const hardReloadEvent = { preventDefault: vi.fn() };
+        beforeInput(hardReloadEvent, { ...input, shift: true });
+        expect(hardReloadEvent.preventDefault).toHaveBeenCalledOnce();
+        yield* Effect.yieldNow;
+        expect(reloadIgnoringCache).toHaveBeenCalledOnce();
+
+        const wrongPlatformModifierEvent = { preventDefault: vi.fn() };
+        beforeInput(wrongPlatformModifierEvent, { ...input, control: false, meta: true });
+        expect(wrongPlatformModifierEvent.preventDefault).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
   effectIt.effect("mirrors Electron's effective zoom across registration and navigation", () =>
     withManager((manager) =>
       Effect.gen(function* () {

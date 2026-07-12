@@ -57,6 +57,7 @@ import {
 import { isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
 import { playwrightInjectedRuntimeInstallExpression } from "./PlaywrightInjectedRuntime.ts";
 import { makePreviewAutomationKeySequence } from "./PreviewKeyboard.ts";
+import { resolvePreviewReloadShortcut } from "./PreviewReloadShortcut.ts";
 
 export type PreviewNavStatus =
   | { kind: "Idle" }
@@ -1236,6 +1237,24 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       });
     });
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
+      const reloadAction = resolvePreviewReloadShortcut(input, hostPlatform);
+      if (reloadAction !== null) {
+        // Electron's native Reload accelerator targets the host BrowserWindow.
+        // Cancel it synchronously, before crossing the Effect boundary, and
+        // apply the browser command directly to the focused preview guest.
+        event.preventDefault();
+        if (reloadAction === "suppress") return;
+        runFork(
+          attempt({ operation: `shortcut.${reloadAction}`, tabId, webContentsId: wc.id }, () => {
+            if (reloadAction === "hardReload") {
+              wc.reloadIgnoringCache();
+            } else {
+              wc.reload();
+            }
+          }),
+        );
+        return;
+      }
       runFork(forwardShortcut(event, input));
     };
     yield* Scope.addFinalizer(
