@@ -135,25 +135,41 @@ function trimSamples(
 function summarizeProcesses(
   samples: ReadonlyArray<ProcessResourceSample>,
 ): ReadonlyArray<ServerProcessResourceHistorySummary> {
-  const groups = new Map<string, ProcessResourceSample[]>();
+  interface ProcessAccumulator {
+    first: ProcessResourceSample;
+    latest: ProcessResourceSample;
+    cpuPercentTotal: number;
+    maxCpuPercent: number;
+    maxRssBytes: number;
+    sampleCount: number;
+  }
+  const groups = new Map<string, ProcessAccumulator>();
   for (const sample of samples) {
-    const processSamples = groups.get(sample.processKey) ?? [];
-    processSamples.push(sample);
-    groups.set(sample.processKey, processSamples);
+    const current = groups.get(sample.processKey);
+    if (current === undefined) {
+      groups.set(sample.processKey, {
+        first: sample,
+        latest: sample,
+        cpuPercentTotal: sample.cpuPercent,
+        maxCpuPercent: sample.cpuPercent,
+        maxRssBytes: sample.rssBytes,
+        sampleCount: 1,
+      });
+      continue;
+    }
+    current.cpuPercentTotal += sample.cpuPercent;
+    current.maxCpuPercent = Math.max(current.maxCpuPercent, sample.cpuPercent);
+    current.maxRssBytes = Math.max(current.maxRssBytes, sample.rssBytes);
+    current.sampleCount += 1;
+    if (sample.sampledAtMs < current.first.sampledAtMs) current.first = sample;
+    if (sample.sampledAtMs > current.latest.sampledAtMs) current.latest = sample;
   }
 
   return [...groups.entries()]
-    .map(([processKey, processSamples]) => {
-      const sorted = processSamples.toSorted((left, right) => left.sampledAtMs - right.sampledAtMs);
-      const first = sorted[0]!;
-      const latest = sorted[sorted.length - 1]!;
-      const cpuPercentTotal = sorted.reduce((total, sample) => total + sample.cpuPercent, 0);
-      const maxCpuPercent = Math.max(...sorted.map((sample) => sample.cpuPercent));
-      const maxRssBytes = Math.max(...sorted.map((sample) => sample.rssBytes));
-      const cpuSecondsApprox = sorted.reduce(
-        (total, sample) => total + (sample.cpuPercent / 100) * (SAMPLE_INTERVAL_MS / 1_000),
-        0,
-      );
+    .map(([processKey, accumulator]) => {
+      const { first, latest, cpuPercentTotal, maxCpuPercent, maxRssBytes, sampleCount } =
+        accumulator;
+      const cpuSecondsApprox = (cpuPercentTotal / 100) * (SAMPLE_INTERVAL_MS / 1_000);
 
       return {
         processKey,
@@ -165,12 +181,12 @@ function summarizeProcesses(
         firstSeenAt: first.sampledAt,
         lastSeenAt: latest.sampledAt,
         currentCpuPercent: latest.cpuPercent,
-        avgCpuPercent: cpuPercentTotal / sorted.length,
+        avgCpuPercent: cpuPercentTotal / sampleCount,
         maxCpuPercent,
         cpuSecondsApprox,
         currentRssBytes: latest.rssBytes,
         maxRssBytes,
-        sampleCount: sorted.length,
+        sampleCount,
       } satisfies ServerProcessResourceHistorySummary;
     })
     .toSorted((left, right) => right.cpuSecondsApprox - left.cpuSecondsApprox);
@@ -184,29 +200,42 @@ function buildBuckets(input: {
 }): ReadonlyArray<ServerProcessResourceHistoryBucket> {
   const bucketMs = Math.max(1_000, input.bucketMs);
   const windowStartMs = input.nowMs - input.windowMs;
+  const bucketCount = Math.ceil(input.windowMs / bucketMs);
+  interface ReadTotals {
+    cpuPercent: number;
+    rssBytes: number;
+    processCount: number;
+  }
+  const totalsByRead = new Map<number, ReadTotals>();
+  for (const sample of input.samples) {
+    const current = totalsByRead.get(sample.sampledAtMs);
+    if (current === undefined) {
+      totalsByRead.set(sample.sampledAtMs, {
+        cpuPercent: sample.cpuPercent,
+        rssBytes: sample.rssBytes,
+        processCount: 1,
+      });
+    } else {
+      current.cpuPercent += sample.cpuPercent;
+      current.rssBytes += sample.rssBytes;
+      current.processCount += 1;
+    }
+  }
+  const readsByBucket = new Map<number, ReadTotals[]>();
+  for (const [sampledAtMs, totals] of totalsByRead) {
+    if (sampledAtMs < windowStartMs || sampledAtMs > input.nowMs) continue;
+    const rawIndex = Math.floor((sampledAtMs - windowStartMs) / bucketMs);
+    const index = Math.min(bucketCount - 1, Math.max(0, rawIndex));
+    const reads = readsByBucket.get(index);
+    if (reads === undefined) readsByBucket.set(index, [totals]);
+    else reads.push(totals);
+  }
   const buckets: ServerProcessResourceHistoryBucket[] = [];
 
-  for (let startedAtMs = windowStartMs; startedAtMs < input.nowMs; startedAtMs += bucketMs) {
+  for (let index = 0; index < bucketCount; index += 1) {
+    const startedAtMs = windowStartMs + index * bucketMs;
     const endedAtMs = Math.min(input.nowMs, startedAtMs + bucketMs);
-    const bucketSamples = input.samples.filter(
-      (sample) =>
-        sample.sampledAtMs >= startedAtMs &&
-        (endedAtMs === input.nowMs
-          ? sample.sampledAtMs <= endedAtMs
-          : sample.sampledAtMs < endedAtMs),
-    );
-    const samplesByRead = new Map<number, ProcessResourceSample[]>();
-    for (const sample of bucketSamples) {
-      const samplesAtTime = samplesByRead.get(sample.sampledAtMs) ?? [];
-      samplesAtTime.push(sample);
-      samplesByRead.set(sample.sampledAtMs, samplesAtTime);
-    }
-
-    const readTotals = [...samplesByRead.values()].map((samplesAtTime) => ({
-      cpuPercent: samplesAtTime.reduce((total, sample) => total + sample.cpuPercent, 0),
-      rssBytes: samplesAtTime.reduce((total, sample) => total + sample.rssBytes, 0),
-      processCount: samplesAtTime.length,
-    }));
+    const readTotals = readsByBucket.get(index) ?? [];
     const avgCpuPercent =
       readTotals.length === 0
         ? 0
@@ -235,7 +264,7 @@ export function aggregateProcessResourceHistory(input: {
   readonly bucketMs: number;
   readonly lastFailure: ProcessResourceSamplingError | null;
 }): ServerProcessResourceHistoryResult {
-  const windowMs = Math.max(1_000, input.windowMs);
+  const windowMs = Math.min(RETENTION_MS, Math.max(1_000, input.windowMs));
   const bucketMs = Math.max(1_000, input.bucketMs);
   const minSampledAtMs = input.readAtMs - windowMs;
   const samples = input.samples.filter((sample) => sample.sampledAtMs >= minSampledAtMs);

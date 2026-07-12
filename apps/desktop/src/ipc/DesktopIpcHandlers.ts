@@ -1,5 +1,9 @@
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "./channels.ts";
+import { makeLocalEnvironmentTopologyChangeDetector } from "./DesktopLocalEnvironmentTopology.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
@@ -38,6 +42,7 @@ import {
   getLocalEnvironmentBearerToken,
   openExternal,
   pickFolder,
+  readLocalEnvironmentBootstraps,
   setTheme,
   showContextMenu,
 } from "./methods/window.ts";
@@ -93,4 +98,24 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   for (const previewMethod of PreviewIpc.methods) {
     yield* ipc.handle(previewMethod);
   }
+
+  const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const topologyChanged = makeLocalEnvironmentTopologyChangeDetector();
+  const publishLocalEnvironmentTopology = readLocalEnvironmentBootstraps().pipe(
+    Effect.flatMap((bootstraps) =>
+      topologyChanged(bootstraps)
+        ? electronWindow.sendAll(
+            IpcChannels.LOCAL_ENVIRONMENT_BOOTSTRAPS_UPDATED_CHANNEL,
+            bootstraps,
+          )
+        : Effect.void,
+    ),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not publish desktop local environment topology.", { cause }),
+    ),
+  );
+  yield* publishLocalEnvironmentTopology.pipe(
+    Effect.repeat(Schedule.spaced("2 seconds")),
+    Effect.forkScoped,
+  );
 });

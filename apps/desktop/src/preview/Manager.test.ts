@@ -30,7 +30,7 @@ const {
   writeImage,
 } = vi.hoisted(() => ({
   createFromPath: vi.fn((): { readonly isEmpty: () => boolean } => ({ isEmpty: () => false })),
-  fromId: vi.fn(() => null),
+  fromId: vi.fn((_id: number) => null),
   getFocusedWebContents: vi.fn(() => null),
   mkdir: vi.fn((_path: string) => undefined),
   showItemInFolder: vi.fn(),
@@ -142,6 +142,67 @@ describe("PreviewManager", () => {
           loading: false,
         });
         expect(fromId).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.effect("releases the active recording when its tab closes", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const makeWebview = (id: number) => {
+          let debuggerAttached = false;
+          return {
+            id,
+            isDestroyed: () => false,
+            getType: () => "webview",
+            getURL: () => `https://example.com/${id}`,
+            getTitle: () => `Example ${id}`,
+            isLoading: () => false,
+            isDevToolsOpened: () => false,
+            getZoomFactor: () => 1,
+            setZoomFactor: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            ipc: { on: vi.fn(), off: vi.fn() },
+            send: webviewSend,
+            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+            setWindowOpenHandler: vi.fn(),
+            debugger: {
+              isAttached: () => debuggerAttached,
+              attach: vi.fn(() => {
+                debuggerAttached = true;
+              }),
+              detach: vi.fn(() => {
+                debuggerAttached = false;
+              }),
+              sendCommand: vi.fn(async () => undefined),
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+          };
+        };
+        const firstWebview = makeWebview(41);
+        const secondWebview = makeWebview(42);
+        fromId.mockImplementation((id: number) =>
+          id === firstWebview.id ? (firstWebview as never) : (secondWebview as never),
+        );
+
+        yield* manager.createTab("tab_recording_1");
+        yield* manager.registerWebview("tab_recording_1", firstWebview.id);
+        yield* manager.startRecording("tab_recording_1");
+        yield* manager.closeTab("tab_recording_1");
+
+        yield* manager.createTab("tab_recording_2");
+        yield* manager.registerWebview("tab_recording_2", secondWebview.id);
+        yield* manager.startRecording("tab_recording_2");
+
+        expect(secondWebview.debugger.sendCommand).toHaveBeenCalledWith("Page.startScreencast", {
+          format: "jpeg",
+          quality: 80,
+          maxWidth: 1600,
+          maxHeight: 1200,
+          everyNthFrame: 5,
+        });
       }),
     ),
   );
@@ -1094,6 +1155,64 @@ describe("PreviewManager", () => {
         });
       }),
     ),
+  );
+
+  effectIt.effect(
+    "times out a hung debugger command so later automation is not locked forever",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          let hangRuntimeEvaluation = false;
+          const sendCommand = vi.fn((method: string) =>
+            hangRuntimeEvaluation && method === "Runtime.evaluate"
+              ? new Promise<never>(() => undefined)
+              : Promise.resolve(undefined),
+          );
+          fromId.mockReturnValue({
+            id: 42,
+            isDestroyed: () => false,
+            getType: () => "webview",
+            getURL: () => "https://example.com",
+            getTitle: () => "Example",
+            isLoading: () => false,
+            isDevToolsOpened: () => false,
+            getZoomFactor: () => 1,
+            setZoomFactor: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            ipc: { on: vi.fn(), off: vi.fn() },
+            send: webviewSend,
+            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+            setWindowOpenHandler: vi.fn(),
+            debugger: {
+              isAttached: () => false,
+              attach: vi.fn(),
+              sendCommand,
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+          } as never);
+
+          yield* manager.createTab("tab_timeout");
+          yield* manager.registerWebview("tab_timeout", 42);
+          hangRuntimeEvaluation = true;
+          const fiber = yield* manager
+            .automationEvaluate("tab_timeout", { expression: "new Promise(() => {})" })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+
+          yield* TestClock.adjust(PreviewManager.PREVIEW_DEBUGGER_COMMAND_TIMEOUT);
+          const exit = yield* Fiber.await(fiber);
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (Exit.isSuccess(exit)) return;
+          const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+          expect(PreviewManager.isPreviewOperationError(error)).toBe(true);
+          if (PreviewManager.isPreviewOperationError(error)) {
+            expect(error.operation).toBe("evaluate.Runtime.evaluate");
+            expect(error.cause).toBeInstanceOf(Error);
+            expect((error.cause as Error).message).toContain("timed out");
+          }
+        }),
+      ),
   );
 });
 

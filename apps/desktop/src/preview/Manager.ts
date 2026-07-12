@@ -32,6 +32,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -97,6 +98,11 @@ const DIAGNOSTIC_BUFFER_LIMIT = 200;
 const MAX_ARTIFACT_SITE_SLUG_LENGTH = 80;
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
+export const PREVIEW_DEBUGGER_COMMAND_TIMEOUT = Duration.seconds(15);
+// Chromium commonly composites at 60 FPS while the renderer records the
+// canvas at 12 FPS. Forwarding every fifth frame avoids copying and decoding
+// frames that the recorder cannot consume.
+const RECORDING_SCREENCAST_FRAME_INTERVAL = 5;
 const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const DEFAULT_ANNOTATION_THEME: DesktopPreviewAnnotationTheme = {
   colorScheme: "light",
@@ -423,6 +429,26 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       try: evaluate,
       catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
     });
+  const debuggerCommand = (
+    errorContext: PreviewOperationContext,
+    wc: Electron.WebContents,
+    method: string,
+    commandParams?: Record<string, unknown>,
+  ) =>
+    attemptPromise(errorContext, () => wc.debugger.sendCommand(method, commandParams)).pipe(
+      Effect.timeoutOrElse({
+        duration: PREVIEW_DEBUGGER_COMMAND_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            new PreviewOperationError({
+              ...errorContext,
+              cause: new Error(
+                `Chromium debugger command ${method} timed out after ${Duration.format(PREVIEW_DEBUGGER_COMMAND_TIMEOUT)}.`,
+              ),
+            }),
+          ),
+      }),
+    );
   const currentIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const currentMillis = Clock.currentTimeMillis;
   const encodeJson = (errorContext: PreviewOperationContext, value: unknown) =>
@@ -727,12 +753,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               if (method === "Page.screencastFrame") {
                 const sessionId = params["sessionId"];
                 if (typeof sessionId === "number") {
-                  yield* attemptPromise(
+                  yield* debuggerCommand(
                     {
                       operation: "ackScreencastFrame",
                       webContentsId: wc.id,
                     },
-                    () => wc.debugger.sendCommand("Page.screencastFrameAck", { sessionId }),
+                    wc,
+                    "Page.screencastFrameAck",
+                    { sessionId },
                   ).pipe(Effect.ignore);
                 }
                 const tabId = yield* tabIdForWebContents(wc.id);
@@ -806,9 +834,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             yield* Effect.all(
               ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"].map(
                 (method) =>
-                  attemptPromise(
+                  debuggerCommand(
                     { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
-                    () => wc.debugger.sendCommand(method),
+                    wc,
+                    method,
                   ),
               ),
               { concurrency: "unbounded", discard: true },
@@ -895,9 +924,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               webContentsId: wc.id,
             });
           }
-          const result = yield* attemptPromise(
+          const result = yield* debuggerCommand(
             { operation: `${action}.${method}`, tabId, webContentsId: wc.id },
-            () => wc.debugger.sendCommand(method, commandParams),
+            wc,
+            method,
+            commandParams,
           );
           const after = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
           if (after !== epoch) {
@@ -915,13 +946,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // with a held key or focus emulation enabled for subsequent actions.
       const sendCleanup: SendCommand = Effect.fn("PreviewManager.sendCleanupCommand")(
         function* (method, commandParams) {
-          return yield* attemptPromise(
+          return yield* debuggerCommand(
             {
               operation: `${action}.cleanup.${method}`,
               tabId,
               webContentsId: wc.id,
             },
-            () => wc.debugger.sendCommand(method, commandParams),
+            wc,
+            method,
+            commandParams,
           );
         },
       );
@@ -1375,6 +1408,31 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         copy.delete(tabId);
       }),
     );
+    yield* Effect.all(
+      [
+        Ref.update(expectedAgentInputsRef, (inputs) =>
+          replaceMap(inputs, (copy) => {
+            copy.delete(tabId);
+          }),
+        ),
+        Ref.update(controlEpochRef, (epochs) =>
+          replaceMap(epochs, (copy) => {
+            copy.delete(tabId);
+          }),
+        ),
+        Ref.update(actionTimelineRef, (timelines) =>
+          replaceMap(timelines, (copy) => {
+            copy.delete(tabId);
+          }),
+        ),
+        Ref.update(recordingTabIdRef, (recordingTabId) =>
+          Option.isSome(recordingTabId) && recordingTabId.value === tabId
+            ? Option.none()
+            : recordingTabId,
+        ),
+      ],
+      { discard: true },
+    );
     yield* emit(tabId, closed);
   });
 
@@ -1799,7 +1857,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       quality: 80,
       maxWidth: 1600,
       maxHeight: 1200,
-      everyNthFrame: 1,
+      everyNthFrame: RECORDING_SCREENCAST_FRAME_INTERVAL,
     });
   });
 

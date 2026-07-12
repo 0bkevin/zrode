@@ -1,8 +1,16 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import { TestClock } from "effect/testing";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { autoUpdaterMock } = vi.hoisted(() => ({
+const { autoUpdaterMock, CancellationTokenMock } = vi.hoisted(() => ({
+  CancellationTokenMock: class {
+    cancelled = false;
+    cancel() {
+      this.cancelled = true;
+    }
+  },
   autoUpdaterMock: {
     allowDowngrade: false,
     allowPrerelease: false,
@@ -11,7 +19,9 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     channel: "latest",
     disableDifferentialDownload: false,
     checkForUpdates: vi.fn(() => Promise.resolve(null)),
-    downloadUpdate: vi.fn(() => Promise.resolve([])),
+    downloadUpdate: vi.fn((_cancellationToken?: { readonly cancelled: boolean }) =>
+      Promise.resolve([]),
+    ),
     on: vi.fn(),
     quitAndInstall: vi.fn(),
     removeListener: vi.fn(),
@@ -21,6 +31,7 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
 
 vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
+  CancellationToken: CancellationTokenMock,
 }));
 
 import * as ElectronUpdater from "./ElectronUpdater.ts";
@@ -95,6 +106,50 @@ describe("ElectronUpdater", () => {
         "Electron updater failed to download the update on channel nightly.",
       );
       assert.notInclude(error.message, cause.message);
+    }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect("fails a hung update check with its typed error and releases the caller", () =>
+    Effect.gen(function* () {
+      autoUpdaterMock.checkForUpdates.mockImplementationOnce(
+        () => new Promise<null>(() => undefined),
+      );
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+      autoUpdaterMock.channel = "nightly";
+      const fiber = yield* updater.checkForUpdates.pipe(
+        Effect.flip,
+        Effect.forkChild({ startImmediately: true }),
+      );
+
+      yield* TestClock.adjust(ElectronUpdater.ELECTRON_UPDATER_CHECK_TIMEOUT);
+      const error = yield* Fiber.join(fiber);
+
+      assert.instanceOf(error, ElectronUpdater.ElectronUpdaterCheckForUpdatesError);
+      assert.equal(error.channel, "nightly");
+      assert.instanceOf(error.cause, Error);
+      assert.include(error.cause.message, "timed out");
+    }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect("fails a hung update download with its typed error and releases the caller", () =>
+    Effect.gen(function* () {
+      autoUpdaterMock.downloadUpdate.mockImplementationOnce(
+        () => new Promise<never>(() => undefined),
+      );
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+      const fiber = yield* updater.downloadUpdate.pipe(
+        Effect.flip,
+        Effect.forkChild({ startImmediately: true }),
+      );
+
+      yield* TestClock.adjust(ElectronUpdater.ELECTRON_UPDATER_DOWNLOAD_TIMEOUT);
+      const error = yield* Fiber.join(fiber);
+
+      assert.instanceOf(error, ElectronUpdater.ElectronUpdaterDownloadUpdateError);
+      assert.instanceOf(error.cause, Error);
+      assert.include(error.cause.message, "timed out");
+      const cancellationToken = autoUpdaterMock.downloadUpdate.mock.calls[0]?.[0];
+      assert.isTrue(cancellationToken?.cancelled);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 

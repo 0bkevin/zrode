@@ -40,6 +40,20 @@ jobs:
           grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" apps/desktop/dist-electron/preload.cjs
           grep -n "__clerk_internal_electron_passkeys" apps/desktop/dist-electron/preload.cjs
 
+      - name: Profile desktop startup and renderer memory
+        env:
+          ZRODE_PROFILE_DURATION_MS: "5000"
+          ZRODE_PROFILE_SAMPLE_INTERVAL_MS: "1000"
+          ZRODE_PROFILE_OUTPUT_DIR: ${{ runner.temp }}/desktop-performance
+        run: xvfb-run -a vp run --filter @t3tools/desktop profile-performance
+
+      - name: Upload desktop performance diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-performance-linux-x64
+          path: ${{ runner.temp }}/desktop-performance/*
+          if-no-files-found: error
+
   test:
     name: Test
     runs-on: blacksmith-8vcpu-ubuntu-2404

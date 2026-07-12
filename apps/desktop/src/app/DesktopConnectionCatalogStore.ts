@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as DesktopSavedEnvironments from "../settings/DesktopSavedEnvironments.ts";
@@ -382,6 +383,11 @@ export const make = Effect.gen(function* () {
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const crypto = yield* Crypto.Crypto;
   const savedEnvironments = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
+  // Renderer windows have independent runtimes (and therefore independent
+  // renderer-side locks). Serialize the shared on-disk catalog in the main
+  // process so a main window and a popout cannot race read/migrate/write/clear
+  // operations against the same file.
+  const mutex = yield* Semaphore.make(1);
   const catalogPath = path.join(environment.stateDir, "connection-catalog.json");
   const encryptionAvailable = safeStorage.isEncryptionAvailable.pipe(
     Effect.mapError(
@@ -469,47 +475,52 @@ export const make = Effect.gen(function* () {
     return Option.some(encoded);
   });
 
-  return DesktopConnectionCatalogStore.of({
-    get: Effect.gen(function* () {
-      const document = yield* readDocument(fileSystem, catalogPath);
-      if (Option.isNone(document)) {
-        return yield* migrateLegacyCatalog;
-      }
-      if (!(yield* encryptionAvailable)) {
-        return Option.none<string>();
-      }
-      const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
-        Effect.flatMap((encryptedCatalog) =>
-          safeStorage.decryptString(encryptedCatalog).pipe(
-            Effect.mapError(
-              (cause) =>
-                new DesktopConnectionCatalogStoreProtectionError({
-                  operation: "decrypt-catalog",
-                  catalogPath,
-                  cause,
-                }),
-            ),
+  const get = Effect.gen(function* () {
+    const document = yield* readDocument(fileSystem, catalogPath);
+    if (Option.isNone(document)) {
+      return yield* migrateLegacyCatalog;
+    }
+    if (!(yield* encryptionAvailable)) {
+      return Option.none<string>();
+    }
+    const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
+      Effect.flatMap((encryptedCatalog) =>
+        safeStorage.decryptString(encryptedCatalog).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopConnectionCatalogStoreProtectionError({
+                operation: "decrypt-catalog",
+                catalogPath,
+                cause,
+              }),
           ),
         ),
-      );
-      return Option.some(decrypted);
-    }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
-    set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
-      if (!(yield* encryptionAvailable)) {
-        return false;
-      }
-      yield* writeCatalog(catalog);
-      return true;
-    }),
-    clear: fileSystem.remove(catalogPath, { force: true }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("Could not clear the desktop connection catalog.", {
-          catalogPath,
-          error,
-        }),
       ),
-      Effect.withSpan("desktop.connectionCatalogStore.clear"),
+    );
+    return Option.some(decrypted);
+  });
+  const set = Effect.fn("desktop.connectionCatalogStore.setUnlocked")(function* (catalog: string) {
+    if (!(yield* encryptionAvailable)) {
+      return false;
+    }
+    yield* writeCatalog(catalog);
+    return true;
+  });
+  const clear = fileSystem.remove(catalogPath, { force: true }).pipe(
+    Effect.catch((error) =>
+      Effect.logWarning("Could not clear the desktop connection catalog.", {
+        catalogPath,
+        error,
+      }),
     ),
+  );
+
+  return DesktopConnectionCatalogStore.of({
+    get: mutex.withPermits(1)(get).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
+    set: (catalog) => mutex.withPermits(1)(set(catalog)),
+    clear: mutex
+      .withPermits(1)(clear)
+      .pipe(Effect.withSpan("desktop.connectionCatalogStore.clear")),
   });
 });
 

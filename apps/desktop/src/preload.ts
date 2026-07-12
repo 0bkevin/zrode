@@ -27,6 +27,34 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
   return result as Awaited<ReturnType<DesktopBridge["ensureSshEnvironment"]>>;
 }
 
+let localEnvironmentBootstraps: ReturnType<DesktopBridge["getLocalEnvironmentBootstraps"]> = [];
+const localEnvironmentBootstrapListeners = new Set<
+  (bootstraps: readonly (typeof localEnvironmentBootstraps)[number][]) => void
+>();
+
+ipcRenderer.on(
+  IpcChannels.LOCAL_ENVIRONMENT_BOOTSTRAPS_UPDATED_CHANNEL,
+  (_event, value: unknown) => {
+    if (!Array.isArray(value)) return;
+    localEnvironmentBootstraps = value as ReturnType<
+      DesktopBridge["getLocalEnvironmentBootstraps"]
+    >;
+    for (const listener of localEnvironmentBootstrapListeners) listener(localEnvironmentBootstraps);
+  },
+);
+
+// One synchronous read is intentional: the primary bootstrap token must be
+// available before the renderer's first authentication request. All subsequent
+// topology changes arrive asynchronously through the listener above.
+const initialLocalEnvironmentBootstraps = ipcRenderer.sendSync(
+  IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL,
+);
+if (Array.isArray(initialLocalEnvironmentBootstraps)) {
+  localEnvironmentBootstraps = initialLocalEnvironmentBootstraps as ReturnType<
+    DesktopBridge["getLocalEnvironmentBootstraps"]
+  >;
+}
+
 contextBridge.exposeInMainWorld("desktopBridge", {
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
@@ -35,12 +63,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getAppBranding"]>;
   },
-  getLocalEnvironmentBootstraps: () => {
-    const result = ipcRenderer.sendSync(IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL);
-    if (!Array.isArray(result)) {
-      return [];
-    }
-    return result as ReturnType<DesktopBridge["getLocalEnvironmentBootstraps"]>;
+  getLocalEnvironmentBootstraps: () => localEnvironmentBootstraps,
+  onLocalEnvironmentBootstraps: (listener) => {
+    localEnvironmentBootstrapListeners.add(listener);
+    return () => localEnvironmentBootstrapListeners.delete(listener);
   },
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),

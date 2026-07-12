@@ -1369,8 +1369,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // node_modules tree so every import resolves (this also covers the fff native
     // binaries in DESKTOP_ASAR_UNPACK). The Windows primary keeps reading the same
     // files through the asar (transparently redirected to the unpacked copy), so
-    // there's no duplication.
-    asarUnpack: [...DESKTOP_ASAR_UNPACK, "apps/server/dist/**", "**/node_modules/**"],
+    // there's no duplication. macOS and Linux never launch the packaged server
+    // through an external Linux Node process, so keep their unpacked payload
+    // limited to the native binaries that actually require filesystem paths.
+    asarUnpack:
+      platform === "win"
+        ? [...DESKTOP_ASAR_UNPACK, "apps/server/dist/**", "**/node_modules/**"]
+        : DESKTOP_ASAR_UNPACK,
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);

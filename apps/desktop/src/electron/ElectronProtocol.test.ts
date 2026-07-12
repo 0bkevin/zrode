@@ -226,4 +226,27 @@ describe("ElectronProtocol", () => {
     ]);
     assert.deepEqual(directives["font-src"], ["'self'", "zrode:", "data:"]);
   });
+
+  it("combines renderer cancellation with a protocol request deadline", () => {
+    const renderer = new AbortController();
+    const deadline = new AbortController();
+    const combined = ElectronProtocol.makeDesktopProtocolRequestSignal(
+      renderer.signal,
+      5,
+      deadline.signal,
+    );
+    assert.isFalse(combined.aborted);
+
+    renderer.abort();
+    assert.isTrue(combined.aborted);
+
+    const nextDeadline = new AbortController();
+    const timeoutOnly = ElectronProtocol.makeDesktopProtocolRequestSignal(
+      new AbortController().signal,
+      1,
+      nextDeadline.signal,
+    );
+    nextDeadline.abort();
+    assert.isTrue(timeoutOnly.aborted);
+  });
 });

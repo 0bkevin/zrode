@@ -16,6 +16,7 @@ import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import * as DesktopElectronDiagnostics from "./DesktopElectronDiagnostics.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
@@ -238,6 +239,12 @@ const startup = Effect.gen(function* () {
 
   yield* appIdentity.configure;
   yield* lifecycle.register;
+  yield* DesktopElectronDiagnostics.configureDesktopCrashReporting().pipe(
+    Effect.catchCause((cause) =>
+      logStartupError("Could not configure Electron crash reporting", { cause }),
+    ),
+  );
+  yield* DesktopElectronDiagnostics.registerDesktopElectronDiagnostics();
   yield* clerk.configure;
 
   yield* electronApp.whenReady.pipe(
@@ -245,6 +252,7 @@ const startup = Effect.gen(function* () {
     Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
   );
   yield* logStartupInfo("app ready");
+  yield* DesktopElectronDiagnostics.logGpuFeatureStatus;
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
   yield* updates.configure;

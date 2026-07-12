@@ -3,7 +3,9 @@ import { assert, describe, it } from "@effect/vitest";
 import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
 import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
@@ -47,6 +49,7 @@ function makeLayer(
   encryptionAvailable = true,
   failDecrypt: Ref.Ref<boolean> | null = null,
   fileSystemLayer: Layer.Layer<FileSystem.FileSystem> = NodeServices.layer,
+  safeStorageLayerOverride?: Layer.Layer<ElectronSafeStorage.ElectronSafeStorage>,
 ) {
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
@@ -63,7 +66,8 @@ function makeLayer(
       Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ ZRODE_HOME: baseDir })),
     ),
   );
-  const safeStorageLayer = makeSafeStorageLayer(encryptionAvailable, failDecrypt);
+  const safeStorageLayer =
+    safeStorageLayerOverride ?? makeSafeStorageLayer(encryptionAvailable, failDecrypt);
   const dependencies = Layer.mergeAll(
     environmentLayer,
     safeStorageLayer,
@@ -106,6 +110,47 @@ describe("DesktopConnectionCatalogStore", () => {
         assert.deepStrictEqual(yield* store.get, Option.none());
       }),
     ),
+  );
+
+  it.effect("serializes catalog mutations shared by multiple renderer windows", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-concurrency-test-",
+      });
+      const firstEncryptEntered = yield* Deferred.make<void>();
+      const releaseEncryption = yield* Deferred.make<void>();
+      const activeEncryptions = yield* Ref.make(0);
+      const maximumActiveEncryptions = yield* Ref.make(0);
+      const safeStorageLayer = Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, {
+        isEncryptionAvailable: Effect.succeed(true),
+        encryptString: (value) =>
+          Effect.gen(function* () {
+            const active = yield* Ref.updateAndGet(activeEncryptions, (count) => count + 1);
+            yield* Ref.update(maximumActiveEncryptions, (maximum) => Math.max(maximum, active));
+            yield* Deferred.succeed(firstEncryptEntered, undefined);
+            yield* Deferred.await(releaseEncryption);
+            yield* Ref.update(activeEncryptions, (count) => count - 1);
+            return textEncoder.encode(`encrypted:${value}`);
+          }),
+        decryptString: (value) =>
+          Effect.succeed(textDecoder.decode(value).slice("encrypted:".length)),
+      } satisfies ElectronSafeStorage.ElectronSafeStorage["Service"]);
+      const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
+        Effect.provide(makeLayer(baseDir, true, null, NodeServices.layer, safeStorageLayer)),
+      );
+
+      const first = yield* store.set("first").pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(firstEncryptEntered);
+      const second = yield* store.set("second").pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Effect.yieldNow;
+
+      assert.equal(yield* Ref.get(maximumActiveEncryptions), 1);
+      yield* Deferred.succeed(releaseEncryption, undefined);
+      assert.isTrue(yield* Fiber.join(first));
+      assert.isTrue(yield* Fiber.join(second));
+      assert.deepStrictEqual(yield* store.get, Option.some("second"));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
   it.effect("does not persist when secure storage is unavailable", () =>

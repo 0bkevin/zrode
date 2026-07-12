@@ -31,6 +31,11 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
+import {
+  INDEXED_DATABASE_OPEN_BLOCKED_TIMEOUT_MS,
+  openIndexedDatabase,
+} from "../lib/openIndexedDatabase";
+
 const DATABASE_NAME = "zrode:connection-runtime";
 const DATABASE_VERSION = 2;
 const CATALOG_STORE_NAME = "catalog";
@@ -38,6 +43,7 @@ const SHELL_STORE_NAME = "shell";
 const THREAD_STORE_NAME = "thread";
 const CATALOG_KEY = "document";
 const SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION = 1;
+export const DATABASE_OPEN_BLOCKED_TIMEOUT_MS = INDEXED_DATABASE_OPEN_BLOCKED_TIMEOUT_MS;
 
 const StoredShellSnapshot = Schema.Struct({
   schemaVersion: Schema.Literal(SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION),
@@ -86,32 +92,22 @@ function persistenceError(
   });
 }
 
-const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
-  return yield* Effect.callback<IDBDatabase, ConnectionTransientError>((resume) => {
-    if (typeof indexedDB === "undefined") {
-      resume(
-        Effect.fail(catalogError("open", "IndexedDB is unavailable in this browser context.")),
-      );
-      return;
-    }
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-    request.addEventListener("upgradeneeded", () => {
-      if (!request.result.objectStoreNames.contains(CATALOG_STORE_NAME)) {
-        request.result.createObjectStore(CATALOG_STORE_NAME);
+export const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
+  return yield* openIndexedDatabase({
+    name: DATABASE_NAME,
+    version: DATABASE_VERSION,
+    mapError: (cause) => catalogError("open", cause),
+    upgrade: (database) => {
+      if (!database.objectStoreNames.contains(CATALOG_STORE_NAME)) {
+        database.createObjectStore(CATALOG_STORE_NAME);
       }
-      if (!request.result.objectStoreNames.contains(SHELL_STORE_NAME)) {
-        request.result.createObjectStore(SHELL_STORE_NAME);
+      if (!database.objectStoreNames.contains(SHELL_STORE_NAME)) {
+        database.createObjectStore(SHELL_STORE_NAME);
       }
-      if (!request.result.objectStoreNames.contains(THREAD_STORE_NAME)) {
-        request.result.createObjectStore(THREAD_STORE_NAME);
+      if (!database.objectStoreNames.contains(THREAD_STORE_NAME)) {
+        database.createObjectStore(THREAD_STORE_NAME);
       }
-    });
-    request.addEventListener("error", () => {
-      resume(Effect.fail(catalogError("open", request.error ?? "Unknown IndexedDB error")));
-    });
-    request.addEventListener("success", () => {
-      resume(Effect.succeed(request.result));
-    });
+    },
   });
 });
 

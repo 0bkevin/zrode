@@ -972,6 +972,12 @@ export interface DesktopBridge {
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
+  // The preload cache is seeded synchronously before renderer startup, then
+  // updated from a single main-process topology watcher. This avoids repeated
+  // synchronous IPC while preserving the bootstrap credential startup invariant.
+  onLocalEnvironmentBootstraps?: (
+    listener: (bootstraps: readonly DesktopEnvironmentBootstrap[]) => void,
+  ) => () => void;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;

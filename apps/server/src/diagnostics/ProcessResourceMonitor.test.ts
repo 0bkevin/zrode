@@ -226,6 +226,23 @@ describe("ProcessResourceMonitor", () => {
     }),
   );
 
+  it.effect("bounds oversized history windows to retained data", () =>
+    Effect.sync(() => {
+      const readAt = DateTime.makeUnsafe("2026-05-05T10:00:00.000Z");
+      const result = ProcessResourceMonitor.aggregateProcessResourceHistory({
+        samples: [],
+        readAt,
+        readAtMs: DateTime.toEpochMillis(readAt),
+        windowMs: 24 * 60 * 60_000,
+        bucketMs: 1_000,
+        lastFailure: null,
+      });
+
+      expect(result.windowMs).toBe(60 * 60_000);
+      expect(result.buckets).toHaveLength(3_600);
+    }),
+  );
+
   it.effect("exposes bounded failure diagnostics while retaining the exact cause", () =>
     Effect.sync(() => {
       const readAt = DateTime.makeUnsafe("2026-05-05T10:00:00.000Z");

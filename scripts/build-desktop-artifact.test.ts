@@ -427,6 +427,45 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
+  it.effect("only unpacks the full server dependency tree for Windows WSL", () =>
+    Effect.gen(function* () {
+      const windows = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.include(windows.asarUnpack as string[], "apps/server/dist/**");
+      assert.include(windows.asarUnpack as string[], "**/node_modules/**");
+      assert.notInclude(mac.asarUnpack as string[], "apps/server/dist/**");
+      assert.notInclude(mac.asarUnpack as string[], "**/node_modules/**");
+      assert.notInclude(linux.asarUnpack as string[], "apps/server/dist/**");
+      assert.notInclude(linux.asarUnpack as string[], "**/node_modules/**");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
   it("promotes target fff binaries to direct staged dependencies", () => {
     assert.deepStrictEqual(resolveFffNativeDependencies("mac", "arm64", "0.9.4"), {
       "@ff-labs/fff-bin-darwin-arm64": "0.9.4",

@@ -10,6 +10,7 @@ import type * as Electron from "electron";
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import { attachWebContentsDiagnostics } from "../app/DesktopElectronDiagnostics.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
@@ -479,16 +480,19 @@ export const make = Effect.gen(function* () {
         );
       },
     );
-    window.webContents.on("render-process-gone", (_event, details) => {
-      void runPromise(
-        logWindowWarning(`${logLabel} render process gone`, {
-          reason: details.reason,
-          exitCode: details.exitCode,
-        }),
-      );
+    const clearDiagnostics = attachWebContentsDiagnostics({
+      webContents: window.webContents,
+      logLabel,
+      onDiagnostic: ({ level, message, annotations }) => {
+        void runPromise(
+          level === "warning"
+            ? logWindowWarning(message, annotations)
+            : logWindowInfo(message, annotations),
+        );
+      },
     });
 
-    return { load, clearRetry };
+    return { load, clearRetry, clearDiagnostics };
   };
 
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
@@ -540,7 +544,10 @@ export const make = Effect.gen(function* () {
       applicationUrl,
       targetUrl: applicationUrl,
       logLabel: "main window",
-      onLoaded: () => window.setTitle(environment.displayName),
+      onLoaded: () => {
+        window.setTitle(environment.displayName);
+        void runPromise(logWindowInfo("main window renderer loaded"));
+      },
     });
 
     const revealSubscribers: RevealSubscription[] = [(fire) => window.once("ready-to-show", fire)];
@@ -560,6 +567,7 @@ export const make = Effect.gen(function* () {
 
     window.on("closed", () => {
       rendererLoad.clearRetry();
+      rendererLoad.clearDiagnostics();
       void runPromise(electronWindow.clearMain(Option.some(window)));
     });
 
@@ -635,6 +643,7 @@ export const make = Effect.gen(function* () {
     });
     window.on("closed", () => {
       rendererLoad.clearRetry();
+      rendererLoad.clearDiagnostics();
       void runPromise(
         Ref.update(paneWindowIdsRef, (paneIds) => {
           const next = new Set(paneIds);

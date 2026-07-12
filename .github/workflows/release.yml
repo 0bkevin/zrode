@@ -598,6 +598,37 @@ jobs:
           #   done
           # fi
 
+      - name: Measure packaged desktop artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.platform }}" in
+            mac) artifact_pattern='*.dmg' ;;
+            linux) artifact_pattern='*.AppImage' ;;
+            win) artifact_pattern='*.exe' ;;
+            *) echo "Unsupported desktop platform: ${{ matrix.platform }}" >&2; exit 1 ;;
+          esac
+          artifact="$(find release-publish -maxdepth 1 -type f -name "$artifact_pattern" | head -n 1)"
+          if [[ -z "$artifact" ]]; then
+            echo "No packaged artifact matched $artifact_pattern" >&2
+            exit 1
+          fi
+          node scripts/measure-desktop-artifact.ts \
+            --artifact "$artifact" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --output "release-publish/desktop-artifact-size-${{ matrix.platform }}-${{ matrix.arch }}.json"
+
+      - name: Measure desktop startup milestones
+        # The macOS x64 artifact is cross-built on an arm64 runner. Running the
+        # workspace Electron binary there would measure arm64 while labeling the
+        # result x64, so profile only native runner/target pairs.
+        if: matrix.platform != 'mac' || matrix.arch == 'arm64'
+        shell: bash
+        env:
+          ZRODE_STARTUP_REPORT_PATH: release-publish/desktop-startup-${{ matrix.platform }}-${{ matrix.arch }}.json
+        run: vp run --filter @t3tools/desktop smoke-test
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -1,12 +1,19 @@
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { autoUpdater } from "electron-updater";
+import { autoUpdater, CancellationToken } from "electron-updater";
 
 type AutoUpdater = typeof autoUpdater;
+
+export const ELECTRON_UPDATER_CHECK_TIMEOUT = Duration.minutes(2);
+export const ELECTRON_UPDATER_DOWNLOAD_TIMEOUT = Duration.minutes(30);
+
+const updaterTimeoutCause = (operation: "check" | "download", timeout: Duration.Duration) =>
+  new Error(`Electron updater ${operation} timed out after ${Duration.format(timeout)}.`);
 
 export type ElectronUpdaterFeedUrl = Parameters<AutoUpdater["setFeedURL"]>[0];
 
@@ -122,14 +129,45 @@ export const make = ElectronUpdater.of({
     return Effect.tryPromise({
       try: () => autoUpdater.checkForUpdates(),
       catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
-    }).pipe(Effect.asVoid);
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: ELECTRON_UPDATER_CHECK_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            new ElectronUpdaterCheckForUpdatesError({
+              channel,
+              cause: updaterTimeoutCause("check", ELECTRON_UPDATER_CHECK_TIMEOUT),
+            }),
+          ),
+      }),
+      Effect.asVoid,
+    );
   }),
   downloadUpdate: Effect.suspend(() => {
     const channel = autoUpdater.channel;
     return Effect.tryPromise({
-      try: () => autoUpdater.downloadUpdate(),
+      try: (signal) => {
+        const cancellationToken = new CancellationToken();
+        const cancel = () => cancellationToken.cancel();
+        signal.addEventListener("abort", cancel, { once: true });
+        return autoUpdater
+          .downloadUpdate(cancellationToken)
+          .finally(() => signal.removeEventListener("abort", cancel));
+      },
       catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
-    }).pipe(Effect.asVoid);
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: ELECTRON_UPDATER_DOWNLOAD_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            new ElectronUpdaterDownloadUpdateError({
+              channel,
+              cause: updaterTimeoutCause("download", ELECTRON_UPDATER_DOWNLOAD_TIMEOUT),
+            }),
+          ),
+      }),
+      Effect.asVoid,
+    );
   }),
   quitAndInstall: ({ isSilent, isForceRunAfter }) =>
     Effect.suspend(() => {

@@ -22,6 +22,8 @@
     "lint:mobile": "node scripts/mobile-native-static-check.ts",
     "test": "vp run -r test",
     "test:desktop-smoke": "vp run --filter @t3tools/desktop smoke-test",
+    "profile:desktop": "vp run build:desktop && vp run --filter @t3tools/desktop profile-performance",
+    "measure:desktop:artifact": "node scripts/measure-desktop-artifact.ts",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
     "build:contracts": "vp run --filter @t3tools/contracts build",

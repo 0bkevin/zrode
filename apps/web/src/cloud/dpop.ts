@@ -10,6 +10,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { importJWK, SignJWT, type JWK } from "jose";
 
+import { openIndexedDatabase } from "../lib/openIndexedDatabase";
+
 export interface BrowserDpopKey {
   readonly privateKey: CryptoKey;
   readonly publicJwk: DpopPublicJwk;
@@ -45,19 +47,15 @@ function dpopError(message: string, cause?: unknown) {
 }
 
 function openDpopDatabase(): Effect.Effect<IDBDatabase, BrowserDpopError> {
-  return Effect.callback<IDBDatabase, BrowserDpopError>((resume) => {
-    const request = indexedDB.open(DPOP_DATABASE_NAME, DPOP_DATABASE_VERSION);
-    request.addEventListener("error", () =>
-      resume(
-        Effect.fail(dpopError("Could not open DPoP key storage.", request.error ?? undefined)),
-      ),
-    );
-    request.addEventListener("upgradeneeded", () => {
-      if (!request.result.objectStoreNames.contains(DPOP_KEY_STORE_NAME)) {
-        request.result.createObjectStore(DPOP_KEY_STORE_NAME);
+  return openIndexedDatabase({
+    name: DPOP_DATABASE_NAME,
+    version: DPOP_DATABASE_VERSION,
+    mapError: (cause) => dpopError("Could not open DPoP key storage.", cause),
+    upgrade: (database) => {
+      if (!database.objectStoreNames.contains(DPOP_KEY_STORE_NAME)) {
+        database.createObjectStore(DPOP_KEY_STORE_NAME);
       }
-    });
-    request.addEventListener("success", () => resume(Effect.succeed(request.result)));
+    },
   });
 }
 

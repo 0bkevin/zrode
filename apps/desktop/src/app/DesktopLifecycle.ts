@@ -1,6 +1,8 @@
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -48,8 +50,13 @@ export class DesktopLifecycle extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopLifecycle") {}
 
-const { logInfo: logLifecycleInfo, logError: logLifecycleError } =
-  makeComponentLogger("desktop-lifecycle");
+const {
+  logInfo: logLifecycleInfo,
+  logWarning: logLifecycleWarning,
+  logError: logLifecycleError,
+} = makeComponentLogger("desktop-lifecycle");
+
+export const DESKTOP_GRACEFUL_SHUTDOWN_TIMEOUT = Duration.seconds(10);
 
 function addScopedListener<Args extends ReadonlyArray<unknown>>(
   target: unknown,
@@ -72,11 +79,18 @@ function addScopedListener<Args extends ReadonlyArray<unknown>>(
   ).pipe(Effect.asVoid);
 }
 
-const requestDesktopShutdownAndWait = Effect.fn("desktop.lifecycle.requestShutdownAndWait")(
+export const requestDesktopShutdownAndWait = Effect.fn("desktop.lifecycle.requestShutdownAndWait")(
   function* (): Effect.fn.Return<void, never, DesktopShutdown.DesktopShutdown> {
     const shutdown = yield* DesktopShutdown.DesktopShutdown;
     yield* shutdown.request;
-    yield* shutdown.awaitComplete;
+    const completed = yield* shutdown.awaitComplete.pipe(
+      Effect.timeoutOption(DESKTOP_GRACEFUL_SHUTDOWN_TIMEOUT),
+    );
+    if (Option.isNone(completed)) {
+      yield* logLifecycleWarning("graceful shutdown timed out; allowing Electron to exit", {
+        timeout: Duration.format(DESKTOP_GRACEFUL_SHUTDOWN_TIMEOUT),
+      });
+    }
   },
 );
 

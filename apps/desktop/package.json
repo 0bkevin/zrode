@@ -9,7 +9,8 @@
     "start": "node scripts/start-electron.mjs",
     "typecheck": "tsgo --noEmit",
     "test": "vp test run --passWithNoTests",
-    "smoke-test": "node scripts/smoke-test.mjs"
+    "smoke-test": "node scripts/smoke-test.mjs",
+    "profile-performance": "node scripts/performance-profile.mjs"
   },
   "dependencies": {
     "@clerk/electron": "catalog:",

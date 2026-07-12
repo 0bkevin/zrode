@@ -11,6 +11,7 @@ import * as Electron from "electron";
 export const DESKTOP_HOST = "app";
 export const DESKTOP_PRODUCTION_SCHEME = "zrode";
 export const DESKTOP_DEVELOPMENT_SCHEME = "zrode-dev";
+export const DESKTOP_PROTOCOL_REQUEST_TIMEOUT_MS = 30_000;
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
@@ -104,6 +105,14 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
   });
 }
 
+export function makeDesktopProtocolRequestSignal(
+  requestSignal: AbortSignal,
+  timeoutMs = DESKTOP_PROTOCOL_REQUEST_TIMEOUT_MS,
+  timeoutSignal: AbortSignal = AbortSignal.timeout(timeoutMs),
+): AbortSignal {
+  return AbortSignal.any([requestSignal, timeoutSignal]);
+}
+
 async function proxyRequest(
   request: Request,
   targetOrigin: URL,
@@ -137,6 +146,7 @@ async function proxyRequest(
   const init: RequestInit = {
     method: request.method,
     headers,
+    signal: makeDesktopProtocolRequestSignal(request.signal),
   };
   if (request.method !== "GET" && request.method !== "HEAD") {
     init.body = request.body;
@@ -162,6 +172,7 @@ async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<
     try {
       return await Electron.net.fetch(url, init);
     } catch (error) {
+      if (init.signal?.aborted) throw error;
       lastError = error;
     }
   }
