@@ -40,7 +40,15 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { primaryServerProvidersAtom, serverEnvironment } from "../../state/server";
-import { ClaudeAI, CursorIcon, DevinIcon, GrokIcon, OpenAI, OpenCodeIcon } from "../Icons";
+import {
+  ClaudeAI,
+  CursorIcon,
+  DevinIcon,
+  GrokIcon,
+  KiloCodeIcon,
+  OpenAI,
+  OpenCodeIcon,
+} from "../Icons";
 import { isUnmeteredProviderEligible } from "../providerUsageEligibility";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
@@ -67,6 +75,7 @@ const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
   claude: "var(--color-orange-600)",
   codex: "var(--color-sky-600)",
   grok: "var(--color-violet-600)",
+  kilocode: "var(--color-pink-600)",
   opencode: "var(--color-emerald-600)",
 };
 
@@ -79,6 +88,7 @@ const PROVIDER_SHARE_HEX: Record<ProviderTokenActivityKind, string> = {
   claude: "#ea580c",
   codex: "#0284c7",
   grok: "#7c3aed",
+  kilocode: "#db2777",
   opencode: "#059669",
 };
 
@@ -86,6 +96,7 @@ const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
   claude: "Claude",
   codex: "Codex",
   grok: "Grok",
+  kilocode: "Kilo Code",
   opencode: "OpenCode",
 };
 
@@ -94,6 +105,7 @@ const HISTORY_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "claude",
   "codex",
   "grok",
+  "kilocode",
   "opencode",
 ];
 
@@ -111,6 +123,8 @@ function ProviderIcon({
       return <OpenAI className={className} />;
     case "grok":
       return <GrokIcon className={className} />;
+    case "kilocode":
+      return <KiloCodeIcon className={className} />;
     case "opencode":
       return <OpenCodeIcon className={className} />;
   }

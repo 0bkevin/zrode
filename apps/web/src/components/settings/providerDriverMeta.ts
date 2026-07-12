@@ -5,6 +5,7 @@ import {
   DevinSettings,
   GitHubCopilotSettings,
   GrokSettings,
+  KiloCodeSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
@@ -15,6 +16,7 @@ import {
   DevinIcon,
   GithubCopilotIcon,
   GrokIcon,
+  KiloCodeIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -78,6 +80,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     icon: DevinIcon,
     badgeLabel: "Early Access",
     settingsSchema: DevinSettings,
+  },
+  {
+    value: ProviderDriverKind.make("kilocode"),
+    label: "Kilo Code",
+    icon: KiloCodeIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: KiloCodeSettings,
   },
   {
     value: ProviderDriverKind.make("githubCopilot"),

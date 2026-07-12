@@ -204,6 +204,14 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
     /**
+     * Closes the active ACP session. Unlike `session/cancel`, this is a request
+     * with an observable success/failure result and may invalidate the runtime
+     * session for subsequent prompts.
+     */
+    readonly closeSession: Effect.Effect<void, EffectAcpErrors.AcpError>;
+    /** Terminates the ACP child process even when an RPC is stuck. */
+    readonly terminateProcess: Effect.Effect<void, EffectAcpErrors.AcpError>;
+    /**
      * Selects the active mode through the negotiated `mode` configuration option.
      * This is a no-op when the requested mode is already active.
      * @see https://agentclientprotocol.com/protocol/schema#session/set_config_option
@@ -866,6 +874,29 @@ export const make = (
               .cancel({ sessionId: started.sessionId })
               .pipe(Effect.ignore, Effect.forkIn(runtimeScope));
           }),
+        ),
+      ),
+      closeSession: getStartedState.pipe(
+        Effect.flatMap((started) => {
+          const requestPayload = {
+            sessionId: started.sessionId,
+          } satisfies EffectAcpSchema.CloseSessionRequest;
+          return runLoggedRequest(
+            "session/close",
+            requestPayload,
+            acp.agent.closeSession(requestPayload),
+          ).pipe(Effect.asVoid);
+        }),
+      ),
+      terminateProcess: child.kill({ killSignal: "SIGTERM", forceKillAfter: "1 second" }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new EffectAcpErrors.AcpTransportError({
+              operation: "call-rpc",
+              method: "process/kill",
+              detail: "Failed to terminate ACP child process.",
+              cause,
+            }),
         ),
       ),
       setMode: (modeId) =>

@@ -1,7 +1,10 @@
 import type { ProviderUsageSnapshot, ProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { compactProviderUsagePercent } from "./ProviderUsageStatus";
+import {
+  compactProviderUsageCreditBalance,
+  compactProviderUsagePercent,
+} from "./ProviderUsageStatus";
 
 function usageWindow(usedPercent: number): ProviderUsageWindow {
   return {
@@ -73,5 +76,29 @@ describe("compactProviderUsagePercent", () => {
     });
 
     expect(compactProviderUsagePercent(snapshot)).toBeNull();
+  });
+});
+
+describe("compactProviderUsageCreditBalance", () => {
+  it("shows the exact signed-in Kilo balance when there is no allowance window", () => {
+    expect(
+      compactProviderUsageCreditBalance(
+        usageSnapshot({
+          provider: "kilocode",
+          credits: { balance: "$12.34", hasCredits: true, unlimited: false },
+        }),
+      ),
+    ).toBe("$12.34");
+  });
+
+  it("keeps a zero Kilo balance visible", () => {
+    expect(
+      compactProviderUsageCreditBalance(
+        usageSnapshot({
+          provider: "kilocode",
+          credits: { balance: "$0.00", hasCredits: false, unlimited: false },
+        }),
+      ),
+    ).toBe("$0.00");
   });
 });

@@ -33,6 +33,11 @@ const requireAuthForSession = process.env.ZRODE_ACP_REQUIRE_AUTH_FOR_SESSION ===
 const requireAuthForPrompt = process.env.ZRODE_ACP_REQUIRE_AUTH_FOR_PROMPT === "1";
 const mockAuthMethodId = process.env.ZRODE_ACP_AUTH_METHOD_ID ?? "test";
 const authDelayMs = Number(process.env.ZRODE_ACP_AUTH_DELAY_MS ?? "0");
+const initializeDelayMs = Number(process.env.ZRODE_ACP_INITIALIZE_DELAY_MS ?? "0");
+const setConfigOptionDelayMs = Number(process.env.ZRODE_ACP_SET_CONFIG_OPTION_DELAY_MS ?? "0");
+const hangInitialize = process.env.ZRODE_ACP_HANG_INITIALIZE === "1";
+const hangSetConfigOption = process.env.ZRODE_ACP_HANG_SET_CONFIG_OPTION === "1";
+const rejectCloseSession = process.env.ZRODE_ACP_REJECT_CLOSE_SESSION === "1";
 const emitAvailableCommandsOnSessionNew =
   process.env.ZRODE_ACP_EMIT_AVAILABLE_COMMANDS_ON_SESSION_NEW === "1";
 const emitLoadReplay = process.env.ZRODE_ACP_EMIT_LOAD_REPLAY === "1";
@@ -44,6 +49,8 @@ const emitStaleXAiPromptCompleteBeforeSecondHang =
 const emitOverlappingXAiPromptCompleteOutOfOrder =
   process.env.ZRODE_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
 const failPrompt = process.env.ZRODE_ACP_FAIL_PROMPT === "1";
+const emitUpdateBeforePromptFailure =
+  process.env.ZRODE_ACP_EMIT_UPDATE_BEFORE_PROMPT_FAILURE === "1";
 const failSetConfigOption = process.env.ZRODE_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.ZRODE_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.ZRODE_ACP_PROMPT_RESPONSE_TEXT;
@@ -330,7 +337,11 @@ const program = Effect.gen(function* () {
   const agent = yield* EffectAcpAgent.AcpAgent;
 
   yield* agent.handleInitialize((request) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      if (hangInitialize) return yield* Effect.never;
+      if (initializeDelayMs > 0) {
+        yield* Effect.sleep(initializeDelayMs);
+      }
       parameterizedModelPicker =
         request.clientCapabilities?._meta?.parameterizedModelPicker === true;
       return {
@@ -447,6 +458,15 @@ const program = Effect.gen(function* () {
     }),
   );
 
+  yield* agent.handleCloseSession(({ sessionId: requestedSessionId }) =>
+    rejectCloseSession
+      ? Effect.fail(AcpError.AcpRequestError.methodNotFound("session/close"))
+      : Effect.sync(() => {
+          cancelledSessions.add(String(requestedSessionId ?? sessionId));
+          return {};
+        }),
+  );
+
   yield* agent.handleSetSessionModel((request) =>
     Effect.gen(function* () {
       if (!grokAcpModels.some((model) => model.modelId === request.modelId)) {
@@ -465,6 +485,10 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleSetSessionConfigOption((request) =>
     Effect.gen(function* () {
+      if (hangSetConfigOption) return yield* Effect.never;
+      if (setConfigOptionDelayMs > 0) {
+        yield* Effect.sleep(setConfigOptionDelayMs);
+      }
       if (exitOnSetConfigOption) {
         return yield* Effect.sync(() => {
           process.exit(7);
@@ -536,6 +560,15 @@ const program = Effect.gen(function* () {
       }
 
       if (failPrompt) {
+        if (emitUpdateBeforePromptFailure) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "partial before failure" },
+            },
+          });
+        }
         return yield* AcpError.AcpRequestError.internalError("Mock prompt failure");
       }
 

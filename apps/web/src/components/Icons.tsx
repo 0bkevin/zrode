@@ -663,6 +663,19 @@ export const OpenCodeIcon: Icon = (props) => (
   </svg>
 );
 
+/** Compact Kilo-specific K mark for provider surfaces. */
+export const KiloCodeIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" className={className}>
+    <path
+      d="M5 3.5v17M18.5 4 9 12l9.5 8"
+      className="stroke-black dark:stroke-white"
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 export const GithubCopilotIcon: Icon = ({ className, ...props }) => (
   <svg
     {...props}

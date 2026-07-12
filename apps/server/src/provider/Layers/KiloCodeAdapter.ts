@@ -1,11 +1,10 @@
 import {
   ApprovalRequestId,
-  type GitHubCopilotSettings,
+  type KiloCodeSettings,
   EventId,
   type ProviderApprovalDecision,
   type ProviderRuntimeEvent,
   type ProviderSession,
-  type ProviderUserInputAnswers,
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
@@ -23,6 +22,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -56,40 +56,50 @@ import {
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
-  makeGitHubCopilotAcpRuntime,
-  resolveGitHubCopilotAcpModelId,
-} from "../acp/GitHubCopilotAcpSupport.ts";
-import { type GitHubCopilotAdapterShape } from "../Services/GitHubCopilotAdapter.ts";
+  applyKiloCodeAcpModelSelection,
+  availableKiloCodeModelsFromSessionSetup,
+  currentKiloCodeModelIdFromSessionSetup,
+  makeKiloCodeAcpRuntime,
+  mergeKiloCodeSlashCommands,
+  resolveKiloCodeAcpBaseModelId,
+} from "../acp/KiloCodeAcpSupport.ts";
+import { KILOCODE_SLASH_COMMANDS } from "./KiloCodeProvider.ts";
+import { type KiloCodeAdapterShape } from "../Services/KiloCodeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
+const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 
-const PROVIDER = ProviderDriverKind.make("githubCopilot");
+const PROVIDER = ProviderDriverKind.make("kilocode");
+const KILOCODE_RESUME_VERSION = 1 as const;
+const KILOCODE_START_TIMEOUT_MS = 30_000;
+const KILOCODE_MODEL_SELECTION_TIMEOUT_MS = 15_000;
+const KILOCODE_PROMPT_TIMEOUT_MS = 30 * 60_000;
+const KILOCODE_CLOSE_TIMEOUT_MS = 2_000;
+const KILOCODE_EVENT_DRAIN_TIMEOUT_MS = 1_000;
+
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
   return Exit.isSuccess(result) ? result.value : undefined;
 }
 
-export interface GitHubCopilotAdapterLiveOptions {
+export interface KiloCodeAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly instanceId?: ProviderInstanceId;
+  readonly startTimeoutMs?: number;
+  readonly modelSelectionTimeoutMs?: number;
+  readonly promptTimeoutMs?: number;
+  readonly closeTimeoutMs?: number;
+  readonly eventDrainTimeoutMs?: number;
 }
 
 interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
-type PendingUserInputResolution =
-  | { readonly _tag: "answered"; readonly answers: ProviderUserInputAnswers }
-  | { readonly _tag: "cancelled" };
-
-interface PendingUserInput {
-  readonly resolution: Deferred.Deferred<PendingUserInputResolution>;
-}
-
-interface GitHubCopilotSessionContext {
+interface KiloCodeSessionContext {
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
   session: ProviderSession;
@@ -97,17 +107,16 @@ interface GitHubCopilotSessionContext {
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
-  readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
-  /** Number of sendTurn prompts currently in flight or being prepared.
-   * >0 means a turn is actively running, so a new sendTurn is a steer that
-   * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  readonly availableModels: ReadonlyArray<EffectAcpSchema.ModelInfo> | undefined;
+  readonly modelConfigId: string | undefined;
+  availableCommands: ReturnType<typeof mergeKiloCodeSlashCommands>;
   stopped: boolean;
 }
 
@@ -121,18 +130,8 @@ function settlePendingApprovalsAsCancelled(
   );
 }
 
-function settlePendingUserInputsAsCancelled(
-  pendingUserInputs: ReadonlyMap<ApprovalRequestId, PendingUserInput>,
-): Effect.Effect<void> {
-  return Effect.forEach(
-    Array.from(pendingUserInputs.values()),
-    (pending) => Deferred.succeed(pending.resolution, { _tag: "cancelled" }).pipe(Effect.ignore),
-    { discard: true },
-  );
-}
-
 function appendPromptResultToTurn(
-  ctx: GitHubCopilotSessionContext,
+  ctx: KiloCodeSessionContext,
   turnId: TurnId,
   promptParts: ReadonlyArray<EffectAcpSchema.ContentBlock>,
   result: EffectAcpSchema.PromptResponse,
@@ -147,14 +146,24 @@ function appendPromptResultToTurn(
     : [...ctx.turns, { id: turnId, items: [{ prompt: promptParts, result }] }];
 }
 
-const resolveNotificationTurnId = (ctx: GitHubCopilotSessionContext): TurnId | undefined =>
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseKiloCodeResume(raw: unknown): { sessionId: string } | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (raw.schemaVersion !== KILOCODE_RESUME_VERSION) return undefined;
+  if (typeof raw.sessionId !== "string" || !raw.sessionId.trim()) return undefined;
+  return { sessionId: raw.sessionId.trim() };
+}
+
+const resolveNotificationTurnId = (ctx: KiloCodeSessionContext): TurnId | undefined =>
   ctx.activeTurnId;
 
-const resolveCallbackTurnId = (ctx: GitHubCopilotSessionContext): TurnId | undefined =>
-  ctx.activeTurnId;
+const resolveCallbackTurnId = (ctx: KiloCodeSessionContext): TurnId | undefined => ctx.activeTurnId;
 
 const resolveSessionCallbackTurnId = (
-  sessions: ReadonlyMap<ThreadId, GitHubCopilotSessionContext>,
+  sessions: ReadonlyMap<ThreadId, KiloCodeSessionContext>,
   threadId: ThreadId,
 ): TurnId | undefined => {
   const ctx = sessions.get(threadId);
@@ -190,7 +199,7 @@ function completedStopReasonFromPromptResponse(
   return response?.stopReason ?? null;
 }
 
-export function GitHubCopilotPromptSettlementBelongsToContext(input: {
+export function KiloCodePromptSettlementBelongsToContext(input: {
   readonly liveAcpSessionId: string;
   readonly expectedAcpSessionId: string;
   readonly liveActiveTurnId: TurnId | undefined;
@@ -203,12 +212,18 @@ export function GitHubCopilotPromptSettlementBelongsToContext(input: {
   );
 }
 
-export function makeGitHubCopilotAdapter(
-  copilotSettings: GitHubCopilotSettings,
-  options?: GitHubCopilotAdapterLiveOptions,
+export function makeKiloCodeAdapter(
+  kiloCodeSettings: KiloCodeSettings,
+  options?: KiloCodeAdapterLiveOptions,
 ) {
   return Effect.gen(function* () {
-    const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("githubCopilot");
+    const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("kilocode");
+    const startTimeoutMs = options?.startTimeoutMs ?? KILOCODE_START_TIMEOUT_MS;
+    const modelSelectionTimeoutMs =
+      options?.modelSelectionTimeoutMs ?? KILOCODE_MODEL_SELECTION_TIMEOUT_MS;
+    const promptTimeoutMs = options?.promptTimeoutMs ?? KILOCODE_PROMPT_TIMEOUT_MS;
+    const closeTimeoutMs = options?.closeTimeoutMs ?? KILOCODE_CLOSE_TIMEOUT_MS;
+    const eventDrainTimeoutMs = options?.eventDrainTimeoutMs ?? KILOCODE_EVENT_DRAIN_TIMEOUT_MS;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -223,7 +238,8 @@ export function makeGitHubCopilotAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
 
-    const sessions = new Map<ThreadId, GitHubCopilotSessionContext>();
+    const sessions = new Map<ThreadId, KiloCodeSessionContext>();
+    const deadlineScope = yield* Scope.make("parallel");
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
@@ -234,7 +250,7 @@ export function makeGitHubCopilotAdapter(
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "crypto/randomUUIDv4",
-            detail: "Failed to generate GitHub Copilot runtime identifier.",
+            detail: "Failed to generate KiloCode runtime identifier.",
             cause,
           }),
       ),
@@ -246,7 +262,7 @@ export function makeGitHubCopilotAdapter(
         Effect.mapError(
           (cause) =>
             new EffectAcpErrors.AcpTransportError({
-              detail: "Failed to process GitHub Copilot ACP callback.",
+              detail: "Failed to process KiloCode ACP callback.",
               cause,
             }),
         ),
@@ -254,6 +270,21 @@ export function makeGitHubCopilotAdapter(
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+
+    const awaitUntilDeadline = <A, E, R>(
+      effect: Effect.Effect<A, E, R>,
+      timeoutMs: number,
+    ): Effect.Effect<Option.Option<Exit.Exit<A, E>>, never, R> =>
+      Effect.gen(function* () {
+        // Detach the RPC fiber from the deadline waiter. Some ACP transport
+        // calls are not promptly interruptible; making them a child would make
+        // the winner wait for loser cleanup and defeat the deadline.
+        const fiber = yield* effect.pipe(Effect.forkIn(deadlineScope, { startImmediately: true }));
+        return yield* Effect.raceFirst(
+          Fiber.await(fiber).pipe(Effect.map(Option.some)),
+          Effect.sleep(timeoutMs).pipe(Effect.as(Option.none<Exit.Exit<A, E>>())),
+        );
+      });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -284,131 +315,69 @@ export function makeGitHubCopilotAdapter(
         readonly errorMessage?: string;
         readonly completedStopReason?: EffectAcpSchema.StopReason | null;
         readonly emitTurnCompletion?: boolean;
-        /** Interrupt/cancel: drop every outstanding prompt slot and settle once. */
         readonly settleAllPrompts?: boolean;
       },
     ) =>
       Effect.gen(function* () {
         const liveCtx = sessions.get(threadId);
-        if (!liveCtx) {
-          return;
-        }
-        const settlementBelongsToLiveContext = GitHubCopilotPromptSettlementBelongsToContext({
+        if (!liveCtx) return;
+        const belongs = KiloCodePromptSettlementBelongsToContext({
           liveAcpSessionId: liveCtx.acpSessionId,
           expectedAcpSessionId,
           liveActiveTurnId: liveCtx.activeTurnId,
           liveSessionActiveTurnId: liveCtx.session.activeTurnId,
           turnId,
         });
-        if (!settlementBelongsToLiveContext) {
-          // interruptTurn already consumed every prompt slot for this turn. A
-          // late prompt result must neither emit a second terminal event nor
-          // consume a slot belonging to a newer turn on the same ACP session.
+        if (!belongs) {
           if (
             liveCtx.acpSessionId !== expectedAcpSessionId ||
             liveCtx.interruptedTurnIds.has(turnId)
           ) {
             return;
           }
-          if (options?.emitTurnCompletion !== false) {
-            if (options?.errorMessage !== undefined) {
-              yield* offerRuntimeEvent({
-                type: "turn.completed",
-                ...(yield* makeEventStamp()),
-                provider: PROVIDER,
-                threadId,
-                turnId,
-                payload: {
-                  state: "failed",
-                  errorMessage: options.errorMessage,
-                },
-              });
-            } else if (options?.completedStopReason !== undefined) {
-              yield* offerRuntimeEvent({
-                type: "turn.completed",
-                ...(yield* makeEventStamp()),
-                provider: PROVIDER,
-                threadId,
-                turnId,
-                payload: {
-                  state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
-                  stopReason: options.completedStopReason ?? null,
-                },
-              });
-            }
-          }
           return;
         }
-        let settleTurnId = turnId;
+
         if (options?.settleAllPrompts) {
           liveCtx.promptsInFlight = 0;
-          if (liveCtx.activeTurnId !== turnId && liveCtx.session.activeTurnId !== turnId) {
-            const fallbackTurnId = liveCtx.activeTurnId ?? liveCtx.session.activeTurnId;
-            if (!fallbackTurnId) {
-              if (liveCtx.session.status === "running" || liveCtx.session.status === "connecting") {
-                const updatedAt = yield* nowIso;
-                const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
-                liveCtx.activeTurnId = undefined;
-                liveCtx.session = {
-                  ...readySession,
-                  status: "ready",
-                  updatedAt,
-                };
-              }
-              return;
-            }
-            settleTurnId = fallbackTurnId;
-          }
         } else {
-          const remainingPrompts = Math.max(0, liveCtx.promptsInFlight - 1);
+          liveCtx.promptsInFlight = Math.max(0, liveCtx.promptsInFlight - 1);
           if (
-            remainingPrompts > 0 ||
-            liveCtx.activeTurnId !== settleTurnId ||
-            liveCtx.session.activeTurnId !== settleTurnId
+            liveCtx.promptsInFlight > 0 ||
+            liveCtx.activeTurnId !== turnId ||
+            liveCtx.session.activeTurnId !== turnId
           ) {
-            liveCtx.promptsInFlight = remainingPrompts;
             return;
           }
-          liveCtx.promptsInFlight = remainingPrompts;
         }
-        const updatedAt = yield* nowIso;
-        const canEmitTurnCompletion =
+
+        const canEmit =
           liveCtx.session.status === "running" || liveCtx.session.status === "connecting";
-        const shouldEmitFailedTurn = options?.errorMessage !== undefined && canEmitTurnCompletion;
-        const shouldEmitCompletedTurn =
-          options?.completedStopReason !== undefined && canEmitTurnCompletion;
+        const updatedAt = yield* nowIso;
         const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
         liveCtx.activeTurnId = undefined;
-        liveCtx.session = {
-          ...readySession,
-          status: "ready",
-          updatedAt,
-        };
-        if (options?.emitTurnCompletion === false) {
-          return;
-        }
-        if (shouldEmitFailedTurn) {
+        liveCtx.session = { ...readySession, status: "ready", updatedAt };
+
+        if (options?.emitTurnCompletion === false || !canEmit) return;
+        if (options?.errorMessage !== undefined) {
           yield* offerRuntimeEvent({
             type: "turn.completed",
             ...(yield* makeEventStamp()),
             provider: PROVIDER,
             threadId,
-            turnId: settleTurnId,
-            payload: {
-              state: "failed",
-              errorMessage: options.errorMessage,
-            },
+            turnId,
+            payload: { state: "failed", errorMessage: options.errorMessage },
           });
-        } else if (shouldEmitCompletedTurn) {
+        } else if (options?.completedStopReason !== undefined) {
           yield* offerRuntimeEvent({
             type: "turn.completed",
             ...(yield* makeEventStamp()),
             provider: PROVIDER,
             threadId,
-            turnId: settleTurnId,
+            turnId,
             payload: {
               state: options.completedStopReason === "cancelled" ? "cancelled" : "completed",
-              stopReason: options.completedStopReason ?? null,
+              stopReason: options.completedStopReason,
             },
           });
         }
@@ -435,7 +404,7 @@ export function makeGitHubCopilotAdapter(
         );
       }).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to write native GitHub Copilot notification log.", {
+          Effect.logWarning("Failed to write native KiloCode notification log.", {
             cause,
             threadId,
             method,
@@ -444,9 +413,7 @@ export function makeGitHubCopilotAdapter(
       );
 
     const emitPlanUpdate = (
-      ctx: GitHubCopilotSessionContext,
-      turnId: TurnId | undefined,
-      stamp: { readonly eventId: EventId; readonly createdAt: string },
+      ctx: KiloCodeSessionContext,
       payload: {
         readonly explanation?: string | null;
         readonly plan: ReadonlyArray<{
@@ -458,17 +425,17 @@ export function makeGitHubCopilotAdapter(
       method: string,
     ) =>
       Effect.gen(function* () {
-        const fingerprint = `${turnId ?? "no-turn"}:${encodeJsonStringForDiagnostics(payload) ?? "[unserializable payload]"}`;
+        const fingerprint = `${ctx.activeTurnId ?? "no-turn"}:${encodeJsonStringForDiagnostics(payload) ?? "[unserializable payload]"}`;
         if (ctx.lastPlanFingerprint === fingerprint) {
           return;
         }
         ctx.lastPlanFingerprint = fingerprint;
         yield* offerRuntimeEvent(
           makeAcpPlanUpdatedEvent({
-            stamp,
+            stamp: yield* makeEventStamp(),
             provider: PROVIDER,
             threadId: ctx.threadId,
-            turnId,
+            turnId: ctx.activeTurnId,
             payload,
             source: "acp.jsonrpc",
             method,
@@ -479,7 +446,7 @@ export function makeGitHubCopilotAdapter(
 
     const requireSession = (
       threadId: ThreadId,
-    ): Effect.Effect<GitHubCopilotSessionContext, ProviderAdapterSessionNotFoundError> => {
+    ): Effect.Effect<KiloCodeSessionContext, ProviderAdapterSessionNotFoundError> => {
       const ctx = sessions.get(threadId);
       if (!ctx || ctx.stopped) {
         return Effect.fail(
@@ -489,17 +456,22 @@ export function makeGitHubCopilotAdapter(
       return Effect.succeed(ctx);
     };
 
-    const stopSessionInternal = (ctx: GitHubCopilotSessionContext) =>
+    const stopSessionInternal = (ctx: KiloCodeSessionContext) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
         if (ctx.notificationFiber) {
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
+        // Do not let an uninterruptible ACP RPC prevent session teardown or
+        // replacement. Normal stop preserves provider-side resume state; it
+        // terminates only this adapter process rather than closing the session.
+        yield* ctx.acp.terminateProcess.pipe(Effect.ignore);
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
-        sessions.delete(ctx.threadId);
+        if (sessions.get(ctx.threadId) === ctx) {
+          sessions.delete(ctx.threadId);
+        }
         yield* offerRuntimeEvent({
           type: "session.exited",
           ...(yield* makeEventStamp()),
@@ -509,7 +481,41 @@ export function makeGitHubCopilotAdapter(
         });
       });
 
-    const startSession: GitHubCopilotAdapterShape["startSession"] = (input) =>
+    const closeAndTerminateSession = (ctx: KiloCodeSessionContext) =>
+      Effect.gen(function* () {
+        const closeFiber = yield* ctx.acp.closeSession.pipe(
+          Effect.forkIn(deadlineScope, { startImmediately: true }),
+        );
+        const closeOutcome = yield* Effect.raceFirst(
+          Fiber.await(closeFiber).pipe(Effect.map(Option.some)),
+          Effect.sleep(closeTimeoutMs).pipe(Effect.as(Option.none())),
+        );
+        const terminateResult = yield* ctx.acp.terminateProcess.pipe(Effect.result);
+
+        if (Result.isFailure(terminateResult)) {
+          return new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/terminate",
+            detail: "Failed to terminate the Kilo Code ACP process after cancellation.",
+            cause: terminateResult.failure,
+          });
+        }
+        if (Option.isNone(closeOutcome)) {
+          yield* Effect.logWarning(
+            `Kilo Code session close timed out after ${closeTimeoutMs}ms; the ACP process was terminated instead.`,
+          );
+          return undefined;
+        }
+        if (Exit.isFailure(closeOutcome.value)) {
+          yield* Effect.logWarning(
+            "Kilo Code session close failed; the ACP process was terminated instead.",
+          );
+          return undefined;
+        }
+        return undefined;
+      });
+
+    const startSession: KiloCodeAdapterShape["startSession"] = (input) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
@@ -527,34 +533,24 @@ export function makeGitHubCopilotAdapter(
               issue: "cwd is required and must be non-empty.",
             });
           }
-          if (input.resumeCursor !== undefined && input.resumeCursor !== null) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "startSession",
-              issue:
-                "GitHub Copilot ACP persistent resume is not supported yet; start a new Copilot session without resumeCursor.",
-            });
-          }
 
           const cwd = path.resolve(input.cwd.trim());
-          const gitHubCopilotModelSelection =
+          const kilocodeModelSelection =
             input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-          const requestedStartModelId = resolveGitHubCopilotAcpModelId(
-            gitHubCopilotModelSelection?.model,
-          );
           const existing = sessions.get(input.threadId);
-          if (existing && !existing.stopped) {
-            yield* stopSessionInternal(existing);
-          }
 
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
-          const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
-          const sessionScope = yield* Scope.make("sequential");
+          // Kilo cancellation tears the whole ACP session down. Parallel
+          // finalization ensures the child process is terminated even when an
+          // in-flight RPC finalizer is waiting for a response that will never
+          // arrive.
+          const sessionScope = yield* Scope.make("parallel");
           let sessionScopeTransferred = false;
           yield* Effect.addFinalizer(() =>
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
 
+          const resumeSessionId = parseKiloCodeResume(input.resumeCursor)?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
             nativeEventLogger,
             provider: PROVIDER,
@@ -562,12 +558,12 @@ export function makeGitHubCopilotAdapter(
           });
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-          const acp = yield* makeGitHubCopilotAcpRuntime({
-            copilotSettings,
+          const acp = yield* makeKiloCodeAcpRuntime({
+            kiloCodeSettings,
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
-            model: requestedStartModelId,
+            ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "zrode", version: "0.0.0" },
             ...(mcpSession
               ? {
@@ -599,6 +595,7 @@ export function makeGitHubCopilotAdapter(
                 }),
             ),
           );
+
           const started = yield* Effect.gen(function* () {
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
@@ -619,14 +616,13 @@ export function makeGitHubCopilotAdapter(
                   const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
                   const runtimeRequestId = RuntimeRequestId.make(requestId);
                   const decision = yield* Deferred.make<ProviderApprovalDecision>();
-                  const turnId = resolveSessionCallbackTurnId(sessions, input.threadId);
                   pendingApprovals.set(requestId, { decision });
                   yield* offerRuntimeEvent(
                     makeAcpRequestOpenedEvent({
                       stamp: yield* makeEventStamp(),
                       provider: PROVIDER,
                       threadId: input.threadId,
-                      turnId,
+                      turnId: resolveSessionCallbackTurnId(sessions, input.threadId),
                       requestId: runtimeRequestId,
                       permissionRequest,
                       detail:
@@ -646,7 +642,7 @@ export function makeGitHubCopilotAdapter(
                       stamp: yield* makeEventStamp(),
                       provider: PROVIDER,
                       threadId: input.threadId,
-                      turnId,
+                      turnId: sessions.get(input.threadId)?.activeTurnId,
                       requestId: runtimeRequestId,
                       permissionRequest,
                       decision: resolved,
@@ -665,14 +661,65 @@ export function makeGitHubCopilotAdapter(
                 }),
               ),
             );
-            return yield* acp.start();
+            const started = yield* awaitUntilDeadline(acp.start(), startTimeoutMs);
+            if (Option.isNone(started)) {
+              yield* acp.terminateProcess.pipe(Effect.ignore);
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: `Kilo Code ACP startup timed out after ${startTimeoutMs}ms.`,
+              });
+            }
+            return yield* started.value;
           }).pipe(
             Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
+              isProviderAdapterRequestError(error)
+                ? error
+                : mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
 
-          const boundModelId = requestedStartModelId;
+          const requestedStartModelId = kilocodeModelSelection?.model
+            ? resolveKiloCodeAcpBaseModelId(kilocodeModelSelection.model)
+            : undefined;
+          const currentSetupModelId = currentKiloCodeModelIdFromSessionSetup(
+            started.sessionSetupResult,
+          );
+          const availableSetupModels = availableKiloCodeModelsFromSessionSetup(
+            started.sessionSetupResult,
+          );
+          const boundModelOutcome = yield* awaitUntilDeadline(
+            applyKiloCodeAcpModelSelection({
+              runtime: acp,
+              currentModelId: currentSetupModelId,
+              availableModels: availableSetupModels,
+              requestedModelId: requestedStartModelId,
+              modelConfigId: started.modelConfigId,
+              mapError: ({ cause, step }) =>
+                mapAcpToAdapterError(
+                  PROVIDER,
+                  input.threadId,
+                  step === "set-session-model" ? "session/set_model" : "session/set_config_option",
+                  cause,
+                ),
+              unsupportedModelError: (requestedModelId, supportedModelIds) =>
+                new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue: `Kilo Code model '${requestedModelId}' is not advertised by this session${supportedModelIds.length > 0 ? `; available models: ${supportedModelIds.join(", ")}` : ""}. Run provider discovery again and select an advertised provider/model identifier.`,
+                }),
+            }),
+            modelSelectionTimeoutMs,
+          );
+          if (Option.isNone(boundModelOutcome)) {
+            yield* acp.terminateProcess.pipe(Effect.ignore);
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/model-selection",
+              detail: `Kilo Code model selection timed out after ${modelSelectionTimeoutMs}ms.`,
+            });
+          }
+          const boundModelId = yield* boundModelOutcome.value;
 
           const now = yield* nowIso;
           const session: ProviderSession = {
@@ -681,13 +728,17 @@ export function makeGitHubCopilotAdapter(
             status: "ready",
             runtimeMode: input.runtimeMode,
             cwd,
-            model: boundModelId,
+            ...(boundModelId ? { model: boundModelId } : {}),
             threadId: input.threadId,
+            resumeCursor: {
+              schemaVersion: KILOCODE_RESUME_VERSION,
+              sessionId: started.sessionId,
+            },
             createdAt: now,
             updatedAt: now,
           };
 
-          const ctx: GitHubCopilotSessionContext = {
+          const ctx: KiloCodeSessionContext = {
             threadId: input.threadId,
             acpSessionId: started.sessionId,
             session,
@@ -695,21 +746,36 @@ export function makeGitHubCopilotAdapter(
             acp,
             notificationFiber: undefined,
             pendingApprovals,
-            pendingUserInputs,
             turns: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
-            currentModelId: boundModelId,
+            currentModelId: boundModelId ?? currentSetupModelId,
+            availableModels: availableSetupModels,
+            modelConfigId: started.modelConfigId,
+            availableCommands: mergeKiloCodeSlashCommands(
+              KILOCODE_SLASH_COMMANDS,
+              yield* acp.getAvailableCommands,
+            ),
             stopped: false,
           };
+
+          // Publish the context before the notification fiber starts so every
+          // callback can verify it still belongs to the live ACP session.
+          sessions.set(input.threadId, ctx);
+          if (existing && !existing.stopped) {
+            yield* stopSessionInternal(existing);
+          }
 
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
                 if (event._tag === "EventStreamBarrier") {
                   yield* Deferred.succeed(event.acknowledge, undefined);
+                  return;
+                }
+                if (sessions.get(input.threadId) !== ctx || ctx.stopped) {
                   return;
                 }
                 if (
@@ -724,23 +790,14 @@ export function makeGitHubCopilotAdapter(
                   return;
                 }
 
-                const notificationTurnId = resolveNotificationTurnId(ctx);
-                if (
-                  notificationTurnId === undefined ||
-                  ctx.interruptedTurnIds.has(notificationTurnId)
-                ) {
-                  return;
-                }
-                const stamp = yield* makeEventStamp();
-
                 switch (event._tag) {
                   case "AssistantItemStarted":
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
-                        stamp,
+                        stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
-                        turnId: notificationTurnId,
+                        turnId: resolveNotificationTurnId(ctx),
                         itemId: event.itemId,
                         lifecycle: "item.started",
                       }),
@@ -749,32 +806,25 @@ export function makeGitHubCopilotAdapter(
                   case "AssistantItemCompleted":
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
-                        stamp,
+                        stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
-                        turnId: notificationTurnId,
+                        turnId: resolveNotificationTurnId(ctx),
                         itemId: event.itemId,
                         lifecycle: "item.completed",
                       }),
                     );
                     return;
                   case "PlanUpdated":
-                    yield* emitPlanUpdate(
-                      ctx,
-                      notificationTurnId,
-                      stamp,
-                      event.payload,
-                      event.rawPayload,
-                      "session/update",
-                    );
+                    yield* emitPlanUpdate(ctx, event.payload, event.rawPayload, "session/update");
                     return;
                   case "ToolCallUpdated":
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
-                        stamp,
+                        stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
-                        turnId: notificationTurnId,
+                        turnId: resolveNotificationTurnId(ctx),
                         toolCall: event.toolCall,
                         rawPayload: event.rawPayload,
                       }),
@@ -783,10 +833,10 @@ export function makeGitHubCopilotAdapter(
                   case "ContentDelta":
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
-                        stamp,
+                        stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
-                        turnId: notificationTurnId,
+                        turnId: resolveNotificationTurnId(ctx),
                         ...(event.itemId ? { itemId: event.itemId } : {}),
                         text: event.text,
                         streamKind: event.streamKind,
@@ -797,14 +847,20 @@ export function makeGitHubCopilotAdapter(
                   case "UsageUpdated":
                     yield* offerRuntimeEvent(
                       makeAcpUsageUpdatedEvent({
-                        stamp,
+                        stamp: yield* makeEventStamp(),
                         provider: PROVIDER,
                         threadId: ctx.threadId,
-                        turnId: notificationTurnId,
+                        turnId: resolveNotificationTurnId(ctx),
                         usedTokens: event.usedTokens,
                         maxTokens: event.maxTokens,
                         rawPayload: event.rawPayload,
                       }),
+                    );
+                    return;
+                  case "AvailableCommandsUpdated":
+                    ctx.availableCommands = mergeKiloCodeSlashCommands(
+                      KILOCODE_SLASH_COMMANDS,
+                      event.commands,
                     );
                     return;
                 }
@@ -812,13 +868,12 @@ export function makeGitHubCopilotAdapter(
             ),
           ).pipe(
             Effect.catch((cause) =>
-              Effect.logError("Failed to process GitHub Copilot runtime notification.", { cause }),
+              Effect.logError("Failed to process KiloCode runtime notification.", { cause }),
             ),
             Effect.forkChild,
           );
 
           ctx.notificationFiber = nf;
-          sessions.set(input.threadId, ctx);
           sessionScopeTransferred = true;
 
           yield* offerRuntimeEvent({
@@ -833,7 +888,7 @@ export function makeGitHubCopilotAdapter(
             ...(yield* makeEventStamp()),
             provider: PROVIDER,
             threadId: input.threadId,
-            payload: { state: "ready", reason: "GitHub Copilot ACP session ready" },
+            payload: { state: "ready", reason: "KiloCode ACP session ready" },
           });
           yield* offerRuntimeEvent({
             type: "thread.started",
@@ -847,15 +902,20 @@ export function makeGitHubCopilotAdapter(
         }).pipe(Effect.scoped),
       );
 
-    const sendTurn: GitHubCopilotAdapterShape["sendTurn"] = (input) =>
+    const sendTurn: KiloCodeAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
-        const prepared = yield* withThreadLock(
+        const initial = yield* withThreadLock(
           input.threadId,
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
-            // A sendTurn while a prompt is in flight is a steer: the agent
-            // folds the new prompt into the ongoing work, so the active turn
-            // id is reused instead of opening a new turn.
+            if (ctx.promptsInFlight > 0 && ctx.activeTurnId === undefined) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail:
+                  "The interrupted Kilo Code prompt is still stopping; wait for it to settle before sending another prompt.",
+              });
+            }
             const steeringTurnId =
               input.expectedTurnId !== undefined
                 ? ctx.activeTurnId
@@ -869,12 +929,7 @@ export function makeGitHubCopilotAdapter(
               activeTurnId: steeringTurnId,
             });
             const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
-            // Count this prompt immediately so a superseded in-flight prompt
-            // resolving from here on does not settle the turn; decremented on
-            // preparation failure here, and after the prompt below otherwise.
             ctx.promptsInFlight += 1;
-            // Bind the turn id before cooperative yields so interruptTurn can
-            // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
             ctx.session = {
               ...ctx.session,
@@ -882,429 +937,352 @@ export function makeGitHubCopilotAdapter(
               activeTurnId: turnId,
               updatedAt: yield* nowIso,
             };
+            return { ctx, steeringTurnId, turnId } as const;
+          }),
+        );
 
-            return yield* Effect.gen(function* () {
-              const turnModelSelection =
-                input.modelSelection?.instanceId === boundInstanceId
-                  ? input.modelSelection
-                  : undefined;
-              const requestedTurnModelId = turnModelSelection?.model
-                ? resolveGitHubCopilotAcpModelId(turnModelSelection.model)
-                : undefined;
-              if (
-                requestedTurnModelId !== undefined &&
-                requestedTurnModelId !== ctx.currentModelId
-              ) {
-                return yield* new ProviderAdapterValidationError({
+        const ensurePreparationIsLive = Effect.suspend(() => {
+          const liveCtx = sessions.get(input.threadId);
+          if (
+            liveCtx !== initial.ctx ||
+            initial.ctx.stopped ||
+            initial.ctx.interruptedTurnIds.has(initial.turnId)
+          ) {
+            return Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "Kilo Code turn was cancelled during preparation.",
+              }),
+            );
+          }
+          return Effect.void;
+        });
+
+        const modelSelectionTimedOut = yield* Ref.make(false);
+        const preparationExit = yield* Effect.gen(function* () {
+          yield* ensurePreparationIsLive;
+          const turnModelSelection =
+            input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
+          const requestedTurnModelId = turnModelSelection?.model
+            ? resolveKiloCodeAcpBaseModelId(turnModelSelection.model)
+            : undefined;
+          const currentModelOutcome = yield* awaitUntilDeadline(
+            applyKiloCodeAcpModelSelection({
+              runtime: initial.ctx.acp,
+              currentModelId: initial.ctx.currentModelId,
+              availableModels: initial.ctx.availableModels,
+              requestedModelId: requestedTurnModelId,
+              modelConfigId: initial.ctx.modelConfigId,
+              mapError: ({ cause, step }) =>
+                mapAcpToAdapterError(
+                  PROVIDER,
+                  input.threadId,
+                  step === "set-session-model" ? "session/set_model" : "session/set_config_option",
+                  cause,
+                ),
+              unsupportedModelError: (requestedModelId, supportedModelIds) =>
+                new ProviderAdapterValidationError({
                   provider: PROVIDER,
                   operation: "sendTurn",
-                  issue: "GitHub Copilot ACP model changes require starting a new provider thread.",
-                });
-              }
+                  issue: `Kilo Code model '${requestedModelId}' is not advertised by this session${supportedModelIds.length > 0 ? `; available models: ${supportedModelIds.join(", ")}` : ""}. Select an advertised provider/model identifier.`,
+                }),
+            }),
+            modelSelectionTimeoutMs,
+          );
+          if (Option.isNone(currentModelOutcome)) {
+            yield* Ref.set(modelSelectionTimedOut, true);
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/model-selection",
+              detail: `Kilo Code model selection timed out after ${modelSelectionTimeoutMs}ms.`,
+            });
+          }
+          const currentModelId = yield* currentModelOutcome.value;
+          yield* ensurePreparationIsLive;
+          if (currentModelId) {
+            initial.ctx.currentModelId = currentModelId;
+          }
 
-              const text = input.input?.trim();
-              const imagePromptParts = yield* Effect.forEach(
-                input.attachments ?? [],
-                (attachment) =>
-                  Effect.gen(function* () {
-                    const attachmentPath = resolveAttachmentPath({
-                      attachmentsDir: serverConfig.attachmentsDir,
-                      attachment,
-                    });
-                    if (!attachmentPath) {
-                      return yield* new ProviderAdapterRequestError({
-                        provider: PROVIDER,
-                        method: "session/prompt",
-                        detail: `Invalid attachment id '${attachment.id}'.`,
-                      });
-                    }
-                    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-                      Effect.mapError(
-                        (cause) =>
-                          new ProviderAdapterRequestError({
-                            provider: PROVIDER,
-                            method: "session/prompt",
-                            detail: cause.message,
-                            cause,
-                          }),
-                      ),
-                    );
-                    return {
-                      type: "image",
-                      data: Buffer.from(bytes).toString("base64"),
-                      mimeType: attachment.mimeType,
-                    } satisfies EffectAcpSchema.ContentBlock;
-                  }),
-              );
-              const promptParts: Array<EffectAcpSchema.ContentBlock> = [
-                ...(text ? [{ type: "text" as const, text }] : []),
-                ...imagePromptParts,
-              ];
-
-              if (promptParts.length === 0) {
-                return yield* new ProviderAdapterValidationError({
-                  provider: PROVIDER,
-                  operation: "sendTurn",
-                  issue: "Turn requires non-empty text or attachments.",
-                });
-              }
-
-              const displayModel = ctx.currentModelId;
-              for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
-                yield* Effect.yieldNow;
-              }
-              if (ctx.interruptedTurnIds.has(turnId)) {
-                yield* settlePromptInFlight(input.threadId, turnId, ctx.acpSessionId, {
-                  completedStopReason: "cancelled",
-                  emitTurnCompletion: false,
-                  settleAllPrompts: true,
-                });
+          const text = input.input?.trim();
+          const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
+            Effect.gen(function* () {
+              const attachmentPath = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              if (!attachmentPath) {
                 return yield* new ProviderAdapterRequestError({
                   provider: PROVIDER,
                   method: "session/prompt",
-                  detail: "GitHub Copilot prompt was interrupted during preparation.",
+                  detail: `Invalid attachment id '${attachment.id}'.`,
                 });
               }
-              if (steeringTurnId === undefined) {
-                ctx.lastPlanFingerprint = undefined;
-              }
-              ctx.session = {
-                ...ctx.session,
-                status: "running",
-                activeTurnId: turnId,
-                updatedAt: yield* nowIso,
-                ...(displayModel ? { model: displayModel } : {}),
-              };
-
-              if (steeringTurnId === undefined) {
-                yield* offerRuntimeEvent({
-                  type: "turn.started",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  payload: displayModel ? { model: displayModel } : {},
-                });
-              }
-
+              const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/prompt",
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
+              );
               return {
-                acp: ctx.acp,
-                acpSessionId: ctx.acpSessionId,
-                displayModel,
-                promptParts,
-                turnId,
-              };
-            }).pipe(
-              Effect.tapCause(() =>
-                Effect.gen(function* () {
-                  const liveCtx = sessions.get(input.threadId);
-                  if (!liveCtx) {
-                    return;
-                  }
-                  yield* settlePromptInFlight(input.threadId, turnId, liveCtx.acpSessionId, {
-                    errorMessage: "GitHub Copilot prompt preparation failed.",
-                    emitTurnCompletion: false,
-                  });
-                }),
-              ),
-            );
+                type: "image",
+                data: Buffer.from(bytes).toString("base64"),
+                mimeType: attachment.mimeType,
+              } satisfies EffectAcpSchema.ContentBlock;
+            }),
+          );
+          yield* ensurePreparationIsLive;
+          const promptParts: Array<EffectAcpSchema.ContentBlock> = [
+            ...(text ? [{ type: "text" as const, text }] : []),
+            ...imagePromptParts,
+          ];
+
+          if (promptParts.length === 0) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "Turn requires non-empty text or attachments.",
+            });
+          }
+
+          return {
+            displayModel: currentModelId ?? initial.ctx.currentModelId,
+            promptParts,
+          };
+        }).pipe(Effect.exit);
+
+        if (Exit.isFailure(preparationExit)) {
+          const wasInterrupted =
+            initial.ctx.stopped || initial.ctx.interruptedTurnIds.has(initial.turnId);
+          if (wasInterrupted) {
+            return {
+              threadId: input.threadId,
+              turnId: initial.turnId,
+              resumeCursor: initial.ctx.session.resumeCursor,
+            };
+          }
+          yield* withThreadLock(
+            input.threadId,
+            Effect.gen(function* () {
+              yield* settlePromptInFlight(
+                input.threadId,
+                initial.turnId,
+                initial.ctx.acpSessionId,
+                { emitTurnCompletion: false },
+              );
+              if (
+                (yield* Ref.get(modelSelectionTimedOut)) &&
+                sessions.get(input.threadId) === initial.ctx
+              ) {
+                yield* closeAndTerminateSession(initial.ctx).pipe(Effect.ignore);
+                yield* stopSessionInternal(initial.ctx);
+              }
+            }),
+          );
+          return yield* Effect.failCause(preparationExit.cause);
+        }
+
+        const prepared = yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            yield* ensurePreparationIsLive;
+            if (initial.steeringTurnId === undefined) {
+              initial.ctx.lastPlanFingerprint = undefined;
+            }
+            initial.ctx.session = {
+              ...initial.ctx.session,
+              status: "running",
+              activeTurnId: initial.turnId,
+              updatedAt: yield* nowIso,
+              ...(preparationExit.value.displayModel
+                ? { model: preparationExit.value.displayModel }
+                : {}),
+            };
+            if (initial.steeringTurnId === undefined) {
+              yield* offerRuntimeEvent({
+                type: "turn.started",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId: initial.turnId,
+                payload: preparationExit.value.displayModel
+                  ? { model: preparationExit.value.displayModel }
+                  : {},
+              });
+            }
+            return {
+              acp: initial.ctx.acp,
+              acpSessionId: initial.ctx.acpSessionId,
+              displayModel: preparationExit.value.displayModel,
+              promptParts: preparationExit.value.promptParts,
+              turnId: initial.turnId,
+            };
           }),
         );
         const promptSettled = yield* Ref.make(false);
-        const promptRpcSucceeded = yield* Ref.make(false);
-        const promptResultRef = yield* Ref.make<EffectAcpSchema.PromptResponse | undefined>(
-          undefined,
-        );
-
-        const promptFailureMessageRef = yield* Ref.make<string | undefined>(undefined);
-
-        return yield* Effect.gen(function* () {
-          const result = yield* prepared.acp
-            .prompt({
-              prompt: prepared.promptParts,
-            })
-            .pipe(
-              Effect.tap((promptResult) =>
-                Effect.all([
-                  Ref.set(promptRpcSucceeded, true),
-                  Ref.set(promptResultRef, promptResult),
-                ]),
-              ),
-              Effect.tapError((error) =>
-                Ref.set(
-                  promptFailureMessageRef,
-                  mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error).message,
-                ).pipe(Effect.andThen(prepared.acp.drainEvents)),
-              ),
-              Effect.mapError((error) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
-              ),
-            );
-
-          return yield* withThreadLock(
-            input.threadId,
-            Effect.gen(function* () {
-              const ctx = yield* requireSession(input.threadId);
-              if (ctx.acpSessionId !== prepared.acpSessionId) {
+        const promptTimedOut = yield* Ref.make(false);
+        const promptWithDeadline = Effect.gen(function* () {
+          const outcome = yield* awaitUntilDeadline(
+            prepared.acp.prompt({ prompt: prepared.promptParts }),
+            promptTimeoutMs,
+          );
+          if (Option.isNone(outcome)) {
+            yield* Ref.set(promptTimedOut, true);
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/prompt",
+              detail: `Kilo Code prompt timed out after ${promptTimeoutMs}ms; prompts are never retried automatically.`,
+            });
+          }
+          return yield* outcome.value;
+        });
+        const result = yield* promptWithDeadline.pipe(
+          Effect.mapError((error) =>
+            isProviderAdapterRequestError(error)
+              ? error
+              : error._tag === "AcpRequestError" && (error.code === -32000 || error.code === -32013)
+                ? new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: `${error.message} Run \`kilo auth login\` in a terminal, then retry the turn.`,
+                    cause: error,
+                  })
+                : mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+          ),
+          Effect.tapError((error) =>
+            withThreadLock(
+              input.threadId,
+              Effect.gen(function* () {
+                const liveCtx = sessions.get(input.threadId);
+                if (liveCtx?.acpSessionId !== prepared.acpSessionId) return;
+                yield* prepared.acp.drainEvents.pipe(
+                  Effect.as(true),
+                  Effect.timeoutOption(eventDrainTimeoutMs),
+                  Effect.ignore,
+                );
                 yield* settlePromptInFlight(
                   input.threadId,
                   prepared.turnId,
                   prepared.acpSessionId,
-                  {
-                    errorMessage: "GitHub Copilot session changed before the turn completed.",
-                    settleAllPrompts: true,
-                  },
+                  { errorMessage: error.message },
                 );
-                yield* Ref.set(promptSettled, true);
-                return yield* new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session/prompt",
-                  detail: "GitHub Copilot session changed before the turn completed.",
-                });
-              }
-              // Keep prompt settlement atomic with respect to Stop and steering.
-              // interruptTurn marks its target before waiting for this lock, so
-              // cancellation can still win while queued ACP events are drained.
-              for (let yieldAttempt = 0; yieldAttempt < 8; yieldAttempt += 1) {
-                yield* Effect.yieldNow;
-              }
-              yield* prepared.acp.drainEvents;
-              if (ctx.interruptedTurnIds.has(prepared.turnId)) {
-                yield* Ref.set(promptSettled, true);
-                return {
-                  threadId: input.threadId,
-                  turnId: prepared.turnId,
-                  resumeCursor: ctx.session.resumeCursor,
-                };
-              }
-
-              if (
-                ctx.promptsInFlight <= 0 ||
-                ctx.activeTurnId !== prepared.turnId ||
-                ctx.session.activeTurnId !== prepared.turnId
-              ) {
-                yield* Ref.set(promptSettled, true);
-                return {
-                  threadId: input.threadId,
-                  turnId: prepared.turnId,
-                  resumeCursor: ctx.session.resumeCursor,
-                };
-              }
-
-              appendPromptResultToTurn(ctx, prepared.turnId, prepared.promptParts, result);
-              ctx.session = {
-                ...ctx.session,
-                status: "running",
-                activeTurnId: prepared.turnId,
-                updatedAt: yield* nowIso,
-                ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
-              };
-              const remainingPrompts = Math.max(0, ctx.promptsInFlight - 1);
-              ctx.promptsInFlight = remainingPrompts;
-
-              // Only the last remaining prompt settles the turn. A steer-
-              // superseded prompt resolving while another is in flight or
-              // pending must leave the merged turn running.
-              if (
-                remainingPrompts === 0 &&
-                ctx.activeTurnId === prepared.turnId &&
-                ctx.session.activeTurnId === prepared.turnId
-              ) {
-                if (ctx.interruptedTurnIds.has(prepared.turnId)) {
-                  yield* Ref.set(promptSettled, true);
-                  return {
-                    threadId: input.threadId,
-                    turnId: prepared.turnId,
-                    resumeCursor: ctx.session.resumeCursor,
-                  };
+                if (yield* Ref.get(promptTimedOut)) {
+                  yield* closeAndTerminateSession(liveCtx).pipe(Effect.ignore);
+                  yield* stopSessionInternal(liveCtx);
                 }
-                const completedAt = yield* nowIso;
-                const { activeTurnId: _completedTurnId, ...readySession } = ctx.session;
-                ctx.activeTurnId = undefined;
-                ctx.session = {
-                  ...readySession,
-                  status: "ready",
-                  updatedAt: completedAt,
-                  ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
-                };
-                const completedStopReason = completedStopReasonFromPromptResponse(result);
-                yield* offerRuntimeEvent({
-                  type: "turn.completed",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId: prepared.turnId,
-                  payload: {
-                    state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-                    stopReason: completedStopReason,
-                  },
-                });
-                ctx.interruptedTurnIds.delete(prepared.turnId);
-                yield* Ref.set(promptSettled, true);
-              } else if (remainingPrompts > 0) {
-                yield* Ref.set(promptSettled, true);
-              }
+              }),
+            ).pipe(Effect.andThen(Ref.set(promptSettled, true))),
+          ),
+        );
 
+        return yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const liveCtx = sessions.get(input.threadId);
+            if (!liveCtx || liveCtx.acpSessionId !== prepared.acpSessionId) {
+              yield* Ref.set(promptSettled, true);
               return {
                 threadId: input.threadId,
                 turnId: prepared.turnId,
-                resumeCursor: ctx.session.resumeCursor,
+                resumeCursor: liveCtx?.session.resumeCursor,
               };
-            }),
-          );
-        }).pipe(
+            }
+            yield* prepared.acp.drainEvents;
+            if (liveCtx.interruptedTurnIds.has(prepared.turnId)) {
+              liveCtx.promptsInFlight = Math.max(0, liveCtx.promptsInFlight - 1);
+              if (liveCtx.promptsInFlight === 0) {
+                liveCtx.interruptedTurnIds.delete(prepared.turnId);
+              }
+              yield* Ref.set(promptSettled, true);
+              return {
+                threadId: input.threadId,
+                turnId: prepared.turnId,
+                resumeCursor: liveCtx.session.resumeCursor,
+              };
+            }
+            appendPromptResultToTurn(liveCtx, prepared.turnId, prepared.promptParts, result);
+            yield* settlePromptInFlight(input.threadId, prepared.turnId, prepared.acpSessionId, {
+              completedStopReason: completedStopReasonFromPromptResponse(result),
+            });
+            yield* Ref.set(promptSettled, true);
+            return {
+              threadId: input.threadId,
+              turnId: prepared.turnId,
+              resumeCursor: liveCtx.session.resumeCursor,
+            };
+          }),
+        ).pipe(
           Effect.ensuring(
             Effect.gen(function* () {
-              if (yield* Ref.get(promptSettled)) {
-                return;
-              }
-
-              if (yield* Ref.get(promptRpcSucceeded)) {
-                const promptResult = yield* Ref.get(promptResultRef);
-                if (promptResult === undefined) {
-                  return;
-                }
-                yield* withThreadLock(
-                  input.threadId,
-                  Effect.gen(function* () {
-                    const ctx = yield* requireSession(input.threadId);
-                    if (ctx.acpSessionId !== prepared.acpSessionId) {
-                      yield* settlePromptInFlight(
-                        input.threadId,
-                        prepared.turnId,
-                        prepared.acpSessionId,
-                        {
-                          errorMessage: "GitHub Copilot session changed before the turn completed.",
-                          settleAllPrompts: true,
-                        },
-                      );
-                      return;
-                    }
-                    if (ctx.interruptedTurnIds.has(prepared.turnId)) {
-                      return;
-                    }
-                    if (
-                      ctx.promptsInFlight <= 0 ||
-                      ctx.activeTurnId !== prepared.turnId ||
-                      ctx.session.activeTurnId !== prepared.turnId
-                    ) {
-                      return;
-                    }
-                    appendPromptResultToTurn(
-                      ctx,
-                      prepared.turnId,
-                      prepared.promptParts,
-                      promptResult,
-                    );
-                    yield* settlePromptInFlight(
-                      input.threadId,
-                      prepared.turnId,
-                      prepared.acpSessionId,
-                      {
-                        completedStopReason: completedStopReasonFromPromptResponse(promptResult),
-                      },
-                    );
-                  }),
-                );
-                return;
-              }
-
-              const errorMessage = yield* Ref.get(promptFailureMessageRef);
+              if (yield* Ref.get(promptSettled)) return;
               yield* withThreadLock(
                 input.threadId,
                 settlePromptInFlight(input.threadId, prepared.turnId, prepared.acpSessionId, {
-                  errorMessage: errorMessage ?? "GitHub Copilot prompt request failed.",
+                  errorMessage: "Kilo Code prompt ended before settlement.",
                 }),
-              );
-            }).pipe(Effect.catch(() => Effect.void)),
+              ).pipe(Effect.ignore);
+            }),
           ),
         );
       });
 
-    const interruptTurn: GitHubCopilotAdapterShape["interruptTurn"] = (threadId, turnId) =>
-      Effect.gen(function* () {
-        const observed = yield* Effect.sync(() => {
-          const ctx = sessions.get(threadId);
-          if (!ctx || ctx.stopped) {
-            return {
-              _tag: "Proceed" as const,
-              acpSessionId: undefined,
-              interruptedTurnId: turnId,
-            };
-          }
+    const interruptTurn: KiloCodeAdapterShape["interruptTurn"] = (threadId, turnId) => {
+      const observed = sessions.get(threadId);
+      const observedTurnId = turnId ?? observed?.activeTurnId ?? observed?.session.activeTurnId;
+      if (observed && observedTurnId) observed.interruptedTurnIds.add(observedTurnId);
+      return withThreadLock(
+        threadId,
+        Effect.gen(function* () {
+          const ctx = yield* requireSession(threadId);
           const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
           if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
-            return { _tag: "Ignore" as const };
+            return;
           }
+          yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
           const interruptedTurnId = turnId ?? activeTurnId;
-          if (interruptedTurnId !== undefined) {
-            ctx.interruptedTurnIds.add(interruptedTurnId);
+          if (!interruptedTurnId) {
+            return;
           }
-          return {
-            _tag: "Proceed" as const,
-            acpSessionId: ctx.acpSessionId,
-            interruptedTurnId,
-          };
-        });
-        if (observed._tag === "Ignore") {
-          return;
-        }
-
-        yield* withThreadLock(
-          threadId,
-          Effect.gen(function* () {
-            const ctx = yield* requireSession(threadId);
-            if (observed.acpSessionId !== undefined && ctx.acpSessionId !== observed.acpSessionId) {
-              return;
-            }
-            const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
-            if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
-              return;
-            }
-            if (
-              observed.interruptedTurnId !== undefined &&
-              activeTurnId !== undefined &&
-              activeTurnId !== observed.interruptedTurnId
-            ) {
-              return;
-            }
-            const interruptedTurnId =
-              observed.interruptedTurnId ?? turnId ?? activeTurnId ?? ctx.session.activeTurnId;
-            yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-            yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
-            yield* Effect.ignore(
-              ctx.acp.cancel.pipe(
-                Effect.mapError((error) =>
-                  mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
-                ),
-              ),
+          ctx.interruptedTurnIds.add(interruptedTurnId);
+          // Kilo explicitly does not support ACP session/cancel. session/close
+          // is its supported abort path and best-effort aborts the underlying
+          // SDK session. Bound the close request and always tear down the ACP
+          // process so no late event can attach to a future turn.
+          if (ctx.session.status === "running") {
+            yield* ctx.acp.drainEvents.pipe(
+              Effect.as(true),
+              Effect.timeoutOption(eventDrainTimeoutMs),
+              Effect.ignore,
             );
-            if (interruptedTurnId) {
-              ctx.interruptedTurnIds.add(interruptedTurnId);
-              yield* settlePromptInFlight(threadId, interruptedTurnId, ctx.acpSessionId, {
-                completedStopReason: "cancelled",
-                settleAllPrompts: true,
-              });
-            } else if (
-              ctx.promptsInFlight > 0 ||
-              ctx.session.status === "running" ||
-              ctx.session.status === "connecting"
-            ) {
-              const updatedAt = yield* nowIso;
-              ctx.promptsInFlight = 0;
-              ctx.activeTurnId = undefined;
-              const { activeTurnId: _activeTurnId, ...readySession } = ctx.session;
-              ctx.session = {
-                ...readySession,
-                status: "ready",
-                updatedAt,
-              };
-            }
-          }),
-        );
-      });
+          }
+          const closeError = yield* closeAndTerminateSession(ctx);
+          yield* offerRuntimeEvent({
+            type: "turn.completed",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId,
+            turnId: interruptedTurnId,
+            payload: closeError
+              ? {
+                  state: "failed",
+                  errorMessage: `Kilo Code cancellation could not be confirmed: ${closeError.message}`,
+                }
+              : { state: "cancelled", stopReason: "cancelled" },
+          });
+          yield* stopSessionInternal(ctx);
+          if (closeError) {
+            return yield* closeError;
+          }
+        }),
+      );
+    };
 
-    const respondToRequest: GitHubCopilotAdapterShape["respondToRequest"] = (
+    const respondToRequest: KiloCodeAdapterShape["respondToRequest"] = (
       threadId,
       requestId,
       decision,
@@ -1322,31 +1300,27 @@ export function makeGitHubCopilotAdapter(
         yield* Deferred.succeed(pending.decision, decision);
       });
 
-    const respondToUserInput: GitHubCopilotAdapterShape["respondToUserInput"] = (
+    const respondToUserInput: KiloCodeAdapterShape["respondToUserInput"] = (
       threadId,
-      requestId,
-      answers,
+      _requestId,
+      _answers,
     ) =>
       Effect.gen(function* () {
-        const ctx = yield* requireSession(threadId);
-        const pending = ctx.pendingUserInputs.get(requestId);
-        if (!pending) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "_x.ai/ask_user_question",
-            detail: `Unknown pending user-input request: ${requestId}`,
-          });
-        }
-        yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
+        yield* requireSession(threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/elicitation",
+          detail: "Kilo Code ACP does not advertise elicitation support.",
+        });
       });
 
-    const readThread: GitHubCopilotAdapterShape["readThread"] = (threadId) =>
+    const readThread: KiloCodeAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
         return { threadId, turns: ctx.turns };
       });
 
-    const rollbackThread: GitHubCopilotAdapterShape["rollbackThread"] = (threadId, numTurns) =>
+    const rollbackThread: KiloCodeAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
         yield* requireSession(threadId);
         if (!Number.isInteger(numTurns) || numTurns < 1) {
@@ -1359,11 +1333,11 @@ export function makeGitHubCopilotAdapter(
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "thread/rollback",
-          detail: "GitHub Copilot ACP sessions do not support provider-side rollback yet.",
+          detail: "KiloCode ACP sessions do not support provider-side rollback yet.",
         });
       });
 
-    const stopSession: GitHubCopilotAdapterShape["stopSession"] = (threadId) =>
+    const stopSession: KiloCodeAdapterShape["stopSession"] = (threadId) =>
       withThreadLock(
         threadId,
         Effect.gen(function* () {
@@ -1372,20 +1346,21 @@ export function makeGitHubCopilotAdapter(
         }),
       );
 
-    const listSessions: GitHubCopilotAdapterShape["listSessions"] = () =>
+    const listSessions: KiloCodeAdapterShape["listSessions"] = () =>
       Effect.sync(() => Array.from(sessions.values(), (c) => ({ ...c.session })));
 
-    const hasSession: GitHubCopilotAdapterShape["hasSession"] = (threadId) =>
+    const hasSession: KiloCodeAdapterShape["hasSession"] = (threadId) =>
       Effect.sync(() => {
         const c = sessions.get(threadId);
         return c !== undefined && !c.stopped;
       });
 
-    const stopAll: GitHubCopilotAdapterShape["stopAll"] = () =>
+    const stopAll: KiloCodeAdapterShape["stopAll"] = () =>
       Effect.forEach(Array.from(sessions.values()), stopSessionInternal, { discard: true });
 
     yield* Effect.addFinalizer(() =>
       Effect.ignore(stopAll()).pipe(
+        Effect.tap(() => Scope.close(deadlineScope, Exit.void)),
         Effect.tap(() => PubSub.shutdown(runtimeEventPubSub)),
         Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
       ),
@@ -1395,7 +1370,7 @@ export function makeGitHubCopilotAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "unsupported" },
+      capabilities: { sessionModelSwitch: "in-session" },
       startSession,
       sendTurn,
       interruptTurn,
@@ -1408,6 +1383,6 @@ export function makeGitHubCopilotAdapter(
       hasSession,
       stopAll,
       streamEvents,
-    } satisfies GitHubCopilotAdapterShape;
+    } satisfies KiloCodeAdapterShape;
   });
 }

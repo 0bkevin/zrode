@@ -16,6 +16,19 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("Kilo Code provider settings", () => {
+  it("decodes safe first-party defaults and patches", () => {
+    expect(decodeServerSettings({}).providers.kilocode).toEqual({
+      enabled: false,
+      binaryPath: "kilo",
+      customModels: [],
+    });
+    expect(
+      decodeServerSettingsPatch({ providers: { kilocode: { binaryPath: "/opt/kilo" } } }),
+    ).toEqual({ providers: { kilocode: { binaryPath: "/opt/kilo" } } });
+  });
+});
+
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
     expect(decodeClientSettings({}).wordWrap).toBe(true);

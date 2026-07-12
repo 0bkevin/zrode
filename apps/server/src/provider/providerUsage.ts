@@ -2,7 +2,7 @@
  * Provider subscription usage (rate-limit windows).
  *
  * Fetches how much of the session (~5h) and weekly (~7d) rate-limit windows
- * remain for the locally-authenticated Claude Code, Codex, and Grok accounts:
+ * remain for the locally-authenticated Claude Code, Codex, Grok, and Kilo accounts:
  *
  * - Claude: `GET https://api.anthropic.com/api/oauth/usage` using the OAuth
  *   access token Claude Code stores in `~/.claude/.credentials.json` (or the
@@ -20,6 +20,10 @@
  *   per-product utilization, reset boundary, and Extra Usage Credits. Expired
  *   credentials are refreshed by the installed CLI itself before the request,
  *   preserving Grok's OIDC and external-auth behavior.
+ * - Kilo Code: `GET /api/profile`, `/api/profile/balance`, and the optional
+ *   Kilo Pass state endpoint using the same `kilo` credential and organization
+ *   selection stored by the CLI. The snapshot exposes the exact account credit
+ *   balance and, for personal Kilo Pass accounts, current-period utilization.
  *
  * Results are cached in module state with a short TTL and coalesced across
  * concurrent callers, so any number of connected clients polling the usage
@@ -36,19 +40,22 @@
  *
  * @module providerUsage
  */
-import type {
-  ClaudeSettings,
-  CodexSettings,
-  GrokSettings,
-  ProviderUsageExtraLimit,
-  ProviderUsageProviderKind,
-  ProviderUsageResetCredits,
-  ProviderUsageSnapshot,
-  ProviderUsageStatus,
-  ProviderUsageWindow,
-  ServerConsumeCodexResetCreditResult,
-  ServerProviderUsageResult,
-  ServerSettings,
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ClaudeSettings,
+  type CodexSettings,
+  type GrokSettings,
+  type ProviderInstanceEnvironment,
+  type ProviderUsageExtraLimit,
+  type ProviderUsageProviderKind,
+  type ProviderUsageResetCredits,
+  type ProviderUsageSnapshot,
+  type ProviderUsageStatus,
+  type ProviderUsageWindow,
+  type ServerConsumeCodexResetCreditResult,
+  type ServerProviderUsageResult,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import * as NodeOS from "node:os";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -90,6 +97,7 @@ const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit
 const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`;
 const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
 const GROK_DEFAULT_API_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
+const KILO_DEFAULT_API_BASE_URL = "https://api.kilo.ai";
 const GROK_AUTH_REFRESH_TIMEOUT = "15 seconds" as const;
 const CLAUDE_USAGE_RATE_LIMIT_MESSAGE =
   "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.";
@@ -274,6 +282,7 @@ const PROVIDER_USAGE_KINDS = [
   "claude",
   "codex",
   "grok",
+  "kilocode",
 ] as const satisfies ReadonlyArray<ProviderUsageProviderKind>;
 
 function providerUsageFetchResult(
@@ -317,6 +326,7 @@ export function usageSettingsKey(settings: ServerSettings): string {
     claudeUsageSettingsKey(settings.providers.claudeAgent),
     codexUsageSettingsKey(settings.providers.codex),
     grokUsageSettingsKey(settings.providers.grok),
+    kiloUsageSettingsKey(settings),
   ]);
 }
 
@@ -343,6 +353,55 @@ function grokUsageSettingsKey(settings: GrokSettings): string {
   ]);
 }
 
+const KILOCODE_DRIVER_KIND = ProviderDriverKind.make("kilocode");
+const KILOCODE_DEFAULT_INSTANCE_ID = ProviderInstanceId.make("kilocode");
+
+function environmentRecord(
+  environment: ProviderInstanceEnvironment | undefined,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries((environment ?? []).map((entry) => [entry.name, entry.value]));
+}
+
+function kiloUsageEnvironment(settings: ServerSettings): NodeJS.ProcessEnv {
+  const instance = settings.providerInstances[KILOCODE_DEFAULT_INSTANCE_ID];
+  return {
+    ...process.env,
+    ...(instance?.driver === KILOCODE_DRIVER_KIND
+      ? environmentRecord(instance.environment)
+      : undefined),
+  };
+}
+
+function kiloUsageEnabled(settings: ServerSettings): boolean {
+  const instance = settings.providerInstances[KILOCODE_DEFAULT_INSTANCE_ID];
+  if (instance?.driver !== KILOCODE_DRIVER_KIND) {
+    return settings.providers.kilocode.enabled;
+  }
+  if (instance.enabled !== undefined) {
+    return instance.enabled;
+  }
+  const config = instance.config;
+  if (config !== null && typeof config === "object" && !Array.isArray(config)) {
+    const enabled = (config as { readonly enabled?: unknown }).enabled;
+    if (typeof enabled === "boolean") {
+      return enabled;
+    }
+  }
+  return settings.providers.kilocode.enabled;
+}
+
+function kiloUsageSettingsKey(settings: ServerSettings): string {
+  const environment = kiloUsageEnvironment(settings);
+  return JSON.stringify([
+    kiloUsageEnabled(settings),
+    environment.XDG_DATA_HOME?.trim() ?? "",
+    environment.KILO_API_URL?.trim() ?? "",
+    environment.KILO_ORG_ID?.trim() ?? "",
+    Boolean(environment.KILO_AUTH_CONTENT?.trim()),
+    Boolean(environment.KILOCODE_API_KEY?.trim() || environment.KILO_API_KEY?.trim()),
+  ]);
+}
+
 export function providerUsageSettingsKey(
   provider: ProviderUsageProviderKind,
   settings: ServerSettings,
@@ -354,6 +413,8 @@ export function providerUsageSettingsKey(
       return codexUsageSettingsKey(settings.providers.codex);
     case "grok":
       return grokUsageSettingsKey(settings.providers.grok);
+    case "kilocode":
+      return kiloUsageSettingsKey(settings);
   }
 }
 
@@ -1117,6 +1178,314 @@ export const fetchGrokUsage = Effect.fn("fetchGrokUsage")(function* (settings: G
   return (yield* fetchGrokUsageResult(settings)).snapshot;
 });
 
+// ── Kilo Code ─────────────────────────────────────────────────────────
+
+export interface KiloAuthCredentials {
+  readonly accessToken: string;
+  readonly organizationId: string | null;
+  readonly expiresAt: number | null;
+  readonly source: "api-key" | "auth-content" | "auth-file";
+}
+
+interface KiloProfile {
+  readonly email: string | null;
+  readonly name: string | null;
+  readonly organizationName: string | null;
+}
+
+export function parseKiloAuthCredentials(
+  raw: string,
+  source: KiloAuthCredentials["source"] = "auth-file",
+): KiloAuthCredentials | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    const candidate = root.kilo ?? root.kilocode ?? parsed;
+    if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate))
+      return null;
+    const auth = candidate as Record<string, unknown>;
+    const type = auth.type;
+    const token = type === "oauth" ? auth.access : type === "api" ? auth.key : undefined;
+    if (typeof token !== "string" || token.trim().length === 0) return null;
+    const organizationId =
+      typeof auth.accountId === "string" && auth.accountId.trim().length > 0
+        ? auth.accountId.trim()
+        : null;
+    return {
+      accessToken: token.trim(),
+      organizationId,
+      expiresAt:
+        type === "oauth" && typeof auth.expires === "number" && Number.isFinite(auth.expires)
+          ? auth.expires
+          : null,
+      source,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseKiloProfile(payload: unknown, organizationId: string | null): KiloProfile | null {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const root = payload as Record<string, unknown>;
+  const user =
+    root.user !== null && typeof root.user === "object" && !Array.isArray(root.user)
+      ? (root.user as Record<string, unknown>)
+      : root;
+  const email = typeof user.email === "string" ? user.email.trim() || null : null;
+  const name = typeof user.name === "string" ? user.name.trim() || null : null;
+  const organizations = Array.isArray(root.organizations) ? root.organizations : [];
+  const selected = organizations.find(
+    (organization) =>
+      organization !== null &&
+      typeof organization === "object" &&
+      !Array.isArray(organization) &&
+      (organization as Record<string, unknown>).id === organizationId,
+  );
+  const organizationName =
+    selected !== undefined && typeof (selected as Record<string, unknown>).name === "string"
+      ? ((selected as Record<string, unknown>).name as string).trim() || null
+      : null;
+  return { email, name, organizationName };
+}
+
+export function parseKiloBalance(payload: unknown): number | null {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const balance = (payload as { readonly balance?: unknown }).balance;
+  return typeof balance === "number" && Number.isFinite(balance) ? balance : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function parseKiloPassWindow(payload: unknown): ProviderUsageWindow | null {
+  const item = Array.isArray(payload) ? payload[0] : payload;
+  const result = recordValue(item)?.result;
+  const data = recordValue(recordValue(result)?.data);
+  const root = recordValue(data?.json) ?? data ?? recordValue(payload);
+  const subscription = recordValue(root?.subscription);
+  if (subscription === null) return null;
+  const included =
+    finiteNumber(subscription.currentPeriodBaseCreditsUsd) +
+    finiteNumber(subscription.currentPeriodBonusCreditsUsd);
+  if (included <= 0) return null;
+  const usage = Math.max(0, finiteNumber(subscription.currentPeriodUsageUsd));
+  const nextBillingAt = subscription.nextBillingAt ?? subscription.nextRenewalAt;
+  return {
+    label: "Kilo Pass period",
+    usedPercent: clampPercent((usage / included) * 100),
+    windowMinutes: null,
+    resetsAt: normalizeResetsAt(nextBillingAt),
+  };
+}
+
+function formatUsdAmount(amount: number): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
+}
+
+const resolveKiloAuthCredentials = Effect.fn("resolveKiloAuthCredentials")(function* (
+  settings: ServerSettings,
+) {
+  const environment = kiloUsageEnvironment(settings);
+  const organizationOverride = environment.KILO_ORG_ID?.trim() || null;
+  const apiKey = environment.KILOCODE_API_KEY?.trim() || environment.KILO_API_KEY?.trim() || null;
+  if (apiKey !== null) {
+    return {
+      accessToken: apiKey,
+      organizationId: organizationOverride,
+      expiresAt: null,
+      source: "api-key",
+    } satisfies KiloAuthCredentials;
+  }
+  const authContent = environment.KILO_AUTH_CONTENT?.trim();
+  let credentials = authContent ? parseKiloAuthCredentials(authContent, "auth-content") : null;
+  if (credentials === null) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const configuredDataHome = environment.XDG_DATA_HOME?.trim();
+    const dataHome =
+      configuredDataHome && configuredDataHome.length > 0
+        ? configuredDataHome
+        : path.join(NodeOS.homedir(), ".local", "share");
+    credentials = yield* fileSystem.readFileString(path.join(dataHome, "kilo", "auth.json")).pipe(
+      Effect.map((raw) => parseKiloAuthCredentials(raw, "auth-file")),
+      Effect.orElseSucceed(() => null),
+    );
+  }
+  if (credentials === null) return null;
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  if (credentials.expiresAt !== null && credentials.expiresAt <= now) return null;
+  return {
+    ...credentials,
+    organizationId: organizationOverride ?? credentials.organizationId,
+  } satisfies KiloAuthCredentials;
+});
+
+function kiloApiBaseUrl(settings: ServerSettings): string {
+  const configured = kiloUsageEnvironment(settings).KILO_API_URL?.trim();
+  return (configured && configured.length > 0 ? configured : KILO_DEFAULT_API_BASE_URL).replace(
+    /\/+$/,
+    "",
+  );
+}
+
+function kiloRequest(
+  url: string,
+  credentials: KiloAuthCredentials,
+  options?: { readonly organization?: boolean },
+): HttpClientRequest.HttpClientRequest {
+  return HttpClientRequest.get(url).pipe(
+    HttpClientRequest.setHeaders({
+      Authorization: `Bearer ${credentials.accessToken}`,
+      Accept: "application/json",
+      ...(options?.organization && credentials.organizationId
+        ? { "X-KiloCode-OrganizationId": credentials.organizationId }
+        : {}),
+    }),
+  );
+}
+
+const fetchKiloUsageResult = Effect.fn("fetchKiloUsageResult")(function* (
+  settings: ServerSettings,
+) {
+  const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (!kiloUsageEnabled(settings)) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "kilocode",
+        "unavailable",
+        "Kilo Code is disabled in Zrode settings.",
+        startedAt,
+      ),
+    );
+  }
+  const credentials = yield* resolveKiloAuthCredentials(settings);
+  if (credentials === null) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "kilocode",
+        "unauthenticated",
+        "No Kilo CLI credentials found. Run `kilo auth login` first.",
+        startedAt,
+      ),
+    );
+  }
+  const baseUrl = kiloApiBaseUrl(settings);
+  const [profileResponse, balanceResponse, passResponse] = yield* Effect.all(
+    [
+      fetchJsonWithTimeout(kiloRequest(`${baseUrl}/api/profile`, credentials)),
+      fetchJsonWithTimeout(
+        kiloRequest(`${baseUrl}/api/profile/balance`, credentials, { organization: true }),
+      ),
+      credentials.organizationId === null
+        ? fetchJsonWithTimeout(
+            kiloRequest(
+              `${baseUrl}/api/trpc/kiloPass.getState?batch=1&input=${encodeURIComponent('{"0":null}')}`,
+              credentials,
+            ),
+          )
+        : Effect.succeed(null),
+    ],
+    { concurrency: "unbounded" },
+  );
+  const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (profileResponse === null || balanceResponse === null) {
+    return providerUsageFetchResult(
+      usageSnapshot("kilocode", "error", "Failed to reach the Kilo account API.", updatedAt),
+    );
+  }
+  if (
+    profileResponse.status === 401 ||
+    profileResponse.status === 403 ||
+    balanceResponse.status === 401 ||
+    balanceResponse.status === 403
+  ) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "kilocode",
+        "unauthenticated",
+        "The Kilo CLI session has expired. Run `kilo auth login` and try again.",
+        updatedAt,
+      ),
+    );
+  }
+  const rateLimited = [profileResponse, balanceResponse].find(
+    (response) =>
+      response.status === 429 || (response.status === 503 && response.retryAfterMs !== null),
+  );
+  if (rateLimited !== undefined) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "kilocode",
+        "error",
+        "Kilo account usage is temporarily rate limited — data will refresh automatically.",
+        updatedAt,
+      ),
+      { mainBackoffTtlMs: rateLimitTtlMs(rateLimited.retryAfterMs) },
+    );
+  }
+  const profile = parseKiloProfile(profileResponse.payload, credentials.organizationId);
+  const balance = parseKiloBalance(balanceResponse.payload);
+  if (
+    profileResponse.status < 200 ||
+    profileResponse.status >= 300 ||
+    balanceResponse.status < 200 ||
+    balanceResponse.status >= 300 ||
+    profile === null ||
+    balance === null
+  ) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "kilocode",
+        "error",
+        "Kilo account API returned an unexpected response.",
+        updatedAt,
+      ),
+    );
+  }
+  const passWindow =
+    passResponse !== null && passResponse.status >= 200 && passResponse.status < 300
+      ? parseKiloPassWindow(passResponse.payload)
+      : null;
+  const accountLabel =
+    credentials.organizationId !== null
+      ? (profile.organizationName ?? `Organization ${credentials.organizationId}`)
+      : (profile.email ?? profile.name ?? "Personal account");
+  return providerUsageFetchResult({
+    provider: "kilocode",
+    status: "ok",
+    session: null,
+    weekly: passWindow,
+    extraLimits: [],
+    planLabel: accountLabel,
+    extraUsage: null,
+    credits: {
+      balance: formatUsdAmount(balance),
+      hasCredits: balance > 0,
+      unlimited: false,
+    },
+    resetCredits: null,
+    message: null,
+    detailsUrl:
+      credentials.organizationId === null
+        ? "https://app.kilo.ai/usage"
+        : `https://app.kilo.ai/organizations/${credentials.organizationId}/usage-details`,
+    updatedAt,
+  } satisfies ProviderUsageSnapshot);
+});
+
+export const fetchKiloUsage = Effect.fn("fetchKiloUsage")(function* (settings: ServerSettings) {
+  return (yield* fetchKiloUsageResult(settings)).snapshot;
+});
+
 // ── Codex ────────────────────────────────────────────────────────────────
 
 /** Auth lives in the shadow home when configured; matches session resolution. */
@@ -1784,6 +2153,11 @@ export const getProviderUsage = Effect.fn("getProviderUsage")(function* (setting
         grokUsageSettingsKey(settings.providers.grok),
         foldProviderDefects("grok", fetchGrokUsageResult(settings.providers.grok)),
       ),
+      getProviderUsageSnapshot(
+        "kilocode",
+        kiloUsageSettingsKey(settings),
+        foldProviderDefects("kilocode", fetchKiloUsageResult(settings)),
+      ),
     ],
     { concurrency: "unbounded" },
   );
@@ -1800,6 +2174,7 @@ export const providerUsageUnavailable = Effect.fn("providerUsageUnavailable")(fu
       usageSnapshot("claude", "error", message, updatedAt),
       usageSnapshot("codex", "error", message, updatedAt),
       usageSnapshot("grok", "error", message, updatedAt),
+      usageSnapshot("kilocode", "error", message, updatedAt),
     ],
   } satisfies ServerProviderUsageResult;
 });

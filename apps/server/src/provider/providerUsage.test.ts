@@ -21,6 +21,7 @@ import {
   __testing,
   consumeCodexResetCredit,
   fetchGrokUsage,
+  fetchKiloUsage,
   getProviderUsage,
   invalidateProviderUsageCache,
   mapCodexExtraLimits,
@@ -31,6 +32,9 @@ import {
   parseCodexResetCredits,
   parseGrokAuthCredentials,
   parseGrokBilling,
+  parseKiloAuthCredentials,
+  parseKiloBalance,
+  parseKiloPassWindow,
   parseRetryAfterMs,
   providerUsageSettingsKey,
   resetProviderUsageStateForTests,
@@ -52,6 +56,7 @@ const DISABLED_SETTINGS: ServerSettings = {
     claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
     grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
+    kilocode: { ...DEFAULT_SERVER_SETTINGS.providers.kilocode, enabled: false },
   },
 };
 
@@ -275,6 +280,199 @@ describe("parseGrokBilling", () => {
   it("rejects responses without a positive allowance", () => {
     expect(parseGrokBilling({ config: { monthlyLimit: { val: 0 }, used: { val: 0 } } })).toBeNull();
     expect(parseGrokBilling({})).toBeNull();
+  });
+});
+
+describe("Kilo account usage parsing", () => {
+  it("reads the CLI OAuth token and selected organization", () => {
+    expect(
+      parseKiloAuthCredentials(
+        JSON.stringify({
+          kilo: {
+            type: "oauth",
+            access: "kilo-token",
+            refresh: "kilo-token",
+            expires: 1_900_000_000_000,
+            accountId: "org_123",
+          },
+        }),
+      ),
+    ).toEqual({
+      accessToken: "kilo-token",
+      organizationId: "org_123",
+      expiresAt: 1_900_000_000_000,
+      source: "auth-file",
+    });
+  });
+
+  it("parses exact dollar balances including zero", () => {
+    expect(parseKiloBalance({ balance: 12.345 })).toBe(12.345);
+    expect(parseKiloBalance({ balance: 0 })).toBe(0);
+    expect(parseKiloBalance({ balance: "12.34" })).toBeNull();
+  });
+
+  it("maps Kilo Pass usage into its billing-period allowance", () => {
+    expect(
+      parseKiloPassWindow([
+        {
+          result: {
+            data: {
+              json: {
+                subscription: {
+                  currentPeriodBaseCreditsUsd: 20,
+                  currentPeriodBonusCreditsUsd: 5,
+                  currentPeriodUsageUsd: 10,
+                  nextBillingAt: "2026-08-01T00:00:00Z",
+                },
+              },
+            },
+          },
+        },
+      ]),
+    ).toEqual({
+      label: "Kilo Pass period",
+      usedPercent: 40,
+      windowMinutes: null,
+      resetsAt: Date.parse("2026-08-01T00:00:00Z"),
+    });
+  });
+});
+
+describe("fetchKiloUsage", () => {
+  effectIt.live("shows the signed-in personal account balance and Kilo Pass usage", () => {
+    const requests: Array<{ readonly url: string; readonly authorization?: string }> = [];
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        requests.push({
+          url: request.url,
+          ...(request.headers.authorization
+            ? { authorization: request.headers.authorization }
+            : {}),
+        });
+        const response = request.url.endsWith("/api/profile")
+          ? Response.json({ user: { email: "person@example.com", name: "Person" } })
+          : request.url.endsWith("/api/profile/balance")
+            ? Response.json({ balance: 12.34 })
+            : Response.json([
+                {
+                  result: {
+                    data: {
+                      json: {
+                        subscription: {
+                          currentPeriodBaseCreditsUsd: 20,
+                          currentPeriodUsageUsd: 5,
+                          currentPeriodBonusCreditsUsd: 0,
+                          nextBillingAt: "2026-08-01T00:00:00Z",
+                        },
+                      },
+                    },
+                  },
+                },
+              ]);
+        return Effect.succeed(HttpClientResponse.fromWeb(request, response));
+      }),
+    );
+    const previousAuth = process.env.KILO_AUTH_CONTENT;
+    const previousOrg = process.env.KILO_ORG_ID;
+    process.env.KILO_AUTH_CONTENT = JSON.stringify({
+      kilo: {
+        type: "oauth",
+        access: "kilo-token",
+        refresh: "kilo-token",
+        expires: 1_900_000_000_000,
+      },
+    });
+    delete process.env.KILO_ORG_ID;
+
+    return fetchKiloUsage({
+      ...DISABLED_SETTINGS,
+      providers: {
+        ...DISABLED_SETTINGS.providers,
+        kilocode: { ...DISABLED_SETTINGS.providers.kilocode, enabled: true },
+      },
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousAuth === undefined) delete process.env.KILO_AUTH_CONTENT;
+          else process.env.KILO_AUTH_CONTENT = previousAuth;
+          if (previousOrg === undefined) delete process.env.KILO_ORG_ID;
+          else process.env.KILO_ORG_ID = previousOrg;
+        }),
+      ),
+      Effect.map((result) => {
+        expect(requests).toHaveLength(3);
+        expect(requests.every((request) => request.authorization === "Bearer kilo-token")).toBe(
+          true,
+        );
+        expect(result).toMatchObject({
+          provider: "kilocode",
+          status: "ok",
+          planLabel: "person@example.com",
+          credits: { balance: "$12.34", hasCredits: true, unlimited: false },
+          detailsUrl: "https://app.kilo.ai/usage",
+        });
+        expect(result.weekly?.label).toBe("Kilo Pass period");
+        expect(result.weekly?.usedPercent).toBe(25);
+      }),
+      Effect.provide(Layer.mergeAll(NodeServicesLayer, httpLayer)),
+    );
+  });
+
+  effectIt.live("uses the selected organization for balance and account details", () => {
+    let organizationHeader: string | undefined;
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        if (request.url.endsWith("/api/profile/balance")) {
+          organizationHeader = request.headers["x-kilocode-organizationid"];
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(request, Response.json({ balance: 50 })),
+          );
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json({
+              user: { email: "member@example.com" },
+              organizations: [{ id: "org_123", name: "Acme", role: "MEMBER" }],
+            }),
+          ),
+        );
+      }),
+    );
+    const previousAuth = process.env.KILO_AUTH_CONTENT;
+    process.env.KILO_AUTH_CONTENT = JSON.stringify({
+      kilo: {
+        type: "oauth",
+        access: "org-token",
+        refresh: "org-token",
+        expires: 1_900_000_000_000,
+        accountId: "org_123",
+      },
+    });
+
+    return fetchKiloUsage({
+      ...DISABLED_SETTINGS,
+      providers: {
+        ...DISABLED_SETTINGS.providers,
+        kilocode: { ...DISABLED_SETTINGS.providers.kilocode, enabled: true },
+      },
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousAuth === undefined) delete process.env.KILO_AUTH_CONTENT;
+          else process.env.KILO_AUTH_CONTENT = previousAuth;
+        }),
+      ),
+      Effect.map((result) => {
+        expect(organizationHeader).toBe("org_123");
+        expect(result.planLabel).toBe("Acme");
+        expect(result.credits?.balance).toBe("$50.00");
+        expect(result.detailsUrl).toBe("https://app.kilo.ai/organizations/org_123/usage-details");
+      }),
+      Effect.provide(Layer.mergeAll(NodeServicesLayer, httpLayer)),
+    );
   });
 });
 
@@ -675,6 +873,7 @@ describe("getProviderUsage caching", () => {
         "unavailable",
         "unavailable",
         "unavailable",
+        "unavailable",
       ]);
     }).pipe(Effect.provide(TestLayer)),
   );
@@ -686,6 +885,7 @@ describe("getProviderUsage caching", () => {
       expect(second.usage[0]).toBe(first.usage[0]);
       expect(second.usage[1]).toBe(first.usage[1]);
       expect(second.usage[2]).toBe(first.usage[2]);
+      expect(second.usage[3]).toBe(first.usage[3]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -697,6 +897,7 @@ describe("getProviderUsage caching", () => {
       expect(second.usage[0]).not.toBe(first.usage[0]);
       expect(second.usage[1]).not.toBe(first.usage[1]);
       expect(second.usage[2]).not.toBe(first.usage[2]);
+      expect(second.usage[3]).not.toBe(first.usage[3]);
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -716,6 +917,8 @@ describe("getProviderUsage caching", () => {
       expect(third.usage[1]).toBe(first.usage[1]);
       expect(second.usage[2]).toBe(first.usage[2]);
       expect(third.usage[2]).toBe(first.usage[2]);
+      expect(second.usage[3]).toBe(first.usage[3]);
+      expect(third.usage[3]).toBe(first.usage[3]);
     }).pipe(Effect.provide(TestLayer)),
   );
 

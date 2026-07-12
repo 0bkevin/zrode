@@ -162,7 +162,10 @@ export function getAppModelOptions(
   // settings and the initial render before the first write both still
   // see the user's authored custom models.
   const defaultInstanceId = defaultInstanceIdForDriver(provider);
-  const customModels = readInstanceCustomModels(settings, defaultInstanceId, provider);
+  const customModels =
+    provider === ProviderDriverKind.make("kilocode")
+      ? []
+      : readInstanceCustomModels(settings, defaultInstanceId, provider);
   for (const slug of normalizeCustomModelSlugs(customModels, builtInModelSlugs, provider)) {
     if (seen.has(slug)) {
       continue;
@@ -205,7 +208,10 @@ export function getAppModelOptionsForInstance(
     ),
   );
 
-  const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
+  const customModels =
+    entry.driverKind === ProviderDriverKind.make("kilocode")
+      ? []
+      : readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
   const normalizer = entry.driverKind;
   for (const slug of normalizeCustomModelSlugs(customModels, builtInModelSlugs, normalizer)) {
     if (seen.has(slug)) {

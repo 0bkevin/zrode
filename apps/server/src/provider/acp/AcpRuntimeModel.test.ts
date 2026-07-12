@@ -385,6 +385,7 @@ describe("AcpRuntimeModel", () => {
       {
         _tag: "ContentDelta",
         text: "hello from acp",
+        streamKind: "assistant_text",
         rawPayload: {
           sessionId: "session-1",
           update: {
@@ -397,6 +398,29 @@ describe("AcpRuntimeModel", () => {
         },
       },
     ]);
+
+    const thoughtResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "considering" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(thoughtResult.events[0]).toMatchObject({
+      _tag: "ContentDelta",
+      text: "considering",
+      streamKind: "reasoning_text",
+    });
+
+    const usageResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: { sessionUpdate: "usage_update", used: 12_345, size: 200_000 },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(usageResult.events[0]).toMatchObject({
+      _tag: "UsageUpdated",
+      usedTokens: 12_345,
+      maxTokens: 200_000,
+    });
   });
 
   it("keeps permission request parsing compatible with loose extension payloads", () => {

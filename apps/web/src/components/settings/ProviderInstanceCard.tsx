@@ -15,10 +15,10 @@ import * as Result from "effect/Result";
 import { useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
+  ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
-  type ProviderDriverKind,
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
@@ -442,8 +442,11 @@ export function ProviderInstanceCard({
   const driverKind: ProviderDriverKind | null = isProviderDriverKind(instance.driver)
     ? instance.driver
     : null;
+  const allowsCustomModels = driverKind !== ProviderDriverKind.make("kilocode");
 
-  const customModels = readConfigStringArray(instance.config, "customModels");
+  const customModels = allowsCustomModels
+    ? readConfigStringArray(instance.config, "customModels")
+    : [];
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
@@ -787,6 +790,7 @@ export function ProviderInstanceCard({
                 onHiddenModelsChange={onHiddenModelsChange}
                 onFavoriteModelsChange={onFavoriteModelsChange}
                 onModelOrderChange={onModelOrderChange}
+                allowCustomModels={allowsCustomModels}
               />
             ) : (
               <div className="border-t border-border/60 px-4 py-3 sm:px-5">
