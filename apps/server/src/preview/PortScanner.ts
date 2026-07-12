@@ -26,6 +26,7 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 
+import { parseDockerContainerPorts } from "../docker/containerPorts.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
 export class PortDiscovery extends Context.Service<
@@ -60,6 +61,9 @@ const WINDOWS_LISTENER_TIMEOUT_MS = 5_000;
 
 const EMPTY_CWD_METADATA: ReadonlyMap<number, string> = new Map();
 const EMPTY_PROCESS_STATS: ReadonlyMap<number, ProcessStats> = new Map();
+const DOCKER_PROCESS_NAME_PATTERN = /(?:docker|com\.docke|vpnkit)/i;
+const ZRODE_PROCESS_NAME_PATTERN = /^zrode(?:\s|\(|$)/i;
+const MACOS_SYSTEM_LISTENER_PATTERN = /^(?:ControlCenter|rapportd)$/i;
 
 type Listener = (servers: ReadonlyArray<DiscoveredLocalServer>) => Effect.Effect<void>;
 
@@ -254,6 +258,38 @@ export const applyProcessMetadata = (
     };
   });
 
+export const hideZrodeInternalServers = (
+  servers: ReadonlyArray<DiscoveredLocalServer>,
+  serverPid: number,
+): ReadonlyArray<DiscoveredLocalServer> =>
+  servers.filter(
+    (server) =>
+      server.pid !== serverPid &&
+      !ZRODE_PROCESS_NAME_PATTERN.test(server.processName ?? "") &&
+      !MACOS_SYSTEM_LISTENER_PATTERN.test(server.processName ?? ""),
+  );
+
+export const applyDockerContainerMetadata = (
+  servers: ReadonlyArray<DiscoveredLocalServer>,
+  rawDockerContainerList: string,
+): ReadonlyArray<DiscoveredLocalServer> => {
+  const containerByPort = new Map(
+    parseDockerContainerPorts(rawDockerContainerList).flatMap((container) =>
+      [...container.hostPorts].map((port) => [port, container] as const),
+    ),
+  );
+
+  return servers.map((server) => {
+    const managedByDocker = DOCKER_PROCESS_NAME_PATTERN.test(server.processName ?? "");
+    const container = managedByDocker ? containerByPort.get(server.port) : undefined;
+    return {
+      ...server,
+      managedBy: managedByDocker ? ("docker" as const) : null,
+      container: container === undefined ? null : { id: container.id, name: container.name },
+    };
+  });
+};
+
 const parseWindowsListenerOutput = (
   raw: string,
   terminalByProcessId: ReadonlyMap<number, TerminalProcessOwner> = new Map(),
@@ -307,6 +343,9 @@ const serversEqual = (
       a.commandLine !== b.commandLine ||
       a.cpuPercent !== b.cpuPercent ||
       a.memoryBytes !== b.memoryBytes ||
+      a.managedBy !== b.managedBy ||
+      a.container?.id !== b.container?.id ||
+      a.container?.name !== b.container?.name ||
       a.terminal?.threadId !== b.terminal?.threadId ||
       a.terminal?.terminalId !== b.terminal?.terminalId
     ) {
@@ -365,7 +404,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       }).pipe(Effect.as(null));
 
   const logMetadataProbeFailure =
-    (probe: "lsof-cwd" | "ps-stats") => (error: ProcessRunner.ProcessRunError) =>
+    (probe: "lsof-cwd" | "ps-stats" | "docker-containers") =>
+    (error: ProcessRunner.ProcessRunError) =>
       Effect.logDebug("preview port process metadata probe failed; keeping servers unenriched", {
         cause: error,
         probe,
@@ -376,6 +416,38 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     logMetadataProbeFailure("lsof-cwd")(error).pipe(Effect.as(EMPTY_CWD_METADATA));
   const recoverStatsProbeFailure = (error: ProcessRunner.ProcessRunError) =>
     logMetadataProbeFailure("ps-stats")(error).pipe(Effect.as(EMPTY_PROCESS_STATS));
+
+  const enrichDockerMetadata = Effect.fn("PortDiscovery.enrichDockerMetadata")(function* (
+    servers: ReadonlyArray<DiscoveredLocalServer>,
+  ) {
+    if (!servers.some((server) => DOCKER_PROCESS_NAME_PATTERN.test(server.processName ?? ""))) {
+      return servers;
+    }
+    const raw = yield* processRunner
+      .run({
+        command: "docker",
+        args: ["container", "ls", "--no-trunc", "--format", "{{json .}}"],
+        timeout: Duration.millis(LSOF_TIMEOUT_MS),
+        maxOutputBytes: 1024 * 1024,
+        outputMode: "truncate",
+      })
+      .pipe(
+        Effect.map((result) => result.stdout),
+        Effect.catchTags({
+          ProcessSpawnError: (error) =>
+            logMetadataProbeFailure("docker-containers")(error).pipe(Effect.as("")),
+          ProcessStdinError: (error) =>
+            logMetadataProbeFailure("docker-containers")(error).pipe(Effect.as("")),
+          ProcessOutputLimitError: (error) =>
+            logMetadataProbeFailure("docker-containers")(error).pipe(Effect.as("")),
+          ProcessReadError: (error) =>
+            logMetadataProbeFailure("docker-containers")(error).pipe(Effect.as("")),
+          ProcessTimeoutError: (error) =>
+            logMetadataProbeFailure("docker-containers")(error).pipe(Effect.as("")),
+        }),
+      );
+    return applyDockerContainerMetadata(servers, raw);
+  });
 
   // Best-effort second pass (macOS/Linux): resolve each listener's working
   // directory and command line / CPU / memory so the UI can attribute servers
@@ -472,7 +544,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
             ProcessTimeoutError: recoverWindowsProbeFailure,
           }),
         );
-      if (listeners !== null) return listeners;
+      if (listeners !== null) {
+        return yield* enrichDockerMetadata(hideZrodeInternalServers(listeners, process.pid));
+      }
       return yield* probeCommonPorts();
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");
@@ -494,7 +568,11 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           ProcessTimeoutError: recoverLsofProbeFailure,
         }),
       );
-    if (lsofResult !== null) return yield* enrichProcessMetadata(lsofResult);
+    if (lsofResult !== null) {
+      const visible = hideZrodeInternalServers(lsofResult, process.pid);
+      const enriched = yield* enrichProcessMetadata(visible);
+      return yield* enrichDockerMetadata(enriched);
+    }
     return yield* probeCommonPorts();
   });
 

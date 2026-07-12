@@ -341,6 +341,71 @@ describe("ProcessDiagnostics", () => {
     }),
   );
 
+  it.effect("stops only the Docker container publishing the selected port", () =>
+    Effect.gen(function* () {
+      const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> =
+        [];
+      const containerId = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) => {
+          const childProcess = command as unknown as {
+            readonly command: string;
+            readonly args: ReadonlyArray<string>;
+          };
+          commands.push({ command: childProcess.command, args: childProcess.args });
+          const isList = childProcess.args.includes("ls");
+          return Effect.succeed(
+            mockHandle({
+              stdout: isList
+                ? `{"ID":"${containerId}","Names":"web-app","Ports":"0.0.0.0:3000->3000/tcp"}\n`
+                : `${containerId}\n`,
+            }),
+          );
+        }),
+      );
+      const layer = ProcessDiagnostics.layer.pipe(Layer.provide(spawnerLayer));
+      const killSpy = vi.spyOn(process, "kill").mockReturnValue(true);
+
+      try {
+        const result = yield* Effect.service(ProcessDiagnostics.ProcessDiagnostics).pipe(
+          Effect.flatMap((pd) =>
+            pd.signal({
+              pid: 4242,
+              signal: "SIGINT",
+              port: 3000,
+              dockerContainerId: containerId,
+            }),
+          ),
+          Effect.provide(layer),
+        );
+
+        expect(result.signaled).toBe(true);
+        expect(killSpy).not.toHaveBeenCalled();
+        expect(commands).toEqual([
+          {
+            command: "docker",
+            args: [
+              "container",
+              "ls",
+              "--no-trunc",
+              "--filter",
+              `id=${containerId}`,
+              "--format",
+              "{{json .}}",
+            ],
+          },
+          {
+            command: "docker",
+            args: ["container", "stop", "--timeout", "5", containerId],
+          },
+        ]);
+      } finally {
+        killSpy.mockRestore();
+      }
+    }),
+  );
+
   it.effect("does not allow signaling the diagnostics query process", () =>
     Effect.gen(function* () {
       const spawnerLayer = Layer.succeed(

@@ -224,6 +224,75 @@ effectIt("applyProcessMetadata enriches only servers with a known pid", () =>
   }),
 );
 
+effectIt("hides the Zrode backend listener while retaining other processes", () =>
+  Effect.sync(() => {
+    const servers = [
+      {
+        host: "localhost",
+        port: 3773,
+        url: "http://localhost:3773",
+        processName: "Zrode (Alpha)",
+        pid: 100,
+        terminal: null,
+      },
+      {
+        host: "localhost",
+        port: 5173,
+        url: "http://localhost:5173",
+        processName: "node",
+        pid: 200,
+        terminal: null,
+      },
+    ];
+    // The Zrode process may belong to another running installation, so its
+    // PID does not have to match the scanner process.
+    expect(PortScanner.hideZrodeInternalServers(servers, 999)).toEqual([servers[1]]);
+  }),
+);
+
+effectIt("hides macOS services but keeps Zrode dev listeners", () =>
+  Effect.sync(() => {
+    const base = {
+      host: "localhost",
+      url: "http://localhost:3000",
+      pid: 200,
+      terminal: null,
+    };
+    const servers = [
+      { ...base, port: 5000, processName: "ControlCenter" },
+      { ...base, port: 56_420, processName: "rapportd" },
+      {
+        ...base,
+        port: 5733,
+        processName: "node",
+        cwd: "/Users/dev/.t3/worktrees/zrode/zrode-feature/apps/web",
+      },
+      { ...base, port: 3000, processName: "node", cwd: "/Users/dev/my-app" },
+    ];
+
+    expect(PortScanner.hideZrodeInternalServers(servers, 999)).toEqual([servers[2], servers[3]]);
+  }),
+);
+
+effectIt("attributes a Docker-owned listener to its individual container", () =>
+  Effect.sync(() => {
+    const server = {
+      host: "localhost",
+      port: 3000,
+      url: "http://localhost:3000",
+      processName: "com.docker.backend",
+      pid: 42,
+      terminal: null,
+    };
+    const [enriched] = PortScanner.applyDockerContainerMetadata(
+      [server],
+      '{"ID":"abcdef123456","Names":"web-app","Ports":"0.0.0.0:3000->3000/tcp"}',
+    );
+    expect(enriched?.managedBy).toBe("docker");
+    expect(enriched?.container).toEqual({ id: "abcdef123456", name: "web-app" });
+  }),
+);
+
 effectIt("does not swallow process probe defects", () =>
   Effect.gen(function* () {
     const defect = new Error("unexpected process probe defect");

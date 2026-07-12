@@ -15,6 +15,7 @@ import * as Schema from "effect/Schema";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import { isDockerContainerId, parseDockerContainerPorts } from "../docker/containerPorts.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 export interface ProcessRow {
@@ -41,6 +42,7 @@ export class ProcessDiagnostics extends Context.Service<
       readonly pid: number;
       readonly signal: ServerProcessSignal;
       readonly port?: number | undefined;
+      readonly dockerContainerId?: string | undefined;
     }) => Effect.Effect<ServerSignalProcessResult>;
   }
 >()("t3/diagnostics/ProcessDiagnostics") {}
@@ -125,6 +127,19 @@ class ProcessDiagnosticsSignalFailedError extends Schema.TaggedErrorClass<Proces
   }
 }
 
+class ProcessDiagnosticsDockerContainerError extends Schema.TaggedErrorClass<ProcessDiagnosticsDockerContainerError>()(
+  "ProcessDiagnosticsDockerContainerError",
+  {
+    containerId: Schema.String,
+    port: Schema.Number,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 const ProcessDiagnosticsError = Schema.Union([
   ProcessDiagnosticsQueryTimeoutError,
   ProcessDiagnosticsQueryFailedError,
@@ -132,6 +147,7 @@ const ProcessDiagnosticsError = Schema.Union([
   ProcessDiagnosticsNotDescendantError,
   ProcessDiagnosticsNotListeningError,
   ProcessDiagnosticsSignalFailedError,
+  ProcessDiagnosticsDockerContainerError,
 ]);
 type ProcessDiagnosticsError = typeof ProcessDiagnosticsError.Type;
 const isProcessDiagnosticsError = Schema.is(ProcessDiagnosticsError);
@@ -653,6 +669,92 @@ function assertSignalablePid(input: { readonly pid: number; readonly port?: numb
       });
 }
 
+const runDockerContainerCommand = Effect.fn("runDockerContainerCommand")(function* (input: {
+  readonly args: ReadonlyArray<string>;
+  readonly timeoutMillis: number;
+  readonly containerId: string;
+  readonly port: number;
+  readonly action: "inspect" | "stop";
+}) {
+  const result = yield* runProcess({
+    command: "docker",
+    args: input.args,
+    timeoutMillis: input.timeoutMillis,
+  });
+  if (result.exitCode !== 0) {
+    return yield* new ProcessDiagnosticsDockerContainerError({
+      containerId: input.containerId,
+      port: input.port,
+      detail: `Docker could not ${input.action} container ${input.containerId.slice(0, 12)}. Verify Docker is running and that you have permission.`,
+    });
+  }
+  return result.stdout;
+});
+
+const signalDockerContainer = Effect.fn("signalDockerContainer")(function* (input: {
+  readonly pid: number;
+  readonly signal: ServerProcessSignal;
+  readonly port: number;
+  readonly containerId: string;
+}): Effect.fn.Return<
+  ServerSignalProcessResult,
+  ProcessDiagnosticsError,
+  ChildProcessSpawner.ChildProcessSpawner
+> {
+  if (!isDockerContainerId(input.containerId)) {
+    return yield* new ProcessDiagnosticsDockerContainerError({
+      containerId: input.containerId,
+      port: input.port,
+      detail: "The Docker container identity is invalid. Refresh the server list and try again.",
+    });
+  }
+
+  const raw = yield* runDockerContainerCommand({
+    args: [
+      "container",
+      "ls",
+      "--no-trunc",
+      "--filter",
+      `id=${input.containerId}`,
+      "--format",
+      "{{json .}}",
+    ],
+    timeoutMillis: LISTENER_QUERY_TIMEOUT_MS,
+    containerId: input.containerId,
+    port: input.port,
+    action: "inspect",
+  });
+  const container = parseDockerContainerPorts(raw).find(
+    (candidate) =>
+      candidate.id.startsWith(input.containerId) && candidate.hostPorts.has(input.port),
+  );
+  if (container === undefined) {
+    return yield* new ProcessDiagnosticsDockerContainerError({
+      containerId: input.containerId,
+      port: input.port,
+      detail: `Container ${input.containerId.slice(0, 12)} is no longer publishing localhost:${input.port}.`,
+    });
+  }
+  const args =
+    input.signal === "SIGKILL"
+      ? ["container", "kill", container.id]
+      : ["container", "stop", "--timeout", "5", container.id];
+  yield* runDockerContainerCommand({
+    args,
+    timeoutMillis: 10_000,
+    containerId: input.containerId,
+    port: input.port,
+    action: "stop",
+  });
+  const result: ServerSignalProcessResult = {
+    pid: input.pid,
+    signal: input.signal,
+    signaled: true,
+    message: Option.none(),
+  };
+  return result;
+});
+
 export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -674,27 +776,50 @@ export const make = Effect.gen(function* () {
 
   const signal: ProcessDiagnostics["Service"]["signal"] = Effect.fn("ProcessDiagnostics.signal")(
     function* (input) {
-      return yield* assertSignalablePid(input).pipe(
+      const action: Effect.Effect<
+        ServerSignalProcessResult,
+        ProcessDiagnosticsError,
+        ChildProcessSpawner.ChildProcessSpawner
+      > =
+        input.dockerContainerId === undefined
+          ? assertSignalablePid(input).pipe(
+              Effect.flatMap(() =>
+                Effect.try({
+                  try: () => {
+                    process.kill(input.pid, input.signal);
+                    const result: ServerSignalProcessResult = {
+                      pid: input.pid,
+                      signal: input.signal,
+                      signaled: true,
+                      message: Option.none(),
+                    };
+                    return result;
+                  },
+                  catch: (cause) =>
+                    new ProcessDiagnosticsSignalFailedError({
+                      pid: input.pid,
+                      signal: input.signal,
+                      cause,
+                    }),
+                }),
+              ),
+            )
+          : input.port === undefined
+            ? Effect.fail(
+                new ProcessDiagnosticsDockerContainerError({
+                  containerId: input.dockerContainerId,
+                  port: 0,
+                  detail: "A published port is required to stop a Docker container safely.",
+                }),
+              )
+            : signalDockerContainer({
+                pid: input.pid,
+                signal: input.signal,
+                port: input.port,
+                containerId: input.dockerContainerId,
+              });
+      return yield* action.pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.flatMap(() =>
-          Effect.try({
-            try: () => {
-              process.kill(input.pid, input.signal);
-              return {
-                pid: input.pid,
-                signal: input.signal,
-                signaled: true,
-                message: Option.none(),
-              };
-            },
-            catch: (cause) =>
-              new ProcessDiagnosticsSignalFailedError({
-                pid: input.pid,
-                signal: input.signal,
-                cause,
-              }),
-          }),
-        ),
         Effect.catch((error: ProcessDiagnosticsError) =>
           Effect.succeed({
             pid: input.pid,

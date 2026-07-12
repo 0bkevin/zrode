@@ -338,6 +338,21 @@ describe("DiscoveredLocalServer", () => {
     expect(server.processName).toBeNull();
   });
 
+  it("decodes Docker container ownership metadata", () => {
+    const server = decodeServer({
+      host: "localhost",
+      port: 3000,
+      url: "http://localhost:3000",
+      processName: "com.docker.backend",
+      pid: 12345,
+      managedBy: "docker",
+      container: { id: "abcdef123456", name: "web-app" },
+      terminal: null,
+    });
+    expect(server.container).toEqual({ id: "abcdef123456", name: "web-app" });
+    expect(server.managedBy).toBe("docker");
+  });
+
   it("decodes payloads from older servers that omit process metadata", () => {
     const server = decodeServer({
       host: "localhost",

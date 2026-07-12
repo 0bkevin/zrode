@@ -371,6 +371,7 @@ export const ServerProcessResourceHistoryFailureTag = Schema.Literals([
   "ProcessDiagnosticsNotDescendantError",
   "ProcessDiagnosticsNotListeningError",
   "ProcessDiagnosticsSignalFailedError",
+  "ProcessDiagnosticsDockerContainerError",
 ]);
 export type ServerProcessResourceHistoryFailureTag =
   typeof ServerProcessResourceHistoryFailureTag.Type;
@@ -402,6 +403,10 @@ export const ServerSignalProcessInput = Schema.Struct({
    * externally launched dev servers without allowing stale PID reuse.
    */
   port: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0)).check(Schema.isLessThan(65536))),
+  /** Stop this exact Docker container instead of signaling the shared Docker backend PID. */
+  dockerContainerId: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{12,64}$/i)),
+  ),
 });
 export type ServerSignalProcessInput = typeof ServerSignalProcessInput.Type;
 

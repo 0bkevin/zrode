@@ -270,6 +270,17 @@ export const DiscoveredLocalServer = Schema.Struct({
   cpuPercent: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(-1)))),
   /** Resident memory of the owning process in bytes, when the scanner could resolve it. */
   memoryBytes: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(-1)))),
+  /** Runtime that owns the listener when direct process signaling would be unsafe. */
+  managedBy: Schema.optional(Schema.NullOr(Schema.Literal("docker"))),
+  /** Docker container publishing this port, when the scanner can identify one. */
+  container: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        id: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+        name: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+      }),
+    ),
+  ),
   terminal: Schema.NullOr(
     Schema.Struct({
       threadId: ThreadId,

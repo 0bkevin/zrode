@@ -13,12 +13,22 @@ import {
 import type { DiscoveredLocalServer, ScopedThreadRef } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Option from "effect/Option";
-import { Check, Copy, ExternalLink, RadioTower, TerminalSquare } from "lucide-react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  Info,
+  LoaderCircle,
+  RadioTower,
+  Square,
+  TerminalSquare,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { openDiscoveredPort } from "~/components/preview/openDiscoveredPort";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
+import { useSidebarVisibility } from "~/components/ui/sidebar";
 import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -42,28 +52,36 @@ interface ServerGroup {
 
 /** SIGINT grace period before the row offers a SIGKILL force stop. */
 const FORCE_STOP_DELAY_MS = 5_000;
+/** Docker stop already waits up to five seconds; allow one scan after that. */
+const DOCKER_FORCE_STOP_DELAY_MS = 8_000;
 
 type StopState = "stopping" | "force";
 
+function stopKey(server: DiscoveredLocalServer): string | null {
+  if (server.container != null) return `docker:${server.container.id}`;
+  return server.pid === null ? null : `process:${server.pid}`;
+}
+
 export function LocalServersStatusButton({ threadRef }: LocalServersStatusButtonProps) {
   const { servers } = useDiscoveredServerSnapshot(threadRef.environmentId);
+  const sidebarVisible = useSidebarVisibility();
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const signalServerProcess = useAtomCommand(serverEnvironment.signalProcess, {
     reportFailure: false,
   });
-  const [stopStateByPid, setStopStateByPid] = useState<ReadonlyMap<number, StopState>>(new Map());
-  const stopTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  const [stopStateByKey, setStopStateByKey] = useState<ReadonlyMap<string, StopState>>(new Map());
+  const stopTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  const clearStopTracking = useCallback((pid: number) => {
-    const timer = stopTimersRef.current.get(pid);
+  const clearStopTracking = useCallback((key: string) => {
+    const timer = stopTimersRef.current.get(key);
     if (timer !== undefined) {
       clearTimeout(timer);
-      stopTimersRef.current.delete(pid);
+      stopTimersRef.current.delete(key);
     }
-    setStopStateByPid((current) => {
-      if (!current.has(pid)) return current;
+    setStopStateByKey((current) => {
+      if (!current.has(key)) return current;
       const next = new Map(current);
-      next.delete(pid);
+      next.delete(key);
       return next;
     });
   }, []);
@@ -71,18 +89,23 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
   // A pid disappearing from the snapshot means the stop worked — drop its
   // in-flight state so the map doesn't accumulate dead entries.
   useEffect(() => {
-    setStopStateByPid((current) => {
+    setStopStateByKey((current) => {
       if (current.size === 0) return current;
-      const alive = new Set(servers.flatMap((server) => (server.pid === null ? [] : [server.pid])));
+      const alive = new Set(
+        servers.flatMap((server) => {
+          const key = stopKey(server);
+          return key === null ? [] : [key];
+        }),
+      );
       let changed = false;
       const next = new Map(current);
-      for (const pid of current.keys()) {
-        if (alive.has(pid)) continue;
-        next.delete(pid);
-        const timer = stopTimersRef.current.get(pid);
+      for (const key of current.keys()) {
+        if (alive.has(key)) continue;
+        next.delete(key);
+        const timer = stopTimersRef.current.get(key);
         if (timer !== undefined) {
           clearTimeout(timer);
-          stopTimersRef.current.delete(pid);
+          stopTimersRef.current.delete(key);
         }
         changed = true;
       }
@@ -113,25 +136,24 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
     ].filter((group) => group.servers.length > 0);
   }, [servers, threadRef.threadId]);
 
-  // One process can listen on several ports (several rows); count and sum
-  // memory per unique pid so the trigger doesn't double-count.
+  // One process or Docker container can listen on several ports. Count each
+  // owner once and avoid attributing Docker Desktop's shared memory to an
+  // individual container.
   const { processCount, totalMemoryBytes } = useMemo(() => {
-    const memoryByPid = new Map<number, number>();
-    const pids = new Set<number>();
-    let pidlessCount = 0;
+    const owners = new Set<string>();
+    const memoryByOwner = new Map<string, number>();
     for (const server of servers) {
-      if (server.pid === null) {
-        pidlessCount += 1;
-        continue;
+      const key = stopKey(server) ?? `port:${server.host}:${server.port}`;
+      owners.add(key);
+      if (server.managedBy !== "docker" && server.memoryBytes != null) {
+        memoryByOwner.set(key, server.memoryBytes);
       }
-      pids.add(server.pid);
-      if (server.memoryBytes != null) memoryByPid.set(server.pid, server.memoryBytes);
     }
-    let total = 0;
-    for (const bytes of memoryByPid.values()) total += bytes;
+    let totalMemory = 0;
+    for (const memoryBytes of memoryByOwner.values()) totalMemory += memoryBytes;
     return {
-      processCount: pids.size + pidlessCount,
-      totalMemoryBytes: memoryByPid.size > 0 ? total : null,
+      processCount: owners.size,
+      totalMemoryBytes: memoryByOwner.size > 0 ? totalMemory : null,
     };
   }, [servers]);
 
@@ -154,35 +176,47 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
     (server: DiscoveredLocalServer) => {
       const pid = server.pid;
       if (pid === null) return;
-      const force = stopStateByPid.get(pid) === "force";
+      const key = stopKey(server);
+      if (key === null) return;
+      const force = stopStateByKey.get(key) === "force";
       if (
         force &&
         !window.confirm(
-          `Force stop ${server.processName ?? `process ${pid}`}? SIGKILL cannot be handled by the process.`,
+          server.container != null
+            ? `Force stop Docker container ${server.container.name}? It will be killed immediately.`
+            : `Force stop ${server.processName ?? `process ${pid}`}? SIGKILL cannot be handled by the process.`,
         )
       ) {
         return;
       }
-      setStopStateByPid((current) => new Map(current).set(pid, "stopping"));
-      const existingTimer = stopTimersRef.current.get(pid);
+      setStopStateByKey((current) => new Map(current).set(key, "stopping"));
+      const existingTimer = stopTimersRef.current.get(key);
       if (existingTimer !== undefined) clearTimeout(existingTimer);
       stopTimersRef.current.set(
-        pid,
-        setTimeout(() => {
-          stopTimersRef.current.delete(pid);
-          // Still listening after the grace period — offer a force stop.
-          setStopStateByPid((current) =>
-            current.get(pid) === "stopping" ? new Map(current).set(pid, "force") : current,
-          );
-        }, FORCE_STOP_DELAY_MS),
+        key,
+        setTimeout(
+          () => {
+            stopTimersRef.current.delete(key);
+            // Still listening after the grace period — offer a force stop.
+            setStopStateByKey((current) =>
+              current.get(key) === "stopping" ? new Map(current).set(key, "force") : current,
+            );
+          },
+          server.container != null ? DOCKER_FORCE_STOP_DELAY_MS : FORCE_STOP_DELAY_MS,
+        ),
       );
       void (async () => {
         const result = await signalServerProcess({
           environmentId: threadRef.environmentId,
-          input: { pid, signal: force ? "SIGKILL" : "SIGINT", port: server.port },
+          input: {
+            pid,
+            signal: force ? "SIGKILL" : "SIGINT",
+            port: server.port,
+            ...(server.container != null ? { dockerContainerId: server.container.id } : {}),
+          },
         });
         if (result._tag === "Failure") {
-          clearStopTracking(pid);
+          clearStopTracking(key);
           if (!isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);
             toastManager.add({
@@ -195,7 +229,7 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
           return;
         }
         if (!result.value.signaled) {
-          clearStopTracking(pid);
+          clearStopTracking(key);
           const message = Option.getOrUndefined(result.value.message);
           toastManager.add({
             type: "error",
@@ -208,7 +242,7 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
         // grace timer escalates to a force-stop offer.
       })();
     },
-    [clearStopTracking, signalServerProcess, stopStateByPid, threadRef.environmentId],
+    [clearStopTracking, signalServerProcess, stopStateByKey, threadRef.environmentId],
   );
 
   const openTerminal = useCallback(
@@ -220,57 +254,66 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
 
   return (
     <Popover>
-      <PopoverTrigger className="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground opacity-60 transition-opacity hover:bg-accent hover:text-foreground hover:opacity-100 focus-visible:opacity-100 data-popup-open:opacity-100">
+      <PopoverTrigger
+        type="button"
+        aria-label="Show local servers"
+        title="Show local servers"
+        className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground opacity-80 transition-colors hover:bg-accent hover:text-foreground focus-visible:opacity-100 data-popup-open:bg-accent data-popup-open:text-foreground"
+      >
         <StatusDot listening={processCount > 0} />
         <span className="tabular-nums">
           {processCount === 0
             ? "No servers"
             : `${processCount} ${processCount === 1 ? "server" : "servers"}`}
         </span>
-        {totalMemoryBytes != null ? (
-          <span className="hidden tabular-nums sm:inline">· {formatBytes(totalMemoryBytes)}</span>
+        {!sidebarVisible && totalMemoryBytes != null ? (
+          <span className="tabular-nums">· {formatBytes(totalMemoryBytes)}</span>
         ) : null}
       </PopoverTrigger>
-      <PopoverPopup side="top" align="end" className="w-[26rem] max-w-[calc(100vw-1.5rem)] p-0">
+      <PopoverPopup side="top" align="end" className="w-[25rem] max-w-[calc(100vw-1rem)] p-0">
         {servers.length === 0 ? (
-          <div className="flex flex-col items-center gap-1.5 px-4 py-5 text-center">
+          <div className="flex flex-col items-center gap-1 px-3 py-3 text-center">
             <RadioTower className="size-4.5 text-muted-foreground" />
             <p className="text-sm font-medium text-foreground">No local servers</p>
-            <p className="text-xs text-muted-foreground">
-              Run a dev script in a terminal. Listening localhost ports show up here automatically.
-            </p>
           </div>
         ) : (
-          <div className="flex max-h-96 flex-col gap-2 overflow-y-auto p-1.5">
-            {groups.map((group) => (
-              <div key={group.key} className="flex flex-col">
-                {groups.length > 1 ? (
-                  <h3 className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
-                    {group.title}
-                  </h3>
-                ) : null}
-                {group.servers.map((server) => {
-                  const terminal = server.terminal;
-                  return (
-                    <LocalServerRow
-                      key={`${server.host}:${server.port}:${server.pid ?? "unknown"}`}
-                      server={server}
-                      resolvedUrl={resolveDiscoveredServerUrl(threadRef.environmentId, server.url)}
-                      stopState={
-                        server.pid === null ? null : (stopStateByPid.get(server.pid) ?? null)
-                      }
-                      onOpen={() => openServer(server)}
-                      onStop={() => stopServer(server)}
-                      onOpenTerminal={
-                        group.key === "this-thread" && terminal !== null
-                          ? () => openTerminal(terminal.terminalId)
-                          : null
-                      }
-                    />
-                  );
-                })}
-              </div>
-            ))}
+          <div className="flex max-h-96 flex-col">
+            <div className="border-b border-border/50 px-2.5 py-1.5 text-xs font-medium text-foreground">
+              Local servers
+            </div>
+            <div className="flex flex-col gap-1 overflow-y-auto p-1">
+              {groups.map((group) => (
+                <div key={group.key} className="flex flex-col">
+                  {groups.length > 1 ? (
+                    <h3 className="px-2 pb-0.5 pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                      {group.title}
+                    </h3>
+                  ) : null}
+                  {group.servers.map((server) => {
+                    const terminal = server.terminal;
+                    const key = stopKey(server);
+                    return (
+                      <LocalServerRow
+                        key={`${server.host}:${server.port}:${server.pid ?? "unknown"}`}
+                        server={server}
+                        resolvedUrl={resolveDiscoveredServerUrl(
+                          threadRef.environmentId,
+                          server.url,
+                        )}
+                        stopState={key === null ? null : (stopStateByKey.get(key) ?? null)}
+                        onOpen={() => openServer(server)}
+                        onStop={() => stopServer(server)}
+                        onOpenTerminal={
+                          group.key === "this-thread" && terminal !== null
+                            ? () => openTerminal(terminal.terminalId)
+                            : null
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </PopoverPopup>
@@ -297,35 +340,57 @@ function LocalServerRow({
 }: LocalServerRowProps) {
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "server URL" });
   const title =
-    server.processName ?? (server.pid !== null ? `PID ${server.pid}` : "Unknown process");
-  const meta = [
-    `${server.host}:${server.port}`,
-    server.cpuPercent != null ? `${server.cpuPercent}% CPU` : null,
-    server.memoryBytes != null ? formatBytes(server.memoryBytes) : null,
-  ].filter((part): part is string => part !== null);
+    server.container?.name ??
+    server.processName ??
+    (server.pid !== null ? `PID ${server.pid}` : "Unknown process");
+  const cpuPercent = server.container == null ? server.cpuPercent : null;
+  const isUnresolvedDockerProcess = server.managedBy === "docker" && server.container == null;
   return (
-    <div className="group flex items-start gap-2.5 rounded-md px-2.5 py-1.5 transition-colors hover:bg-accent/50">
+    <div className="group flex items-start gap-2 rounded-md px-2 py-1 transition-colors hover:bg-accent/50">
       <span className="flex h-5 items-center">
         <StatusDot listening />
       </span>
       <button
         type="button"
         onClick={onOpen}
-        title={server.commandLine ?? undefined}
-        className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
+        title={
+          server.container != null
+            ? `Docker container ${server.container.name} (${server.container.id.slice(0, 12)})`
+            : (server.commandLine ?? undefined)
+        }
+        className="flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 text-left"
       >
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className="truncate text-sm font-medium text-foreground">{title}</span>
-          {server.pid !== null && server.processName !== null ? (
+          {server.container != null ? (
+            <span className="shrink-0 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400">
+              Docker
+            </span>
+          ) : null}
+          {server.pid !== null && server.processName !== null && server.container == null ? (
             <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/70">
               {server.pid}
             </span>
           ) : null}
         </span>
-        <span className="truncate text-xs tabular-nums text-muted-foreground">
-          {meta.join(" · ")}
+        <span className="flex min-w-0 items-center gap-1 text-xs tabular-nums text-muted-foreground">
+          <span className="truncate">
+            {server.host}:{server.port}
+          </span>
+          {server.container != null ? (
+            <span className="truncate">· Container {server.container.id.slice(0, 12)}</span>
+          ) : null}
+          {cpuPercent != null ? (
+            <>
+              <span aria-hidden>·</span>
+              <CpuUsage cpuPercent={cpuPercent} />
+            </>
+          ) : null}
+          {server.container == null && server.memoryBytes != null ? (
+            <span className="truncate">· {formatBytes(server.memoryBytes)}</span>
+          ) : null}
         </span>
-        {server.cwd != null ? (
+        {server.cwd != null && server.container == null ? (
           <span className="truncate text-[11px] text-muted-foreground/60" title={server.cwd}>
             {server.cwd}
           </span>
@@ -351,19 +416,64 @@ function LocalServerRow({
             {isCopied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
           </RowAction>
         </span>
-        {server.pid !== null ? (
+        {server.pid !== null && !isUnresolvedDockerProcess ? (
           <button
             type="button"
             onClick={onStop}
             disabled={stopState === "stopping"}
-            title={stopState === "force" ? "The server ignored SIGINT — send SIGKILL" : undefined}
-            className="ml-1 flex h-6 shrink-0 items-center rounded-md px-2 text-xs font-medium text-destructive/90 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+            aria-label={
+              stopState === "stopping"
+                ? "Stopping server"
+                : stopState === "force"
+                  ? "Force stop server"
+                  : "Stop server"
+            }
+            title={
+              stopState === "force"
+                ? server.container != null
+                  ? "The container did not stop gracefully — kill only this container"
+                  : "The server ignored SIGINT — send SIGKILL"
+                : server.container != null
+                  ? `Stop only the ${server.container.name} container`
+                  : "Stop this process and every port it owns"
+            }
+            className="ml-1 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-destructive/90 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {stopState === "stopping" ? "Stopping…" : stopState === "force" ? "Force stop" : "Stop"}
+            {stopState === "stopping" ? (
+              <LoaderCircle className="size-3.5 animate-spin" />
+            ) : (
+              <Square className="size-3 fill-current" />
+            )}
           </button>
+        ) : isUnresolvedDockerProcess ? (
+          <span
+            className="ml-1 max-w-24 text-right text-[10px] leading-3 text-muted-foreground"
+            title="Zrode could not identify which container owns this port, so stopping the shared Docker backend is disabled."
+          >
+            Managed by Docker
+          </span>
         ) : null}
       </div>
     </div>
+  );
+}
+
+function CpuUsage({ cpuPercent }: { cpuPercent: number }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="inline-flex shrink-0 items-center gap-0.5">
+            {cpuPercent}% CPU
+            <Info className="size-3" />
+          </span>
+        }
+      />
+      <TooltipPopup side="top" className="max-w-72 text-pretty">
+        CPU is measured per logical core. 100% uses one full core, so multi-core processes can
+        exceed 100%.
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -388,7 +498,7 @@ function RowAction({
             onClick={onClick}
             disabled={disabled}
             className={cn(
-              "flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50",
+              "flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
             {children}
