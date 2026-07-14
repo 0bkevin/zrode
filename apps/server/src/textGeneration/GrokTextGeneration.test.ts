@@ -40,6 +40,9 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
       ...Object.entries({ ZRODE_ACP_AUTH_METHOD_ID: "cached_token", ...env }).map(
         ([key, value]) => `export ${key}=${shellSingleQuote(value)}`,
       ),
+      // Grok accepts global flags before the ACP subcommand. These tests only
+      // need to verify that the command ultimately launches `agent stdio`.
+      'while [ "$#" -gt 2 ]; do shift; done',
       'if [ "$1" != "agent" ] || [ "$2" != "stdio" ]; then',
       '  printf "%s\\n" "unexpected args: $*" >&2',
       "  exit 11",
