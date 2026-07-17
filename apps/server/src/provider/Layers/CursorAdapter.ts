@@ -539,6 +539,11 @@ export function makeCursorAdapter(
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
+            resourceOwner: {
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              threadId: input.threadId,
+            },
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "zrode", version: "0.0.0" },
             ...(mcpSession

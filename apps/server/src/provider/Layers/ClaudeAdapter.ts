@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Claude SDK's synchronous custom spawn hook requires a Node ChildProcess-compatible return value.
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
  *
@@ -19,7 +20,10 @@ import {
   type SettingSource,
   type SDKUserMessage,
   type ModelUsage,
+  type SpawnOptions as ClaudeSpawnOptions,
+  type SpawnedProcess as ClaudeSpawnedProcess,
 } from "@anthropic-ai/claude-agent-sdk";
+import * as NodeChildProcess from "node:child_process";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import {
   ApprovalRequestId,
@@ -88,6 +92,7 @@ import {
 } from "../Errors.ts";
 import { validateExpectedSteeringTurn } from "../Steering.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { registerProviderProcess } from "../ProviderProcessRegistry.ts";
 import { claudeResultErrorMessage } from "./ClaudeResultError.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
@@ -182,6 +187,7 @@ interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  readonly unregisterRuntimeProcess: () => void;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
@@ -3008,6 +3014,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }),
       ),
     );
+    context.unregisterRuntimeProcess();
 
     const updatedAt = yield* nowIso;
     context.session = {
@@ -3443,6 +3450,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(ultracode ? { ultracode: true } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      let unregisterRuntimeProcess = () => {};
+      const spawnClaudeCodeProcess = (spawnOptions: ClaudeSpawnOptions): ClaudeSpawnedProcess => {
+        const child = NodeChildProcess.spawn(spawnOptions.command, spawnOptions.args, {
+          ...(spawnOptions.cwd ? { cwd: spawnOptions.cwd } : {}),
+          env: spawnOptions.env,
+          signal: spawnOptions.signal,
+          stdio: ["pipe", "pipe", "ignore"],
+          windowsHide: true,
+        });
+        if (child.pid !== undefined) {
+          unregisterRuntimeProcess();
+          unregisterRuntimeProcess = registerProviderProcess({
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            threadId,
+            pid: child.pid,
+          });
+          child.once("exit", unregisterRuntimeProcess);
+          child.once("error", unregisterRuntimeProcess);
+        }
+        return child;
+      };
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -3466,6 +3495,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         env: claudeEnvironment,
+        spawnClaudeCodeProcess,
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
@@ -3521,7 +3551,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             detail: "Failed to start Claude runtime session.",
             cause,
           }),
-      });
+      }).pipe(Effect.tapError(() => Effect.sync(unregisterRuntimeProcess)));
 
       const session: ProviderSession = {
         threadId,
@@ -3546,6 +3576,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         session,
         promptQueue,
         query: queryRuntime,
+        unregisterRuntimeProcess: () => unregisterRuntimeProcess(),
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,

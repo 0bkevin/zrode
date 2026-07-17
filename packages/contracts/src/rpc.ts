@@ -109,6 +109,7 @@ import {
   TerminalSessionSnapshot,
   TerminalWriteInput,
 } from "./terminal.ts";
+import { RuntimeResourceSnapshot } from "./resourceUsage.ts";
 import {
   DiscoveredLocalServerList,
   PreviewCloseInput,
@@ -243,6 +244,7 @@ export const WS_METHODS = {
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
+  serverGetRuntimeResourceUsage: "server.getRuntimeResourceUsage",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverSignalProcess: "server.signalProcess",
 
@@ -620,6 +622,15 @@ export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 });
 
+export const WsServerGetRuntimeResourceUsageRpc = Rpc.make(
+  WS_METHODS.serverGetRuntimeResourceUsage,
+  {
+    payload: Schema.Struct({}),
+    success: RuntimeResourceSnapshot,
+    error: EnvironmentAuthorizationError,
+  },
+);
+
 export const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
   payload: PreviewOpenInput,
   success: PreviewSessionSnapshot,
@@ -838,6 +849,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsServerGetRuntimeResourceUsageRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
   WsPreviewOpenRpc,

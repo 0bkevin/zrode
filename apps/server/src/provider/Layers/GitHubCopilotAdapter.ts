@@ -567,6 +567,11 @@ export function makeGitHubCopilotAdapter(
             ...(options?.environment ? { environment: options.environment } : {}),
             childProcessSpawner,
             cwd,
+            resourceOwner: {
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              threadId: input.threadId,
+            },
             model: requestedStartModelId,
             clientInfo: { name: "zrode", version: "0.0.0" },
             ...(mcpSession
