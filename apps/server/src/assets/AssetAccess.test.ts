@@ -54,10 +54,12 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "report.html")).toEqual({
         kind: "file",
         path: canonicalHtmlPath,
+        contentTypePath: "report.html",
       });
       expect(yield* resolveAsset(token, "report.css")).toEqual({
         kind: "file",
         path: canonicalCssPath,
+        contentTypePath: "report.css",
       });
       expect(yield* resolveAsset(token, "../secret.txt")).toBeNull();
       expect(yield* resolveAsset(token, ".env")).toBeNull();
@@ -171,9 +173,77 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "icon.png")).toEqual({
         kind: "file",
         path: canonicalImagePath,
+        contentTypePath: "assets/icon.png",
       });
       expect(yield* resolveAsset(token, "other.png")).toBeNull();
       expect(yield* resolveAsset(token, "../icon.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("issues exact workspace URLs for PDF previews", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-pdf-workspace-",
+      });
+      const pdfPath = path.join(root, "report.pdf");
+      const siblingPath = path.join(root, "other.pdf");
+      yield* fileSystem.writeFile(pdfPath, new TextEncoder().encode("%PDF-1.7\nreport"));
+      yield* fileSystem.writeFile(siblingPath, new TextEncoder().encode("%PDF-1.7\nother"));
+      const canonicalPdfPath = yield* fileSystem.realPath(pdfPath);
+
+      const result = yield* issueAssetUrl({
+        resource: {
+          _tag: "workspace-file",
+          threadId: ThreadId.make("thread-1"),
+          path: pdfPath,
+        },
+        workspaceRoot: root,
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, "report.pdf")).toEqual({
+        kind: "file",
+        path: canonicalPdfPath,
+        contentTypePath: "report.pdf",
+      });
+      expect(yield* resolveAsset(token, "other.pdf")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("preserves the signed PDF media path when the file is an in-root symlink", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-pdf-symlink-",
+      });
+      const payloadPath = path.join(root, "payload.html");
+      const pdfPath = path.join(root, "report.pdf");
+      yield* fileSystem.writeFileString(payloadPath, "<script>throw new Error('unsafe')</script>");
+      yield* fileSystem.symlink(payloadPath, pdfPath);
+      const canonicalPayloadPath = yield* fileSystem.realPath(payloadPath);
+
+      const result = yield* issueAssetUrl({
+        resource: {
+          _tag: "workspace-file",
+          threadId: ThreadId.make("thread-1"),
+          path: pdfPath,
+        },
+        workspaceRoot: root,
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, "report.pdf")).toEqual({
+        kind: "file",
+        path: canonicalPayloadPath,
+        contentTypePath: "report.pdf",
+      });
     }).pipe(Effect.provide(testLayer)),
   );
 
@@ -197,6 +267,7 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "ignored.png")).toEqual({
         kind: "file",
         path: attachmentPath,
+        contentTypePath: attachmentPath,
       });
     }).pipe(Effect.provide(testLayer)),
   );
@@ -222,7 +293,7 @@ describe("AssetAccess", () => {
           faviconSuffix.slice(0, faviconSeparatorIndex),
           faviconSuffix.slice(faviconSeparatorIndex + 1),
         ),
-      ).toEqual({ kind: "file", path: canonicalFaviconPath });
+      ).toEqual({ kind: "file", path: canonicalFaviconPath, contentTypePath: "favicon.svg" });
 
       yield* fileSystem.remove(faviconPath);
       const fallbackResult = yield* issueAssetUrl({

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   isWorkspaceBrowserPreviewPath,
+  isWorkspaceHtmlPreviewPath,
   isWorkspaceImagePreviewPath,
+  isWorkspacePdfPreviewPath,
   isWorkspacePreviewEntryPath,
 } from "./filePreview.ts";
 
@@ -15,10 +17,22 @@ describe("workspace file previews", () => {
     },
   );
 
+  it("distinguishes HTML and PDF browser previews", () => {
+    expect(isWorkspaceHtmlPreviewPath("report.HTML")).toBe(true);
+    expect(isWorkspaceHtmlPreviewPath("report.pdf")).toBe(false);
+    expect(isWorkspacePdfPreviewPath("report.PDF#page=2")).toBe(true);
+    expect(isWorkspacePdfPreviewPath("report.html")).toBe(false);
+  });
+
   it.each([
     "icon.png",
+    "animation.apng",
     "photo.JPEG",
+    "photo.jfif",
+    "photo.pjpeg",
     "animation.gif",
+    "bitmap.bmp",
+    "pointer.cur",
     "vector.svg#mark",
     "texture.webp",
     "image.avif",

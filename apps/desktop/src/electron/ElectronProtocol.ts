@@ -90,7 +90,9 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
     "style-src 'self' 'unsafe-inline'",
     `font-src 'self' ${input.scheme}: data:`,
     "worker-src 'self' blob:",
-    "frame-src 'self' https://challenges.cloudflare.com",
+    // PDF previews are loaded directly from user-configured environment asset
+    // origins. Those origins are dynamic for the same reason as connect-src.
+    "frame-src 'self' http: https: https://challenges.cloudflare.com",
     "form-action 'self'",
   ].join("; ");
 }

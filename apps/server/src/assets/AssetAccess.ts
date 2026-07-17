@@ -15,9 +15,8 @@ import {
 } from "@t3tools/contracts";
 import {
   isWorkspaceImagePreviewPath,
+  isWorkspacePdfPreviewPath,
   isWorkspacePreviewEntryPath,
-  WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
-  WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
 } from "@t3tools/shared/filePreview";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -38,24 +37,13 @@ import { resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { WORKSPACE_ASSET_EXTENSIONS } from "./AssetMediaTypes.ts";
 
 export const ASSET_ROUTE_PREFIX = "/api/assets";
 export const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#6b728080" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-fallback="project-favicon"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>`;
 
 const SIGNING_SECRET_NAME = "asset-access-signing-key";
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
-const PREVIEW_ASSET_EXTENSIONS = new Set([
-  ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
-  ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
-  ".css",
-  ".js",
-  ".mjs",
-  ".otf",
-  ".ttf",
-  ".woff",
-  ".woff2",
-]);
-
 const AssetClaimsSchema = Schema.Union([
   Schema.Struct({
     version: Schema.Literal(1),
@@ -92,7 +80,7 @@ const decodeAssetClaims = Schema.decodeUnknownOption(AssetClaimsJson);
 const encodeAssetClaims = Schema.encodeSync(AssetClaimsJson);
 
 export type ResolvedAsset =
-  | { readonly kind: "file"; readonly path: string }
+  | { readonly kind: "file"; readonly path: string; readonly contentTypePath: string }
   | { readonly kind: "project-favicon-fallback" };
 
 function decodeClaims(encodedPayload: string): AssetClaims | null {
@@ -236,21 +224,23 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
             }),
         ),
       );
-      claims = isWorkspaceImagePreviewPath(resolved.relativePath)
-        ? {
-            version: 1,
-            kind: "workspace-file-exact",
-            workspaceRoot: canonicalWorkspaceRoot,
-            relativePath: resolved.relativePath,
-            expiresAt,
-          }
-        : {
-            version: 1,
-            kind: "workspace-file",
-            workspaceRoot: canonicalWorkspaceRoot,
-            baseRelativePath: path.dirname(resolved.relativePath),
-            expiresAt,
-          };
+      claims =
+        isWorkspaceImagePreviewPath(resolved.relativePath) ||
+        isWorkspacePdfPreviewPath(resolved.relativePath)
+          ? {
+              version: 1,
+              kind: "workspace-file-exact",
+              workspaceRoot: canonicalWorkspaceRoot,
+              relativePath: resolved.relativePath,
+              expiresAt,
+            }
+          : {
+              version: 1,
+              kind: "workspace-file",
+              workspaceRoot: canonicalWorkspaceRoot,
+              baseRelativePath: path.dirname(resolved.relativePath),
+              expiresAt,
+            };
       fileName = path.basename(resolved.relativePath);
       break;
     }
@@ -386,7 +376,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       Effect.orElseSucceed(() => Option.none()),
     );
     return Option.isSome(info) && info.value.type === "File"
-      ? ({ kind: "file", path: attachmentPath } satisfies ResolvedAsset)
+      ? ({
+          kind: "file",
+          path: attachmentPath,
+          contentTypePath: attachmentPath,
+        } satisfies ResolvedAsset)
       : null;
   }
 
@@ -398,7 +392,13 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       workspaceRoot: claims.workspaceRoot,
       relativePath: claims.relativePath,
     });
-    return faviconPath ? ({ kind: "file", path: faviconPath } satisfies ResolvedAsset) : null;
+    return faviconPath
+      ? ({
+          kind: "file",
+          path: faviconPath,
+          contentTypePath: claims.relativePath,
+        } satisfies ResolvedAsset)
+      : null;
   }
 
   const decodedPath = decodeRelativePath(relativePath);
@@ -411,7 +411,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       relativePath: claims.relativePath,
     });
     return exactWorkspaceFile
-      ? ({ kind: "file", path: exactWorkspaceFile } satisfies ResolvedAsset)
+      ? ({
+          kind: "file",
+          path: exactWorkspaceFile,
+          contentTypePath: claims.relativePath,
+        } satisfies ResolvedAsset)
       : null;
   }
   const segments = decodedPath.split(/[\\/]/);
@@ -419,7 +423,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     decodedPath.length === 0 ||
     decodedPath.includes("\0") ||
     segments.some((segment) => segment === "." || segment === ".." || segment.startsWith(".")) ||
-    !PREVIEW_ASSET_EXTENSIONS.has(path.extname(decodedPath).toLowerCase())
+    !WORKSPACE_ASSET_EXTENSIONS.has(path.extname(decodedPath).toLowerCase())
   ) {
     return null;
   }
@@ -429,5 +433,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     workspaceRoot: claims.workspaceRoot,
     relativePath: joinedRelativePath,
   });
-  return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
+  return workspaceFile
+    ? ({
+        kind: "file",
+        path: workspaceFile,
+        contentTypePath: joinedRelativePath,
+      } satisfies ResolvedAsset)
+    : null;
 });

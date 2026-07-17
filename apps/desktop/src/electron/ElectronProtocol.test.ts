@@ -225,6 +225,12 @@ describe("ElectronProtocol", () => {
       "https:",
     ]);
     assert.deepEqual(directives["font-src"], ["'self'", "zrode:", "data:"]);
+    assert.deepEqual(directives["frame-src"], [
+      "'self'",
+      "http:",
+      "https:",
+      "https://challenges.cloudflare.com",
+    ]);
   });
 
   it("combines renderer cancellation with a protocol request deadline", () => {
