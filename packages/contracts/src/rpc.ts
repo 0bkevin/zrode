@@ -76,6 +76,9 @@ import {
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
+  ProjectListDirectoryError,
+  ProjectListDirectoryInput,
+  ProjectListDirectoryResult,
   ProjectFileEvent,
   ProjectReadFileError,
   ProjectInspectFileInput,
@@ -174,6 +177,7 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
+  projectsListDirectory: "projects.listDirectory",
   projectsCreateDirectory: "projects.createDirectory",
   projectsPrepareDeleteEntry: "projects.prepareDeleteEntry",
   projectsDeleteEntry: "projects.deleteEntry",
@@ -427,6 +431,12 @@ export const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries,
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
   error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsListDirectoryRpc = Rpc.make(WS_METHODS.projectsListDirectory, {
+  payload: ProjectListDirectoryInput,
+  success: ProjectListDirectoryResult,
+  error: Schema.Union([ProjectListDirectoryError, EnvironmentAuthorizationError]),
 });
 
 export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
@@ -817,6 +827,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
   WsProjectsListEntriesRpc,
+  WsProjectsListDirectoryRpc,
   WsProjectsCreateDirectoryRpc,
   WsProjectsPrepareDeleteEntryRpc,
   WsProjectsDeleteEntryRpc,

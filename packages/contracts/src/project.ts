@@ -141,6 +141,18 @@ export const ProjectListEntriesResult = Schema.Struct({
 });
 export type ProjectListEntriesResult = typeof ProjectListEntriesResult.Type;
 
+export const ProjectListDirectoryInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  /** Workspace-relative directory. Use "." for the workspace root. */
+  relativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS),
+  ),
+});
+export type ProjectListDirectoryInput = typeof ProjectListDirectoryInput.Type;
+
+export const ProjectListDirectoryResult = ProjectListEntriesResult;
+export type ProjectListDirectoryResult = typeof ProjectListDirectoryResult.Type;
+
 export const ProjectWatchFilesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
 });
@@ -440,6 +452,7 @@ export const ProjectFileOperation = Schema.Literals([
   "open",
   "stat",
   "read",
+  "read-directory",
   "close",
   "make-directory",
   "write-file",
@@ -487,6 +500,31 @@ export class ProjectReadFileError extends Schema.TaggedErrorClass<ProjectReadFil
       message:
         decodedProjectErrorMessage(props) ??
         `Failed to read workspace file '${props.relativePath}' in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+export class ProjectListDirectoryError extends Schema.TaggedErrorClass<ProjectListDirectoryError>()(
+  "ProjectListDirectoryError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    relativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: ProjectFileFailureContext) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to list workspace directory '${props.relativePath}' in '${props.cwd}'.`,
     } as any);
   }
 }

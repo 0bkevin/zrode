@@ -9,12 +9,16 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
   ProjectFileDiskRevision,
   ProjectWriteFilePrecondition,
   type ProjectCreateDirectoryInput,
   type ProjectCreateDirectoryResult,
   type ProjectDeleteEntryInput,
   type ProjectDeleteEntryResult,
+  type ProjectEntry,
+  type ProjectListDirectoryInput,
+  type ProjectListDirectoryResult,
   type ProjectPrepareDeleteEntryInput,
   type ProjectPrepareDeleteEntryResult,
   type ProjectReadFileInput,
@@ -39,6 +43,8 @@ import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+const PROJECT_LIST_DIRECTORY_MAX_ENTRIES = 5_000;
+const PROJECT_LIST_DIRECTORY_SYMLINK_CONCURRENCY = 32;
 const REVISION_READ_BUFFER_BYTES = 64 * 1024;
 const CREATE_DIRECTORY_STDERR_MAX_BYTES = 4_096;
 const CREATE_DIRECTORY_HELPER_MAX_CONCURRENCY = 4;
@@ -94,6 +100,7 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<W
       "open",
       "stat",
       "read",
+      "read-directory",
       "close",
       "make-directory",
       "write-file",
@@ -309,6 +316,13 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectReadFileInput,
     ) => Effect.Effect<
       ProjectReadFileResult,
+      WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** List one directory without applying Git or generated-file ignore rules. */
+    readonly listDirectory: (
+      input: ProjectListDirectoryInput,
+    ) => Effect.Effect<
+      ProjectListDirectoryResult,
       WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
     /**
@@ -1836,6 +1850,125 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       );
     });
 
+    const listDirectory: WorkspaceFileSystem["Service"]["listDirectory"] = Effect.fn(
+      "WorkspaceFileSystem.listDirectory",
+    )(function* (input) {
+      const workspaceRoot = path.resolve(input.cwd);
+      const target =
+        input.relativePath === "."
+          ? { absolutePath: workspaceRoot, relativePath: "." }
+          : yield* workspacePaths.resolveRelativePathWithinRoot({
+              workspaceRoot,
+              relativePath: input.relativePath,
+            });
+      const resolvedWorkspaceRoot = yield* realWorkspaceRoot({
+        workspaceRoot,
+        relativePath: input.relativePath,
+        resolvedPath: target.absolutePath,
+      });
+      const realTargetPath = yield* Effect.tryPromise({
+        try: () => NodeFSP.realpath(target.absolutePath),
+        catch: (cause) =>
+          operationError({
+            workspaceRoot,
+            relativePath: input.relativePath,
+            resolvedPath: target.absolutePath,
+            operationPath: target.absolutePath,
+            operation: "realpath-target",
+            cause,
+          }),
+      });
+      yield* assertWithinRoot({
+        workspaceRoot,
+        relativePath: input.relativePath,
+        realWorkspaceRoot: resolvedWorkspaceRoot,
+        resolvedPath: realTargetPath,
+      });
+
+      const directoryEntries = yield* Effect.tryPromise({
+        try: () => NodeFSP.readdir(realTargetPath, { withFileTypes: true }),
+        catch: (cause) =>
+          operationError({
+            workspaceRoot,
+            relativePath: input.relativePath,
+            resolvedPath: realTargetPath,
+            operationPath: realTargetPath,
+            operation: "read-directory",
+            cause,
+          }),
+      });
+      const candidates = directoryEntries
+        .filter((entry) => entry.isDirectory() || entry.isFile() || entry.isSymbolicLink())
+        .toSorted((left, right) => left.name.localeCompare(right.name));
+      const truncated = candidates.length > PROJECT_LIST_DIRECTORY_MAX_ENTRIES;
+      const limitedCandidates = candidates.slice(0, PROJECT_LIST_DIRECTORY_MAX_ENTRIES);
+      const baseRelativePath = target.relativePath === "." ? "" : target.relativePath;
+
+      const entries = yield* Effect.tryPromise({
+        try: async () => {
+          const resolved: ProjectEntry[] = [];
+          for (
+            let offset = 0;
+            offset < limitedCandidates.length;
+            offset += PROJECT_LIST_DIRECTORY_SYMLINK_CONCURRENCY
+          ) {
+            const batch = limitedCandidates.slice(
+              offset,
+              offset + PROJECT_LIST_DIRECTORY_SYMLINK_CONCURRENCY,
+            );
+            const batchEntries = await Promise.all(
+              batch.map(async (entry): Promise<ProjectEntry | null> => {
+                let kind: ProjectEntry["kind"];
+                if (entry.isDirectory()) {
+                  kind = "directory";
+                } else if (entry.isFile()) {
+                  kind = "file";
+                } else {
+                  try {
+                    const realChildPath = await NodeFSP.realpath(
+                      path.join(realTargetPath, entry.name),
+                    );
+                    if (!isWithinRoot(path, resolvedWorkspaceRoot, realChildPath)) return null;
+                    const childStat = await NodeFSP.stat(realChildPath);
+                    if (childStat.isDirectory()) kind = "directory";
+                    else if (childStat.isFile()) kind = "file";
+                    else return null;
+                  } catch {
+                    return null;
+                  }
+                }
+                const relativePath = baseRelativePath
+                  ? `${baseRelativePath}/${entry.name}`
+                  : entry.name;
+                if (relativePath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS) {
+                  return null;
+                }
+                return {
+                  path: relativePath,
+                  kind,
+                };
+              }),
+            );
+            for (const entry of batchEntries) {
+              if (entry !== null) resolved.push(entry);
+            }
+          }
+          return resolved;
+        },
+        catch: (cause) =>
+          operationError({
+            workspaceRoot,
+            relativePath: input.relativePath,
+            resolvedPath: realTargetPath,
+            operationPath: realTargetPath,
+            operation: "read-directory",
+            cause,
+          }),
+      });
+
+      return { entries, truncated };
+    });
+
     const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
       "WorkspaceFileSystem.writeFile",
     )(function* (input) {
@@ -1987,6 +2120,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
     return WorkspaceFileSystem.of({
       createDirectory,
       deleteEntry,
+      listDirectory,
       prepareDeleteEntry,
       readFile,
       writeFile,

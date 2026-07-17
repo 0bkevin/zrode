@@ -1,8 +1,9 @@
 import type { FileTreeDirectoryHandle, FileTreeItemHandle } from "@pierre/trees";
-import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectEntry, ProjectListDirectoryResult } from "@t3tools/contracts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import {
   ChevronsDownUp,
+  Eye,
   FilePlus2,
   FolderPlus,
   ListFilter,
@@ -30,7 +31,8 @@ import {
   type WorkspaceCreationKind,
   type WorkspaceCreationSession,
 } from "./fileBrowserCreation";
-import { useProjectEntriesQuery } from "./projectFilesQueryState";
+import { directoriesNeedingLazyLoad, mergeWorkspaceEntries } from "./fileBrowserLazyEntries";
+import { useProjectDirectoryQuery, useProjectEntriesQuery } from "./projectFilesQueryState";
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
@@ -49,6 +51,36 @@ interface FileBrowserPanelProps {
 }
 
 const OPTIMISTIC_ENTRY_TTL_MS = 10_000;
+
+interface ProjectDirectoryLoaderProps {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly relativePath: string;
+  readonly refreshVersion: number;
+  readonly onData: (relativePath: string, result: ProjectListDirectoryResult) => void;
+  readonly onError: (relativePath: string, error: string | null) => void;
+}
+
+function ProjectDirectoryLoader(props: ProjectDirectoryLoaderProps) {
+  const query = useProjectDirectoryQuery(props.environmentId, props.cwd, props.relativePath);
+  const previousRefreshVersionRef = useRef(props.refreshVersion);
+
+  useEffect(() => {
+    if (previousRefreshVersionRef.current === props.refreshVersion) return;
+    previousRefreshVersionRef.current = props.refreshVersion;
+    query.refresh();
+  }, [props.refreshVersion, query.refresh]);
+
+  useEffect(() => {
+    if (query.data !== null) props.onData(props.relativePath, query.data);
+  }, [props.onData, props.relativePath, query.data]);
+
+  useEffect(() => {
+    props.onError(props.relativePath, query.error);
+  }, [props.onError, props.relativePath, query.error]);
+
+  return null;
+}
 
 const TREE_UNSAFE_CSS = `
   :host {
@@ -139,7 +171,16 @@ function FileBrowserPanel({
   const { resolvedTheme } = useTheme();
   const entriesQuery = useProjectEntriesQuery(environmentId, cwd);
   const refreshEntries = entriesQuery.refresh;
-  const entries = entriesQuery.data?.entries ?? [];
+  const indexedEntries = entriesQuery.data?.entries ?? [];
+  const [showIgnoredFiles, setShowIgnoredFiles] = useState(false);
+  const [requestedDirectories, setRequestedDirectories] = useState<ReadonlySet<string>>(new Set());
+  const [lazyDirectoryResults, setLazyDirectoryResults] = useState<
+    ReadonlyMap<string, ProjectListDirectoryResult>
+  >(new Map());
+  const [lazyDirectoryErrors, setLazyDirectoryErrors] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  );
+  const [lazyRefreshVersion, setLazyRefreshVersion] = useState(0);
   const [filterVisible, setFilterVisible] = useState(false);
   const [filterValue, setFilterValue] = useState("");
   const [creationSession, setCreationSession] = useState<WorkspaceCreationSession | null>(null);
@@ -158,6 +199,77 @@ function FileBrowserPanel({
   const createDirectoryRef = useRef(onCreateDirectory);
   createFileRef.current = onCreateFile;
   createDirectoryRef.current = onCreateDirectory;
+
+  const entries = useMemo(
+    () =>
+      showIgnoredFiles
+        ? mergeWorkspaceEntries(
+            indexedEntries,
+            [...lazyDirectoryResults.values()].map((result) => result.entries),
+          )
+        : indexedEntries,
+    [indexedEntries, lazyDirectoryResults, showIgnoredFiles],
+  );
+  const loadedDirectories = useMemo(
+    () => new Set(lazyDirectoryResults.keys()),
+    [lazyDirectoryResults],
+  );
+  const lazyLoading = useMemo(
+    () =>
+      showIgnoredFiles &&
+      [...requestedDirectories].some(
+        (path) => !loadedDirectories.has(path) && !lazyDirectoryErrors.has(path),
+      ),
+    [lazyDirectoryErrors, loadedDirectories, requestedDirectories, showIgnoredFiles],
+  );
+  const lazyListingTruncated = useMemo(
+    () => [...lazyDirectoryResults.values()].some((result) => result.truncated),
+    [lazyDirectoryResults],
+  );
+  const lazyListingError = lazyDirectoryErrors.values().next().value ?? null;
+
+  const handleLazyDirectoryData = useCallback(
+    (relativePath: string, result: ProjectListDirectoryResult) => {
+      setLazyDirectoryResults((current) => {
+        if (current.get(relativePath) === result) return current;
+        const next = new Map(current);
+        next.set(relativePath, result);
+        return next;
+      });
+      setLazyDirectoryErrors((current) => {
+        if (!current.has(relativePath)) return current;
+        const next = new Map(current);
+        next.delete(relativePath);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const handleLazyDirectoryError = useCallback((relativePath: string, error: string | null) => {
+    setLazyDirectoryErrors((current) => {
+      if (error === null && !current.has(relativePath)) return current;
+      if (error !== null && current.get(relativePath) === error) return current;
+      const next = new Map(current);
+      if (error === null) next.delete(relativePath);
+      else next.set(relativePath, error);
+      return next;
+    });
+  }, []);
+
+  const refreshAllEntries = useCallback(() => {
+    refreshEntries();
+    if (!showIgnoredFiles) return;
+    setLazyDirectoryErrors(new Map());
+    setLazyRefreshVersion((version) => version + 1);
+  }, [refreshEntries, showIgnoredFiles]);
+
+  useEffect(() => {
+    setShowIgnoredFiles(false);
+    setRequestedDirectories(new Set());
+    setLazyDirectoryResults(new Map());
+    setLazyDirectoryErrors(new Map());
+  }, [cwd, environmentId]);
 
   const entryKinds = useMemo(
     () =>
@@ -225,6 +337,25 @@ function FileBrowserPanel({
   });
   modelRef.current = model;
 
+  useEffect(() => {
+    if (!showIgnoredFiles) return;
+
+    const requestFocusedDirectory = () => {
+      const focused = model.getFocusedItem();
+      if (!isFileTreeDirectoryHandle(focused) || !focused.isExpanded()) return;
+      const needed = directoriesNeedingLazyLoad({
+        expandedDirectories: [withoutTrailingSlash(focused.getPath())],
+        loadedDirectories,
+        requestedDirectories,
+      });
+      if (needed.length === 0) return;
+      setRequestedDirectories((current) => new Set([...current, ...needed]));
+    };
+
+    requestFocusedDirectory();
+    return model.subscribe(requestFocusedDirectory);
+  }, [loadedDirectories, model, requestedDirectories, showIgnoredFiles]);
+
   const commitCreation = useCallback(
     (session: WorkspaceCreationSession) => {
       if (creationSessionRef.current?.status !== "editing") return;
@@ -245,18 +376,18 @@ function FileBrowserPanel({
           creationSessionRef.current = null;
           setCreationSession(null);
           setOptimisticEntries((current) => [...current, optimistic]);
-          refreshEntries();
+          refreshAllEntries();
           if (session.kind === "file") onOpenFileRef.current(optimistic.path);
         },
         (error: unknown) => {
           creationSessionRef.current = null;
           setCreationSession(null);
           setCreationError(error instanceof Error ? error.message : "Could not create the item.");
-          refreshEntries();
+          refreshAllEntries();
         },
       );
     },
-    [refreshEntries],
+    [refreshAllEntries],
   );
   commitCreationRef.current = commitCreation;
 
@@ -397,6 +528,15 @@ function FileBrowserPanel({
     }
   }, [directoryPaths, model]);
 
+  const toggleIgnoredFiles = useCallback(() => {
+    const next = !showIgnoredFiles;
+    setShowIgnoredFiles(next);
+    setRequestedDirectories(next ? new Set(["."]) : new Set());
+    setLazyDirectoryResults(new Map());
+    setLazyDirectoryErrors(new Map());
+    setSelectedEntry(null);
+  }, [showIgnoredFiles]);
+
   const fileCount = useMemo(
     () => entries.reduce((count, entry) => count + (entry.kind === "file" ? 1 : 0), 0),
     [entries],
@@ -414,7 +554,7 @@ function FileBrowserPanel({
           return;
         }
         setSelectedEntry(null);
-        refreshEntries();
+        refreshAllEntries();
         setDeleting(false);
       },
       (error: unknown) => {
@@ -422,13 +562,26 @@ function FileBrowserPanel({
         setDeleting(false);
       },
     );
-  }, [creationSession, deleting, onDeleteEntry, refreshEntries, selectedEntry]);
+  }, [creationSession, deleting, onDeleteEntry, refreshAllEntries, selectedEntry]);
 
   return (
     <div
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-file-browser-panel={`${environmentId}:${cwd}`}
     >
+      {showIgnoredFiles
+        ? [...requestedDirectories].map((relativePath) => (
+            <ProjectDirectoryLoader
+              key={relativePath}
+              environmentId={environmentId}
+              cwd={cwd}
+              relativePath={relativePath}
+              refreshVersion={lazyRefreshVersion}
+              onData={handleLazyDirectoryData}
+              onError={handleLazyDirectoryError}
+            />
+          ))
+        : null}
       <div className="flex h-9 shrink-0 items-center gap-1 border-y border-border/60 px-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-[11px] font-semibold uppercase tracking-wide text-foreground">
@@ -438,7 +591,8 @@ function FileBrowserPanel({
             {entriesQuery.isPending && entriesQuery.data === null
               ? "Indexing…"
               : `${fileCount.toLocaleString()} files`}
-            {entriesQuery.data?.truncated ? " · partial" : ""}
+            {showIgnoredFiles ? " · ignored shown" : ""}
+            {entriesQuery.data?.truncated || lazyListingTruncated ? " · partial" : ""}
           </div>
         </div>
         <button
@@ -488,6 +642,23 @@ function FileBrowserPanel({
         </button>
         <button
           type="button"
+          className={cn(
+            "rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground",
+            showIgnoredFiles && "bg-accent text-foreground",
+          )}
+          aria-label={
+            showIgnoredFiles
+              ? "Hide ignored and generated files"
+              : "Show ignored and generated files"
+          }
+          aria-pressed={showIgnoredFiles}
+          title={showIgnoredFiles ? "Hide Ignored Files" : "Show Ignored Files"}
+          onClick={toggleIgnoredFiles}
+        >
+          <Eye className={cn("size-3.5", lazyLoading && "animate-pulse")} />
+        </button>
+        <button
+          type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label="Search in files"
           title="Search in Files"
@@ -500,9 +671,11 @@ function FileBrowserPanel({
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           aria-label="Refresh workspace files"
           title="Refresh Explorer"
-          onClick={entriesQuery.refresh}
+          onClick={refreshAllEntries}
         >
-          <RefreshCw className={cn("size-3.5", entriesQuery.isPending && "animate-spin")} />
+          <RefreshCw
+            className={cn("size-3.5", (entriesQuery.isPending || lazyLoading) && "animate-spin")}
+          />
         </button>
         <button
           type="button"
@@ -551,6 +724,11 @@ function FileBrowserPanel({
       {creationError ? (
         <div className="shrink-0 border-b border-destructive/20 px-2 py-1.5 text-[11px] leading-relaxed text-destructive">
           {creationError}
+        </div>
+      ) : null}
+      {lazyListingError ? (
+        <div className="shrink-0 border-b border-destructive/20 px-2 py-1.5 text-[11px] leading-relaxed text-destructive">
+          {lazyListingError}
         </div>
       ) : null}
       {entriesQuery.error && entriesQuery.data === null ? (

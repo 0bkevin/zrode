@@ -65,6 +65,54 @@ function diskRevision(contents: string): string {
 }
 
 it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
+  describe("listDirectory", () => {
+    it.effect("lists ignored and generated entries one directory at a time", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, ".ignored", "visible on demand\n");
+        yield* writeTextFile(cwd, "node_modules/package/index.js", "export {};\n");
+
+        const root = yield* workspaceFileSystem.listDirectory({ cwd, relativePath: "." });
+        const generated = yield* workspaceFileSystem.listDirectory({
+          cwd,
+          relativePath: "node_modules",
+        });
+
+        expect(root.entries).toEqual(
+          expect.arrayContaining([
+            { path: ".ignored", kind: "file" },
+            { path: "node_modules", kind: "directory" },
+          ]),
+        );
+        expect(generated).toEqual({
+          entries: [{ path: "node_modules/package", kind: "directory" }],
+          truncated: false,
+        });
+      }),
+    );
+
+    it.effect("keeps traversal and out-of-workspace symlinks out of lazy listings", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        yield* writeTextFile(outside, "secret.txt", "outside\n");
+        yield* fileSystem.symlink(outside, path.join(cwd, "outside-link"));
+
+        const traversalError = yield* workspaceFileSystem
+          .listDirectory({ cwd, relativePath: "../" })
+          .pipe(Effect.flip);
+        const root = yield* workspaceFileSystem.listDirectory({ cwd, relativePath: "." });
+
+        expect(traversalError).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        expect(root.entries.some((entry) => entry.path === "outside-link")).toBe(false);
+      }),
+    );
+  });
+
   describe("createDirectory", () => {
     it.effect("creates one directory under an existing parent and rejects an existing target", () =>
       Effect.gen(function* () {

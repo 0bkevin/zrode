@@ -1,5 +1,10 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, ProjectFileEvent, ProjectListEntriesResult } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectFileEvent,
+  ProjectListDirectoryResult,
+  ProjectListEntriesResult,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -16,6 +21,17 @@ interface ProjectQueryState<A> {
 
 export function getProjectEntriesQueryAtom(environmentId: EnvironmentId, cwd: string) {
   return projectEnvironment.listEntries({ environmentId, input: { cwd } });
+}
+
+export function getProjectDirectoryQueryAtom(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+) {
+  return projectEnvironment.listDirectory({
+    environmentId,
+    input: { cwd, relativePath },
+  });
 }
 
 export function getProjectFileQueryAtom(
@@ -106,6 +122,23 @@ export function useProjectEntriesQuery(
     }
   }, [cwd, latestFileEvent, queryKey, refreshAtom]);
 
+  return {
+    data: Option.getOrNull(AsyncResult.value(result)),
+    error: errorMessage(result),
+    isPending: result.waiting,
+    refresh,
+  };
+}
+
+export function useProjectDirectoryQuery(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): ProjectQueryState<ProjectListDirectoryResult> {
+  const atom = getProjectDirectoryQueryAtom(environmentId, cwd, relativePath);
+  const result = useAtomValue(atom);
+  const refreshAtom = useAtomRefresh(atom);
+  const refresh = useCallback(() => refreshAtom(), [refreshAtom]);
   return {
     data: Option.getOrNull(AsyncResult.value(result)),
     error: errorMessage(result),
