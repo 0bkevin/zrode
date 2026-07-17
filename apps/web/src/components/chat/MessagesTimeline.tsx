@@ -68,6 +68,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { StreamingAssistantMarkdown } from "./StreamingAssistantMarkdown";
 import type { AssistantNerdStats } from "./messageNerdStats";
 import {
   computeStableMessagesTimelineRows,
@@ -669,7 +670,9 @@ function resolveFinalAssistantTextForTurn(
 }
 
 function compactMinimapPreview(text: string | null | undefined) {
-  const compact = text?.replace(/\s+/g, " ").trim() ?? "";
+  // The tooltip only displays a short preview. Never scan a multi-megabyte
+  // streamed response just to derive those few visible characters.
+  const compact = text?.slice(0, 512).replace(/\s+/g, " ").trim() ?? "";
   return compact.length > 0 ? compact : null;
 }
 
@@ -1098,7 +1101,8 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <ChatMarkdown
+        <StreamingAssistantMarkdown
+          key={row.message.id}
           text={messageText}
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}

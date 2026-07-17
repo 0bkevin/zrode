@@ -4,8 +4,37 @@ import {
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
+  resolveLargeStreamingMarkdownParts,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
+
+describe("resolveLargeStreamingMarkdownParts", () => {
+  it("keeps small streaming messages in one Markdown document", () => {
+    expect(resolveLargeStreamingMarkdownParts("short response")).toBeNull();
+  });
+
+  it("uses a stable block boundary for a large streamed response", () => {
+    const prefix = `${"a".repeat(20_000)}\n\n`;
+    const tail = "b".repeat(8_000);
+    expect(resolveLargeStreamingMarkdownParts(`${prefix}${tail}`)).toEqual({ prefix, tail });
+  });
+
+  it("does not split at blank lines inside a fenced code block", () => {
+    const prefix = "Intro paragraph.\n\n";
+    const code = `\`\`\`ts\n${"const value = 1;\n\n".repeat(1_500)}`;
+    const text = `${prefix}${code}`;
+
+    expect(resolveLargeStreamingMarkdownParts(text)).toEqual({
+      prefix,
+      tail: code,
+    });
+  });
+
+  it("keeps the full live document as a cheap tail when no safe boundary exists", () => {
+    const text = "one very long paragraph ".repeat(2_000);
+    expect(resolveLargeStreamingMarkdownParts(text)).toEqual({ prefix: "", tail: text });
+  });
+});
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {
