@@ -116,6 +116,24 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(result.truncated).toBe(false);
       }),
     );
+
+    it.effect("includes gitignored dotenv files without including other ignored files", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "zrode-workspace-list-dotenv-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", ".env*\nignored.txt\n");
+        yield* writeTextFile(cwd, ".env", "SECRET=value\n");
+        yield* writeTextFile(cwd, "apps/web/.env.local", "LOCAL_SECRET=value\n");
+        yield* writeTextFile(cwd, "ignored.txt", "ignore me");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toContain(".env");
+        expect(paths).toContain("apps/web/.env.local");
+        expect(paths).not.toContain("ignored.txt");
+      }),
+    );
   });
 
   describe("search", () => {
@@ -217,6 +235,25 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(paths).not.toContain("ignored.txt");
         expect(paths.some((entryPath) => entryPath.startsWith(".convex/"))).toBe(false);
         expect(paths.some((entryPath) => entryPath.startsWith("convex/"))).toBe(false);
+      }),
+    );
+
+    it.effect("finds gitignored dotenv files from composer path search", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "zrode-workspace-search-dotenv-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", ".env*\nignored.txt\n");
+        yield* writeTextFile(cwd, ".env", "SECRET=value\n");
+        yield* writeTextFile(cwd, ".env.local", "LOCAL_SECRET=value\n");
+        yield* writeTextFile(cwd, "apps/web/.env.test", "TEST_SECRET=value\n");
+        yield* writeTextFile(cwd, "ignored.txt", "ignore me");
+
+        const result = yield* searchWorkspaceEntries({ cwd, query: "@.env", limit: 10 });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths[0]).toBe(".env");
+        expect(paths).toContain(".env.local");
+        expect(paths).toContain("apps/web/.env.test");
+        expect(paths).not.toContain("ignored.txt");
       }),
     );
 

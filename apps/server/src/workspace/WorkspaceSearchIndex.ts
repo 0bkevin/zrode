@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+
 import { FileFinder, type MixedItem, type MixedSearchResult } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -19,6 +23,19 @@ const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
 const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
 const WORKSPACE_INDEX_IDLE_TTL = "15 minutes";
 const WORKSPACE_INDEX_SCAN_POLL_INTERVAL = "50 millis";
+const WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES = 1_000;
+const WORKSPACE_SUPPLEMENTAL_GLOB = "**/.env*";
+const WORKSPACE_SUPPLEMENTAL_GLOB_EXCLUDES = ["**/.git/**", "**/node_modules/**"];
+
+interface WorkspaceSupplementalEntries {
+  readonly entries: ReadonlyArray<ProjectEntry>;
+  readonly truncated: boolean;
+}
+
+const EMPTY_SUPPLEMENTAL_ENTRIES: WorkspaceSupplementalEntries = {
+  entries: [],
+  truncated: false,
+};
 
 export class WorkspaceSearchIndexCreateFailed extends Schema.TaggedErrorClass<WorkspaceSearchIndexCreateFailed>()(
   "WorkspaceSearchIndexCreateFailed",
@@ -85,6 +102,18 @@ export class WorkspaceSearchIndexDestroyFailed extends Schema.TaggedErrorClass<W
   }
 }
 
+class WorkspaceSearchIndexSupplementalScanFailed extends Schema.TaggedErrorClass<WorkspaceSearchIndexSupplementalScanFailed>()(
+  "WorkspaceSearchIndexSupplementalScanFailed",
+  {
+    cwd: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to scan supplemental workspace files for '${this.cwd}'.`;
+  }
+}
+
 export type WorkspaceSearchIndexError =
   | WorkspaceSearchIndexCreateFailed
   | WorkspaceSearchIndexScanTimedOut
@@ -119,15 +148,20 @@ function parentPathOf(input: string): string | undefined {
   return separatorIndex === -1 ? undefined : input.slice(0, separatorIndex);
 }
 
+function isValidProjectEntryPath(input: string): boolean {
+  return (
+    input.length > 0 &&
+    input.length <= PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS &&
+    Buffer.byteLength(input, "utf8") <= PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+  );
+}
+
 function toProjectEntry(item: MixedItem): ProjectEntry | null {
   const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath));
   if (!normalizedPath) {
     return null;
   }
-  if (
-    normalizedPath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
-    Buffer.byteLength(normalizedPath, "utf8") > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
-  ) {
+  if (!isValidProjectEntryPath(normalizedPath)) {
     return null;
   }
 
@@ -136,6 +170,87 @@ function toProjectEntry(item: MixedItem): ProjectEntry | null {
     kind: item.type,
   };
 }
+
+function mergeProjectEntries(
+  primary: ReadonlyArray<ProjectEntry>,
+  supplemental: ReadonlyArray<ProjectEntry>,
+): ProjectEntry[] {
+  const entryByPath = new Map(primary.map((entry) => [entry.path, entry]));
+  for (const entry of supplemental) {
+    entryByPath.set(entry.path, entry);
+  }
+  return [...entryByPath.values()];
+}
+
+function basenameOf(input: string): string {
+  const separatorIndex = input.lastIndexOf("/");
+  return separatorIndex === -1 ? input : input.slice(separatorIndex + 1);
+}
+
+function rankSupplementalEntry(entry: ProjectEntry, query: string): number | null {
+  const path = entry.path.toLowerCase();
+  const basename = basenameOf(path);
+  const basenameWithoutLeadingDots = basename.replace(/^\.+/, "");
+  if (basenameWithoutLeadingDots === query) return 3;
+  if (basenameWithoutLeadingDots.startsWith(query)) return 2;
+  if (basename.includes(query)) return 1;
+  if (path.includes(query)) return 0;
+  return null;
+}
+
+function searchSupplementalEntries(
+  entries: ReadonlyArray<ProjectEntry>,
+  query: string,
+): ProjectEntry[] {
+  return entries
+    .flatMap((entry) => {
+      const rank = rankSupplementalEntry(entry, query);
+      return rank === null ? [] : [{ entry, rank }];
+    })
+    .toSorted(
+      (left, right) =>
+        right.rank - left.rank ||
+        left.entry.path.length - right.entry.path.length ||
+        left.entry.path.localeCompare(right.entry.path),
+    )
+    .map(({ entry }) => entry);
+}
+
+const scanSupplementalEntries = Effect.fn("WorkspaceSearchIndex.scanSupplementalEntries")(
+  function* (cwd: string) {
+    return yield* Effect.tryPromise({
+      try: async (): Promise<WorkspaceSupplementalEntries> => {
+        const entries: ProjectEntry[] = [];
+        let truncated = false;
+        for await (const dirent of NodeFSP.glob(WORKSPACE_SUPPLEMENTAL_GLOB, {
+          cwd,
+          exclude: WORKSPACE_SUPPLEMENTAL_GLOB_EXCLUDES,
+          withFileTypes: true,
+        })) {
+          if (!dirent.isFile() && !dirent.isSymbolicLink()) continue;
+          const relativePath = toPosixPath(
+            NodePath.relative(cwd, NodePath.join(dirent.parentPath, dirent.name)),
+          );
+          if (!isValidProjectEntryPath(relativePath)) continue;
+          if (entries.length >= WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          entries.push({ path: relativePath, kind: "file" });
+        }
+        return { entries, truncated };
+      },
+      catch: (cause) => new WorkspaceSearchIndexSupplementalScanFailed({ cwd, cause }),
+    });
+  },
+);
+
+const recoverSupplementalScan = (cwd: string) =>
+  Effect.catch((cause: WorkspaceSearchIndexSupplementalScanFailed) =>
+    Effect.logWarning("Failed to scan supplemental workspace files", { cwd, cause }).pipe(
+      Effect.as(null),
+    ),
+  );
 
 function mapMixedSearchResult(
   result: MixedSearchResult,
@@ -236,6 +351,9 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
         cause,
       }),
   );
+  let supplementalEntries =
+    (yield* scanSupplementalEntries(cwd).pipe(recoverSupplementalScan(cwd))) ??
+    EMPTY_SUPPLEMENTAL_ENTRIES;
 
   const runMixedSearch = Effect.fn("WorkspaceSearchIndex.runMixedSearch")(function* (
     query: string,
@@ -291,19 +409,28 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
           cause,
         }),
     );
+    const nextSupplementalEntries = yield* scanSupplementalEntries(cwd).pipe(
+      recoverSupplementalScan(cwd),
+    );
+    if (nextSupplementalEntries !== null) {
+      supplementalEntries = nextSupplementalEntries;
+    }
   });
 
   const list: WorkspaceSearchIndex["Service"]["list"] = Effect.fn("WorkspaceSearchIndex.list")(
     function* () {
       const result = yield* runMixedSearch("", WORKSPACE_INDEX_PAGE_SIZE);
       const mapped = mapMixedSearchResult(result, WORKSPACE_INDEX_MAX_ENTRIES);
-      const sortedEntries = withDirectoryAncestors(mapped.entries).toSorted((left, right) =>
-        left.path.localeCompare(right.path),
-      );
+      const sortedEntries = withDirectoryAncestors(
+        mergeProjectEntries(mapped.entries, supplementalEntries.entries),
+      ).toSorted((left, right) => left.path.localeCompare(right.path));
       const entries = sortedEntries.slice(0, WORKSPACE_INDEX_MAX_ENTRIES);
       return {
         entries,
-        truncated: mapped.truncated || entries.length < sortedEntries.length,
+        truncated:
+          mapped.truncated ||
+          supplementalEntries.truncated ||
+          entries.length < sortedEntries.length,
       };
     },
   );
@@ -312,7 +439,13 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
     "WorkspaceSearchIndex.search",
   )(function* (query, limit) {
     const result = yield* runMixedSearch(query, Math.max(1, limit + 1));
-    return mapMixedSearchResult(result, limit);
+    const mapped = mapMixedSearchResult(result, limit);
+    const supplementalMatches = searchSupplementalEntries(supplementalEntries.entries, query);
+    const mergedEntries = mergeProjectEntries(supplementalMatches, mapped.entries);
+    return {
+      entries: mergedEntries.slice(0, limit),
+      truncated: mapped.truncated || supplementalEntries.truncated || mergedEntries.length > limit,
+    };
   });
 
   return WorkspaceSearchIndex.of({ list, refresh, search });
