@@ -25,6 +25,7 @@ import {
 } from "./ThreadStatusIndicators";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderUsageStatus } from "./ProviderUsageStatus";
+import { RuntimeResourceUsageStatus } from "./RuntimeResourceUsageStatus";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
 import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
@@ -2900,6 +2901,7 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
+        <RuntimeResourceUsageStatus />
         <ProviderUsageStatus />
       </div>
     </SidebarFooter>

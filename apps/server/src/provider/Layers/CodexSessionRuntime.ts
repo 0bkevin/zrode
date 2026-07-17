@@ -5,7 +5,7 @@ import {
   type MessageId,
   ProviderDriverKind,
   ProviderItemId,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderInteractionMode,
@@ -35,6 +35,7 @@ import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import { registerProviderProcess } from "../ProviderProcessRegistry.ts";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -748,6 +749,19 @@ export const makeCodexSessionRuntime = (
             }),
         ),
       );
+
+    const unregisterProviderProcess = registerProviderProcess({
+      provider: PROVIDER,
+      providerInstanceId: options.providerInstanceId ?? ProviderInstanceId.make("codex"),
+      threadId: options.threadId,
+      pid: Number(child.pid),
+    });
+    yield* Scope.addFinalizer(runtimeScope, Effect.sync(unregisterProviderProcess));
+    yield* child.exitCode.pipe(
+      Effect.ensuring(Effect.sync(unregisterProviderProcess)),
+      Effect.ignore,
+      Effect.forkIn(runtimeScope),
+    );
 
     const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
       Layer.build,

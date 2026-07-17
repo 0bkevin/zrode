@@ -83,6 +83,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -324,6 +325,7 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
+    providerService?: Partial<ProviderService.ProviderService["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
@@ -339,6 +341,7 @@ const buildAppUnderTest = (options?: {
       ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]
     >;
     terminalManager?: Partial<TerminalManager.TerminalManager["Service"]>;
+    processDiagnostics?: Partial<ProcessDiagnostics.ProcessDiagnostics["Service"]>;
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
@@ -544,18 +547,24 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          refresh: () => Effect.succeed([]),
-          refreshInstance: () => Effect.succeed([]),
-          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
-          setProviderMaintenanceActionState: () => Effect.succeed([]),
-          streamChanges: Stream.empty,
-          ...options?.layers?.providerRegistry,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+            refresh: () => Effect.succeed([]),
+            refreshInstance: () => Effect.succeed([]),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed([]),
+            streamChanges: Stream.empty,
+            ...options?.layers?.providerRegistry,
+          }),
+          Layer.mock(ProviderService.ProviderService)({
+            listSessions: () => Effect.succeed([]),
+            ...options?.layers?.providerService,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ServerSettings.ServerSettingsService)({
@@ -591,6 +600,7 @@ const buildAppUnderTest = (options?: {
               signaled: true,
               message: Option.none(),
             }),
+          ...options?.layers?.processDiagnostics,
         }),
       ),
       Layer.provide(
@@ -6968,6 +6978,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             clear: () => Effect.void,
             restart: () => Effect.succeed(snapshot),
             close: () => Effect.void,
+            list: Effect.succeed([
+              {
+                threadId: snapshot.threadId,
+                terminalId: snapshot.terminalId,
+                cwd: snapshot.cwd,
+                worktreePath: snapshot.worktreePath,
+                status: snapshot.status,
+                pid: snapshot.pid,
+                exitCode: snapshot.exitCode,
+                exitSignal: snapshot.exitSignal,
+                hasRunningSubprocess: true,
+                label: snapshot.label,
+                updatedAt: snapshot.updatedAt,
+              },
+            ]),
+          },
+          processDiagnostics: {
+            read: Effect.succeed({
+              serverPid: process.pid,
+              readAt: TEST_EPOCH,
+              processCount: 2,
+              totalRssBytes: 3_072,
+              totalCpuPercent: 12.5,
+              processes: [
+                {
+                  pid: 1234,
+                  ppid: process.pid,
+                  pgid: Option.none(),
+                  status: "S",
+                  cpuPercent: 2.5,
+                  rssBytes: 1_024,
+                  elapsed: "00:02",
+                  command: "shell",
+                  depth: 0,
+                  childPids: [1235],
+                },
+                {
+                  pid: 1235,
+                  ppid: 1234,
+                  pgid: Option.none(),
+                  status: "R",
+                  cpuPercent: 10,
+                  rssBytes: 2_048,
+                  elapsed: "00:01",
+                  command: "task",
+                  depth: 1,
+                  childPids: [],
+                },
+              ],
+              error: Option.none(),
+            }),
           },
         },
       });
@@ -7027,6 +7088,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(restarted.terminalId, "default");
+
+      const resources = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetRuntimeResourceUsage]({})),
+      );
+      assert.equal(resources.terminals.length, 1);
+      assert.equal(resources.providers.length, 0);
+      assert.equal(resources.terminals[0]?.cpuPercent, 12.5);
+      assert.equal(resources.terminals[0]?.rssBytes, 3_072);
+      assert.equal(resources.terminals[0]?.processCount, 2);
+      assert.equal(resources.totalCpuPercent, 12.5);
+      assert.equal(resources.totalRssBytes, 3_072);
 
       yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>

@@ -20,6 +20,7 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
   WS_METHODS.serverGetProcessDiagnostics,
   WS_METHODS.serverGetProcessResourceHistory,
   WS_METHODS.serverSignalProcess,
+  WS_METHODS.serverGetRuntimeResourceUsage,
 ]);
 
 function shouldTraceRpc(method: string): boolean {

@@ -19,6 +19,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { registerProviderProcess, type ProviderProcessOwner } from "../ProviderProcessRegistry.ts";
 
 import {
   collectSessionConfigOptionValues,
@@ -59,6 +60,8 @@ export interface AcpSpawnInput {
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
+  /** Canonical owner for this child. Omitted for short-lived discovery probes. */
+  readonly resourceOwner?: ProviderProcessOwner;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
@@ -360,6 +363,19 @@ export const make = (
             }),
         ),
       );
+
+    if (options.resourceOwner !== undefined) {
+      const unregister = registerProviderProcess({
+        ...options.resourceOwner,
+        pid: Number(child.pid),
+      });
+      yield* Scope.addFinalizer(runtimeScope, Effect.sync(unregister));
+      yield* child.exitCode.pipe(
+        Effect.ensuring(Effect.sync(unregister)),
+        Effect.ignore,
+        Effect.forkIn(runtimeScope),
+      );
+    }
 
     const acpContext = yield* Layer.build(
       EffectAcpClient.layerChildProcess(child, {

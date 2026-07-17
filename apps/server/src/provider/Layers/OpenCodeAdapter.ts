@@ -27,6 +27,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { registerProviderProcess } from "../ProviderProcessRegistry.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   ProviderAdapterProcessError,
@@ -1050,6 +1051,21 @@ export function makeOpenCodeAdapter(
                 serverUrl,
                 ...(options?.environment ? { environment: options.environment } : {}),
               });
+              if (typeof server.pid === "number") {
+                const unregisterRuntimeProcess = registerProviderProcess({
+                  provider: PROVIDER,
+                  providerInstanceId: boundInstanceId,
+                  threadId: input.threadId,
+                  pid: server.pid,
+                });
+                yield* Scope.addFinalizer(sessionScope, Effect.sync(unregisterRuntimeProcess));
+                if (server.exitCode !== null) {
+                  yield* server.exitCode.pipe(
+                    Effect.ensuring(Effect.sync(unregisterRuntimeProcess)),
+                    Effect.forkIn(sessionScope),
+                  );
+                }
+              }
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
                 directory,

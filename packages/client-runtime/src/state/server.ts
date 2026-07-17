@@ -145,6 +145,13 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
     }),
+    runtimeResourceUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:runtime-resource-usage",
+      tag: WS_METHODS.serverGetRuntimeResourceUsage,
+      staleTimeMs: 0,
+      refreshIntervalMs: 2_000,
+      idleTtlMs: 10_000,
+    }),
     // Live provider usage can touch vendor APIs. Usage surfaces mount it on
     // open or after a delayed footer overview load; the slow refresh keeps the
     // overview current while server-side cache/backoff protects vendor APIs.

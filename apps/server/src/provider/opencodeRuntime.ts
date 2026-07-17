@@ -41,11 +41,13 @@ const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 export interface OpenCodeServerProcess {
   readonly url: string;
+  readonly pid?: number;
   readonly exitCode: Effect.Effect<number, never>;
 }
 
 export interface OpenCodeServerConnection {
   readonly url: string;
+  readonly pid?: number | null;
   readonly exitCode: Effect.Effect<number, never> | null;
   readonly external: boolean;
 }
@@ -469,6 +471,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
       return {
         url: readyOption.value,
+        pid: Number(child.pid),
         exitCode: child.exitCode.pipe(
           Effect.map(Number),
           Effect.orElseSucceed(() => 0),
@@ -482,6 +485,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       // We don't own externally-configured servers — no scope interaction.
       return Effect.succeed({
         url: serverUrl,
+        pid: null,
         exitCode: null,
         external: true,
       });
@@ -496,6 +500,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     }).pipe(
       Effect.map((server) => ({
         url: server.url,
+        ...(server.pid !== undefined ? { pid: server.pid } : {}),
         exitCode: server.exitCode,
         external: false,
       })),
