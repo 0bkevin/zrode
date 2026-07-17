@@ -157,6 +157,94 @@ it.layer(NodeServices.layer)("queued turn decider", (it) => {
     }),
   );
 
+  it.effect("promotes any queued message into the active turn as a steer", () =>
+    Effect.gen(function* () {
+      const firstMessageId = MessageId.make("message-first");
+      const steeredMessageId = MessageId.make("message-steered-from-queue");
+      const queuedTurns = [
+        {
+          messageId: firstMessageId,
+          text: "Keep this queued",
+          attachments: [],
+          modelSelection: MODEL_SELECTION,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          queuedAt: NOW,
+          enqueuedSequence: 3,
+        },
+        {
+          messageId: steeredMessageId,
+          text: "Use this after the current tool call",
+          attachments: [],
+          modelSelection: MODEL_SELECTION,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          queuedAt: LATER,
+          enqueuedSequence: 4,
+        },
+      ];
+      const command = {
+        type: "thread.queued-turn.steer",
+        commandId: CommandId.make("command-steer-queued"),
+        threadId: THREAD_ID,
+        messageId: steeredMessageId,
+        expectedTurnId: ACTIVE_TURN_ID,
+        createdAt: LATER,
+      } satisfies Extract<OrchestrationCommand, { type: "thread.queued-turn.steer" }>;
+
+      const decided = yield* decideOrchestrationCommand({
+        command,
+        readModel: readModel({ queuedTurns }),
+      });
+      expect(Array.isArray(decided)).toBe(true);
+      if (!Array.isArray(decided)) return;
+      expect(decided.map((event) => event.type)).toEqual([
+        "thread.queued-turn-dequeued",
+        "thread.message-sent",
+        "thread.turn-steer-requested",
+      ]);
+      const dequeued = decided[0];
+      const sent = decided[1];
+      const steer = decided[2];
+      if (
+        dequeued?.type !== "thread.queued-turn-dequeued" ||
+        sent?.type !== "thread.message-sent" ||
+        steer?.type !== "thread.turn-steer-requested"
+      ) {
+        return;
+      }
+      expect(dequeued.payload.messageId).toBe(steeredMessageId);
+      expect(sent.payload).toMatchObject({
+        messageId: steeredMessageId,
+        text: "Use this after the current tool call",
+      });
+      expect(steer.payload).toMatchObject({
+        messageId: steeredMessageId,
+        expectedTurnId: ACTIVE_TURN_ID,
+      });
+      expect(sent.causationEventId).toBe(dequeued.eventId);
+      expect(steer.causationEventId).toBe(sent.eventId);
+
+      const staleError = yield* decideOrchestrationCommand({
+        command: { ...command, expectedTurnId: TurnId.make("turn-stale") },
+        readModel: readModel({ queuedTurns }),
+      }).pipe(Effect.flip);
+      expect(staleError._tag).toBe("OrchestrationCommandInvariantError");
+
+      const missingError = yield* decideOrchestrationCommand({
+        command: { ...command, messageId: MessageId.make("message-missing") },
+        readModel: readModel({ queuedTurns }),
+      }).pipe(Effect.flip);
+      expect(missingError._tag).toBe("OrchestrationCommandInvariantError");
+
+      const inactiveError = yield* decideOrchestrationCommand({
+        command,
+        readModel: readModel({ queuedTurns, running: false }),
+      }).pipe(Effect.flip);
+      expect(inactiveError._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
   it.effect("dequeues only the FIFO head after work is settled", () =>
     Effect.gen(function* () {
       const queuedAt = "2026-07-10T11:59:00.000Z";
@@ -176,6 +264,7 @@ it.layer(NodeServices.layer)("queued turn decider", (it) => {
           modelSelection: MODEL_SELECTION,
           runtimeMode: "full-access" as const,
           interactionMode: "default" as const,
+          titleSeed: "Next task title",
           queuedAt,
           enqueuedSequence: 3,
         },
@@ -193,9 +282,18 @@ it.layer(NodeServices.layer)("queued turn decider", (it) => {
         "thread.turn-start-requested",
       ]);
       const messageEvent = decided[1];
+      const startEvent = decided[2];
       if (messageEvent?.type !== "thread.message-sent") return;
       expect(messageEvent.payload.createdAt).toBe(LATER);
       expect(messageEvent.payload.createdAt).not.toBe(queuedAt);
+      if (startEvent?.type !== "thread.turn-start-requested") return;
+      expect(startEvent.payload).toMatchObject({
+        messageId,
+        modelSelection: MODEL_SELECTION,
+        titleSeed: "Next task title",
+      });
+      expect(messageEvent.causationEventId).toBe(decided[0]?.eventId);
+      expect(startEvent.causationEventId).toBe(messageEvent.eventId);
     }),
   );
 });

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  ClientOrchestrationCommand,
   ModelSelection,
   OrchestrationCommand,
   OrchestrationEvent,
@@ -53,6 +54,7 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 
@@ -723,6 +725,40 @@ it.effect("decodes thread.last-user-message.edit commands", () =>
       assert.strictEqual(parsed.text, "Edited prompt");
       assert.strictEqual(parsed.modelSelection?.instanceId, "codex");
     }
+  }),
+);
+
+it.effect("decodes queued turn steer commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      type: "thread.queued-turn.steer",
+      commandId: "cmd-steer-queued",
+      threadId: "thread-1",
+      messageId: "message-queued-1",
+      expectedTurnId: "turn-active-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.queued-turn.steer");
+    if (parsed.type !== "thread.queued-turn.steer") return;
+    assert.strictEqual(parsed.messageId, "message-queued-1");
+    assert.strictEqual(parsed.expectedTurnId, "turn-active-1");
+  }),
+);
+
+it.effect("rejects queued turn steer commands without an expected turn", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.queued-turn.steer",
+        commandId: "cmd-steer-queued",
+        threadId: "thread-1",
+        messageId: "message-queued-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
   }),
 );
 

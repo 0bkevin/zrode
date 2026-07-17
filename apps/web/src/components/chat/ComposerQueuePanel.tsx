@@ -1,5 +1,11 @@
 import type { MessageId } from "@t3tools/contracts";
-import { Clock3Icon, PaperclipIcon, XIcon } from "lucide-react";
+import {
+  Clock3Icon,
+  CornerDownRightIcon,
+  LoaderCircleIcon,
+  PaperclipIcon,
+  XIcon,
+} from "lucide-react";
 
 import { Button } from "../ui/button";
 import { queuedTurnPreview } from "./ComposerQueuePanel.logic";
@@ -13,9 +19,18 @@ interface ComposerQueuedTurn {
 interface ComposerQueuePanelProps {
   readonly queuedTurns: ReadonlyArray<ComposerQueuedTurn>;
   readonly onCancel: (messageId: MessageId) => void;
+  readonly onSteer: (messageId: MessageId) => void;
+  readonly canSteer: boolean;
+  readonly steeringMessageIds: ReadonlySet<MessageId>;
 }
 
-export function ComposerQueuePanel({ queuedTurns, onCancel }: ComposerQueuePanelProps) {
+export function ComposerQueuePanel({
+  queuedTurns,
+  onCancel,
+  onSteer,
+  canSteer,
+  steeringMessageIds,
+}: ComposerQueuePanelProps) {
   if (queuedTurns.length === 0) {
     return null;
   }
@@ -43,6 +58,7 @@ export function ComposerQueuePanel({ queuedTurns, onCancel }: ComposerQueuePanel
         {queuedTurns.map((turn, index) => {
           const preview = queuedTurnPreview(turn);
           const attachmentCount = turn.attachments.length;
+          const isSteering = steeringMessageIds.has(turn.messageId);
 
           return (
             <li
@@ -69,8 +85,26 @@ export function ComposerQueuePanel({ queuedTurns, onCancel }: ComposerQueuePanel
               ) : null}
               <Button
                 type="button"
+                size="xs"
+                variant="ghost"
+                disabled={!canSteer || isSteering}
+                className="shrink-0 rounded-full px-1.5 text-muted-foreground/60 hover:text-foreground/80"
+                aria-label={`Steer queued message ${index + 1} after the current tool call`}
+                title="Steer after the current tool call"
+                onClick={() => onSteer(turn.messageId)}
+              >
+                {isSteering ? (
+                  <LoaderCircleIcon className="size-3 animate-spin" />
+                ) : (
+                  <CornerDownRightIcon className="size-3" />
+                )}
+                <span>Steer</span>
+              </Button>
+              <Button
+                type="button"
                 size="icon-xs"
                 variant="ghost"
+                disabled={isSteering}
                 className="shrink-0 rounded-full text-muted-foreground/50 hover:text-foreground/80"
                 aria-label={`Remove queued message ${index + 1}`}
                 onClick={() => onCancel(turn.messageId)}

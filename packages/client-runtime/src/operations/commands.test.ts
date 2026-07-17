@@ -5,6 +5,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
+  TurnId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -27,6 +28,7 @@ import {
   createProject,
   editLastUserMessage,
   retryThreadTurn,
+  steerQueuedThreadTurn,
   stopThreadSession,
 } from "./commands.ts";
 
@@ -162,6 +164,33 @@ describe("environment commands", () => {
           threadId: "thread-1",
           messageId: "message-user-1",
           createdAt: "2026-06-06T00:02:00.000Z",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches queued turn steer commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      const result = yield* steerQueuedThreadTurn({
+        commandId: CommandId.make("steer-queued-command"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: MessageId.make("message-queued-1"),
+        expectedTurnId: TurnId.make("turn-active-1"),
+        createdAt: "2026-06-06T00:02:30.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(result).toEqual({ sequence: 1 });
+      expect(dispatched).toEqual([
+        {
+          type: "thread.queued-turn.steer",
+          commandId: "steer-queued-command",
+          threadId: "thread-1",
+          messageId: "message-queued-1",
+          expectedTurnId: "turn-active-1",
+          createdAt: "2026-06-06T00:02:30.000Z",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

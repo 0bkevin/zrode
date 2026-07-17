@@ -5,6 +5,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -60,6 +61,101 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
+
+type QueuedTurn = OrchestrationReadModel["threads"][number]["queuedTurns"][number];
+type QueuedTurnSubmissionCommand = Extract<
+  OrchestrationCommand,
+  { readonly type: "thread.queued-turn.dispatch" | "thread.queued-turn.steer" }
+>;
+
+const planQueuedTurnSubmission = Effect.fnUntraced(function* (input: {
+  readonly command: QueuedTurnSubmissionCommand;
+  readonly queued: QueuedTurn;
+  readonly destination:
+    | { readonly type: "start" }
+    | { readonly type: "steer"; readonly expectedTurnId: TurnId };
+}) {
+  const { command, queued } = input;
+  const dequeuedEvent: PlannedOrchestrationEvent = {
+    ...(yield* withEventBase({
+      aggregateKind: "thread",
+      aggregateId: command.threadId,
+      occurredAt: command.createdAt,
+      commandId: command.commandId,
+    })),
+    type: "thread.queued-turn-dequeued",
+    payload: {
+      threadId: command.threadId,
+      messageId: queued.messageId,
+      dequeuedAt: command.createdAt,
+    },
+  };
+  const userMessageEvent: PlannedOrchestrationEvent = {
+    ...(yield* withEventBase({
+      aggregateKind: "thread",
+      aggregateId: command.threadId,
+      occurredAt: command.createdAt,
+      commandId: command.commandId,
+    })),
+    causationEventId: dequeuedEvent.eventId,
+    type: "thread.message-sent",
+    payload: {
+      threadId: command.threadId,
+      messageId: queued.messageId,
+      role: "user",
+      text: queued.text,
+      attachments: queued.attachments,
+      turnId: null,
+      streaming: false,
+      createdAt: command.createdAt,
+      updatedAt: command.createdAt,
+    },
+  };
+  const requestEvent: PlannedOrchestrationEvent =
+    input.destination.type === "steer"
+      ? {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          causationEventId: userMessageEvent.eventId,
+          type: "thread.turn-steer-requested",
+          payload: {
+            threadId: command.threadId,
+            messageId: queued.messageId,
+            expectedTurnId: input.destination.expectedTurnId,
+            modelSelection: queued.modelSelection,
+            runtimeMode: queued.runtimeMode,
+            interactionMode: queued.interactionMode,
+            createdAt: command.createdAt,
+          },
+        }
+      : {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          causationEventId: userMessageEvent.eventId,
+          type: "thread.turn-start-requested",
+          payload: {
+            threadId: command.threadId,
+            messageId: queued.messageId,
+            modelSelection: queued.modelSelection,
+            ...(queued.titleSeed !== undefined ? { titleSeed: queued.titleSeed } : {}),
+            runtimeMode: queued.runtimeMode,
+            interactionMode: queued.interactionMode,
+            ...(queued.sourceProposedPlan !== undefined
+              ? { sourceProposedPlan: queued.sourceProposedPlan }
+              : {}),
+            createdAt: command.createdAt,
+          },
+        };
+  return [dequeuedEvent, userMessageEvent, requestEvent] as const;
+});
 
 const PROVIDER_TURN_RETRY_REQUESTED_ACTIVITY_KIND = "provider.turn.retry.requested";
 
@@ -895,6 +991,38 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.queued-turn.steer": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (
+        targetThread.session?.status !== "running" ||
+        targetThread.session.activeTurnId !== command.expectedTurnId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Turn '${command.expectedTurnId}' is no longer active on thread '${command.threadId}'.`,
+        });
+      }
+      const queued = targetThread.queuedTurns.find(
+        (entry) => entry.messageId === command.messageId,
+      );
+      if (!queued) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Queued message '${command.messageId}' does not exist on thread '${command.threadId}'.`,
+        });
+      }
+
+      return yield* planQueuedTurnSubmission({
+        command,
+        queued,
+        destination: { type: "steer", expectedTurnId: command.expectedTurnId },
+      });
+    }
+
     case "thread.turn.retry": {
       const targetThread = yield* requireThread({
         readModel,
@@ -1416,64 +1544,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
-      const dequeuedEvent: PlannedOrchestrationEvent = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        type: "thread.queued-turn-dequeued",
-        payload: {
-          threadId: command.threadId,
-          messageId: queued.messageId,
-          dequeuedAt: command.createdAt,
-        },
-      };
-      const userMessageEvent: PlannedOrchestrationEvent = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        causationEventId: dequeuedEvent.eventId,
-        type: "thread.message-sent",
-        payload: {
-          threadId: command.threadId,
-          messageId: queued.messageId,
-          role: "user",
-          text: queued.text,
-          attachments: queued.attachments,
-          turnId: null,
-          streaming: false,
-          createdAt: command.createdAt,
-          updatedAt: command.createdAt,
-        },
-      };
-      const turnStartRequestedEvent: PlannedOrchestrationEvent = {
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: command.createdAt,
-          commandId: command.commandId,
-        })),
-        causationEventId: userMessageEvent.eventId,
-        type: "thread.turn-start-requested",
-        payload: {
-          threadId: command.threadId,
-          messageId: queued.messageId,
-          modelSelection: queued.modelSelection,
-          ...(queued.titleSeed !== undefined ? { titleSeed: queued.titleSeed } : {}),
-          runtimeMode: queued.runtimeMode,
-          interactionMode: queued.interactionMode,
-          ...(queued.sourceProposedPlan !== undefined
-            ? { sourceProposedPlan: queued.sourceProposedPlan }
-            : {}),
-          createdAt: command.createdAt,
-        },
-      };
-      return [dequeuedEvent, userMessageEvent, turnStartRequestedEvent];
+      return yield* planQueuedTurnSubmission({
+        command,
+        queued,
+        destination: { type: "start" },
+      });
     }
 
     case "thread.turn.quiesce": {

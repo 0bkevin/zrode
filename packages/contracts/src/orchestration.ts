@@ -686,6 +686,15 @@ const ThreadQueuedTurnCancelCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadQueuedTurnSteerCommand = Schema.Struct({
+  type: Schema.Literal("thread.queued-turn.steer"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  expectedTurnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadTurnRetryCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.retry"),
   commandId: CommandId,
@@ -800,6 +809,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnSteerCommand,
   ThreadTurnEnqueueCommand,
   ThreadQueuedTurnCancelCommand,
+  ThreadQueuedTurnSteerCommand,
   ThreadTurnRetryCommand,
   ThreadLastUserMessageEditCommand,
   ThreadTurnInterruptCommand,
@@ -826,6 +836,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnSteerCommand,
   ClientThreadTurnEnqueueCommand,
   ThreadQueuedTurnCancelCommand,
+  ThreadQueuedTurnSteerCommand,
   ThreadTurnRetryCommand,
   ThreadLastUserMessageEditCommand,
   ThreadTurnInterruptCommand,

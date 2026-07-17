@@ -202,7 +202,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                 <span className="grid min-w-0 gap-0.5">
                   <span>Steer current turn</span>
                   <span className="text-muted-foreground text-xs font-normal">
-                    Send this as guidance right now
+                    Deliver after the current tool call
                   </span>
                 </span>
               </MenuItem>

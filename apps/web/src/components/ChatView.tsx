@@ -976,6 +976,9 @@ function ChatViewContent(props: ChatViewProps) {
   const cancelQueuedThreadTurn = useAtomCommand(threadEnvironment.cancelQueuedTurn, {
     reportFailure: false,
   });
+  const steerQueuedThreadTurn = useAtomCommand(threadEnvironment.steerQueuedTurn, {
+    reportFailure: false,
+  });
   const retryThreadTurn = useAtomCommand(threadEnvironment.retryTurn, { reportFailure: false });
   const editLastUserMessage = useAtomCommand(threadEnvironment.editLastUserMessage, {
     reportFailure: false,
@@ -1086,7 +1089,27 @@ function ChatViewContent(props: ChatViewProps) {
     optimisticallyCancelledQueuedMessageIds,
   );
   optimisticallyCancelledQueuedMessageIdsRef.current = optimisticallyCancelledQueuedMessageIds;
+  const [optimisticallySteeredQueuedMessageIds, setOptimisticallySteeredQueuedMessageIds] =
+    useState<ReadonlySet<MessageId>>(() => new Set());
+  const optimisticallySteeredQueuedMessageIdsRef = useRef(optimisticallySteeredQueuedMessageIds);
+  optimisticallySteeredQueuedMessageIdsRef.current = optimisticallySteeredQueuedMessageIds;
   const pendingQueuedTurnSubmissionIdsRef = useRef(new Set<MessageId>());
+  const pendingQueuedTurnSteerRequestsRef = useRef(
+    new Map<
+      MessageId,
+      {
+        readonly environmentId: EnvironmentId;
+        readonly threadId: ThreadId;
+        readonly messageId: MessageId;
+        readonly expectedTurnId: TurnId;
+      }
+    >(),
+  );
+  const [queuedTurnSteerInFlightIds, setQueuedTurnSteerInFlightIds] = useState<
+    ReadonlySet<MessageId>
+  >(new Set());
+  const queuedTurnSteerInFlightIdsRef = useRef(queuedTurnSteerInFlightIds);
+  queuedTurnSteerInFlightIdsRef.current = queuedTurnSteerInFlightIds;
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
     Record<string, string | null>
   >({});
@@ -1795,6 +1818,126 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeThread, setQueuedTurnOptimisticallyCancelled, submitQueuedTurnCancellation],
   );
+  const setQueuedTurnSteerInFlight = useCallback((messageId: MessageId, inFlight: boolean) => {
+    const current = queuedTurnSteerInFlightIdsRef.current;
+    if (current.has(messageId) === inFlight) {
+      return;
+    }
+    const next = new Set(current);
+    if (inFlight) {
+      next.add(messageId);
+    } else {
+      next.delete(messageId);
+    }
+    queuedTurnSteerInFlightIdsRef.current = next;
+    setQueuedTurnSteerInFlightIds(next);
+  }, []);
+  const setQueuedTurnOptimisticallySteered = useCallback(
+    (messageId: MessageId, steered: boolean) => {
+      const current = optimisticallySteeredQueuedMessageIdsRef.current;
+      if (current.has(messageId) === steered) {
+        return;
+      }
+      const next = new Set(current);
+      if (steered) {
+        next.add(messageId);
+      } else {
+        next.delete(messageId);
+      }
+      optimisticallySteeredQueuedMessageIdsRef.current = next;
+      setOptimisticallySteeredQueuedMessageIds(next);
+    },
+    [],
+  );
+  const submitQueuedTurnSteer = useCallback(
+    async (target: {
+      readonly environmentId: EnvironmentId;
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId;
+      readonly expectedTurnId: TurnId;
+    }) => {
+      let failure: AtomCommandResult<unknown, unknown> | null = null;
+      try {
+        const result = await steerQueuedThreadTurn({
+          environmentId: target.environmentId,
+          input: {
+            threadId: target.threadId,
+            messageId: target.messageId,
+            expectedTurnId: target.expectedTurnId,
+          },
+        });
+        if (result._tag === "Failure") {
+          failure = result;
+        }
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to steer queued message",
+            description:
+              error instanceof Error
+                ? error.message
+                : "The queued message was not sent to the current turn.",
+          }),
+        );
+        pendingQueuedTurnSteerRequestsRef.current.delete(target.messageId);
+        setQueuedTurnSteerInFlight(target.messageId, false);
+        return;
+      }
+
+      pendingQueuedTurnSteerRequestsRef.current.delete(target.messageId);
+      setQueuedTurnSteerInFlight(target.messageId, false);
+      if (failure === null) {
+        setQueuedTurnOptimisticallySteered(target.messageId, true);
+        removeOptimisticQueuedTurn(target.messageId);
+        return;
+      }
+      if (!isAtomCommandInterrupted(failure)) {
+        const error = squashAtomCommandFailure(failure);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to steer queued message",
+            description:
+              error instanceof Error
+                ? error.message
+                : "The queued message was not sent to the current turn.",
+          }),
+        );
+      }
+    },
+    [
+      removeOptimisticQueuedTurn,
+      setQueuedTurnOptimisticallySteered,
+      setQueuedTurnSteerInFlight,
+      steerQueuedThreadTurn,
+    ],
+  );
+  const handleSteerQueuedTurn = useCallback(
+    (messageId: MessageId) => {
+      const expectedTurnId = activeThread?.session?.activeTurnId ?? null;
+      if (!activeThread || expectedTurnId === null) {
+        return;
+      }
+      if (queuedTurnSteerInFlightIdsRef.current.has(messageId)) {
+        return;
+      }
+
+      const target = {
+        environmentId: activeThread.environmentId,
+        threadId: activeThread.id,
+        messageId,
+        expectedTurnId,
+      };
+      setQueuedTurnSteerInFlight(messageId, true);
+      if (pendingQueuedTurnSubmissionIdsRef.current.has(messageId)) {
+        pendingQueuedTurnSteerRequestsRef.current.set(messageId, target);
+        return;
+      }
+      void submitQueuedTurnSteer(target);
+    },
+    [activeThread, setQueuedTurnSteerInFlight, submitQueuedTurnSteer],
+  );
   const sentMessageIds = useMemo(
     () => new Set<MessageId>(activeThread?.messages.map((message) => message.id) ?? []),
     [activeThread?.messages],
@@ -1810,21 +1953,38 @@ function ChatViewContent(props: ChatViewProps) {
         : [],
     [activeThread, optimisticQueuedTurns],
   );
-  const composerQueuedTurns = useMemo(
-    () =>
-      reconcileQueuedTurnPreviews({
-        serverQueuedTurns: activeThread?.queuedTurns ?? [],
-        optimisticQueuedTurns: activeOptimisticQueuedTurns,
-        hiddenMessageIds: optimisticallyCancelledQueuedMessageIds,
-        sentMessageIds,
-      }),
-    [
-      activeOptimisticQueuedTurns,
-      activeThread?.queuedTurns,
-      optimisticallyCancelledQueuedMessageIds,
+  const composerQueuedTurns = useMemo(() => {
+    const hiddenMessageIds = new Set([
+      ...optimisticallyCancelledQueuedMessageIds,
+      ...optimisticallySteeredQueuedMessageIds,
+    ]);
+    return reconcileQueuedTurnPreviews({
+      serverQueuedTurns: activeThread?.queuedTurns ?? [],
+      optimisticQueuedTurns: activeOptimisticQueuedTurns,
+      hiddenMessageIds,
       sentMessageIds,
-    ],
-  );
+    });
+  }, [
+    activeOptimisticQueuedTurns,
+    activeThread?.queuedTurns,
+    optimisticallyCancelledQueuedMessageIds,
+    optimisticallySteeredQueuedMessageIds,
+    sentMessageIds,
+  ]);
+  useEffect(() => {
+    if (!activeThread || optimisticallySteeredQueuedMessageIds.size === 0) {
+      return;
+    }
+    const next = new Set(
+      [...optimisticallySteeredQueuedMessageIds].filter(
+        (messageId) => !sentMessageIds.has(messageId),
+      ),
+    );
+    if (next.size !== optimisticallySteeredQueuedMessageIds.size) {
+      optimisticallySteeredQueuedMessageIdsRef.current = next;
+      setOptimisticallySteeredQueuedMessageIds(next);
+    }
+  }, [activeThread, optimisticallySteeredQueuedMessageIds, sentMessageIds]);
   useEffect(() => {
     if (!activeThread || optimisticQueuedTurnsRef.current.length === 0) {
       return;
@@ -5336,15 +5496,23 @@ function ChatViewContent(props: ChatViewProps) {
 
     if (submissionBehavior === "queue") {
       pendingQueuedTurnSubmissionIdsRef.current.delete(messageIdForSend);
+      const pendingSteerTarget = pendingQueuedTurnSteerRequestsRef.current.get(messageIdForSend);
       if (
         turnSubmissionSucceeded &&
         optimisticallyCancelledQueuedMessageIdsRef.current.has(messageIdForSend)
       ) {
+        pendingQueuedTurnSteerRequestsRef.current.delete(messageIdForSend);
+        setQueuedTurnSteerInFlight(messageIdForSend, false);
         await submitQueuedTurnCancellation({
           environmentId: activeThread.environmentId,
           threadId: threadIdForSend,
           messageId: messageIdForSend,
         });
+      } else if (turnSubmissionSucceeded && pendingSteerTarget) {
+        await submitQueuedTurnSteer(pendingSteerTarget);
+      } else if (pendingSteerTarget) {
+        pendingQueuedTurnSteerRequestsRef.current.delete(messageIdForSend);
+        setQueuedTurnSteerInFlight(messageIdForSend, false);
       }
     }
 
@@ -6663,6 +6831,9 @@ function ChatViewContent(props: ChatViewProps) {
                     <ComposerQueuePanel
                       queuedTurns={composerQueuedTurns}
                       onCancel={handleCancelQueuedTurn}
+                      onSteer={handleSteerQueuedTurn}
+                      canSteer={phase === "running" && activeThread?.session?.activeTurnId != null}
+                      steeringMessageIds={queuedTurnSteerInFlightIds}
                     />
                   ) : null}
                   <div className="relative z-10">
