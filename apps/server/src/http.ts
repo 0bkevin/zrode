@@ -30,6 +30,7 @@ import {
   FALLBACK_PROJECT_FAVICON_SVG,
   resolveAsset,
 } from "./assets/AssetAccess.ts";
+import { makeAssetFileResponse } from "./assets/AssetFileResponse.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
@@ -207,11 +208,14 @@ export const assetRouteLayer = HttpRouter.add(
       });
     }
 
-    return yield* HttpServerResponse.file(asset.path, {
-      status: 200,
-      headers: {
-        "Cache-Control": "private, max-age=3600",
-        "X-Content-Type-Options": "nosniff",
+    return yield* makeAssetFileResponse({
+      path: asset.path,
+      contentTypePath: asset.contentTypePath,
+      requestHeaders: {
+        range: request.headers.range,
+        "if-range": request.headers["if-range"],
+        "if-none-match": request.headers["if-none-match"],
+        "if-modified-since": request.headers["if-modified-since"],
       },
     }).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),

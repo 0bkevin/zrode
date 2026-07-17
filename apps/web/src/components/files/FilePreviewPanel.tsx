@@ -82,7 +82,11 @@ import {
   updateLocalEditorContents,
 } from "./editableFileState";
 import { fileBreadcrumbs } from "./filePath";
-import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import {
+  isMarkdownPreviewFile,
+  setMarkdownTaskChecked,
+  workspaceAssetPreviewKind,
+} from "./filePreviewMode";
 import {
   fileRevealTargetLine,
   fileRevealTargetToEditorSelection,
@@ -98,6 +102,7 @@ import {
   workspaceEditorTheme,
 } from "./workspaceEditorPresentation";
 import { WorkspaceEditorWorkerPoolProvider } from "./WorkspaceEditorWorkerPoolProvider";
+import { WorkspaceAssetPreview } from "./WorkspaceAssetPreview";
 
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
@@ -1007,10 +1012,11 @@ function FilePreviewPanelContent({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
+  const assetPreviewKind = relativePath ? workspaceAssetPreviewKind(relativePath) : null;
   const { handle: fileDocument, snapshot: fileSnapshot } = useFileDocument(
     environmentId,
     cwd,
-    relativePath,
+    assetPreviewKind === null ? relativePath : null,
     environment?.connection.phase === "connected",
   );
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
@@ -1265,7 +1271,16 @@ function FilePreviewPanelContent({
               ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
             }}
           >
-            {relativePath && fileError && fileData === null ? (
+            {relativePath && assetPreviewKind && absolutePath ? (
+              <WorkspaceAssetPreview
+                absolutePath={absolutePath}
+                cwd={cwd}
+                environmentId={environmentId}
+                kind={assetPreviewKind}
+                relativePath={relativePath}
+                threadId={threadRef.threadId}
+              />
+            ) : relativePath && fileError && fileData === null ? (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-xs leading-relaxed text-destructive">
                 <p>{fileError}</p>
                 {fileDocument ? (

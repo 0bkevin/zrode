@@ -5,7 +5,12 @@ import {
   normalizeFileCommentRange,
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
-import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import {
+  isMarkdownPreviewFile,
+  setMarkdownTaskChecked,
+  workspaceAssetPreviewKind,
+  workspaceFileNeedsTextDocument,
+} from "./filePreviewMode";
 
 describe("file comment annotations", () => {
   it("normalizes and formats selected line ranges", () => {
@@ -64,6 +69,29 @@ describe("isMarkdownPreviewFile", () => {
     expect(isMarkdownPreviewFile("docs/guide.txt")).toBe(false);
     expect(isMarkdownPreviewFile("docs/markdown.ts")).toBe(false);
   });
+});
+
+describe("workspace asset preview mode", () => {
+  it.each(["image.png", "photo.JFIF", "animation.apng", "diagram.svg", "bitmap.bmp"])(
+    "opens image %s without the text document runtime",
+    (path) => {
+      expect(workspaceAssetPreviewKind(path)).toBe("image");
+      expect(workspaceFileNeedsTextDocument(path)).toBe(false);
+    },
+  );
+
+  it("opens PDFs without the text document runtime", () => {
+    expect(workspaceAssetPreviewKind("docs/report.PDF")).toBe("pdf");
+    expect(workspaceFileNeedsTextDocument("docs/report.PDF")).toBe(false);
+  });
+
+  it.each(["README.md", "src/index.ts", "report.html"])(
+    "keeps text file %s in the document runtime",
+    (path) => {
+      expect(workspaceAssetPreviewKind(path)).toBeNull();
+      expect(workspaceFileNeedsTextDocument(path)).toBe(true);
+    },
+  );
 });
 
 describe("setMarkdownTaskChecked", () => {
