@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
@@ -169,10 +170,13 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   };
 });
 
-const snapshot = (thread: OrchestrationThread): OrchestrationThreadStreamItem => ({
+const snapshot = (
+  thread: OrchestrationThread,
+  snapshotSequence = 1,
+): OrchestrationThreadStreamItem => ({
   kind: "snapshot",
   snapshot: {
-    snapshotSequence: 1,
+    snapshotSequence,
     thread,
   },
 });
@@ -218,6 +222,58 @@ const deleted = (): OrchestrationThreadStreamItem => ({
   },
 });
 
+const streamingDelta = (text: string, sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-stream-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T01:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    payload: {
+      threadId: THREAD_ID,
+      messageId: MessageId.make("assistant-1"),
+      role: "assistant",
+      text,
+      turnId: null,
+      streaming: true,
+      createdAt: "2026-04-01T01:00:00.000Z",
+      updatedAt: "2026-04-01T01:00:00.000Z",
+    },
+  },
+});
+
+const streamingCompleted = (sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-stream-completed-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T01:00:01.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    payload: {
+      threadId: THREAD_ID,
+      messageId: MessageId.make("assistant-1"),
+      role: "assistant",
+      text: "",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-04-01T01:00:00.000Z",
+      updatedAt: "2026-04-01T01:00:01.000Z",
+    },
+  },
+});
+
 describe("EnvironmentThreads", () => {
   it.effect("publishes cached data before a live snapshot arrives", () =>
     Effect.gen(function* () {
@@ -250,6 +306,112 @@ describe("EnvironmentThreads", () => {
 
       expect(Option.getOrThrow(state.data).title).toBe("Live title");
       expect((yield* Ref.get(harness.savedThreads)).at(-1)?.title).toBe("Live title");
+    }),
+  );
+
+  it.effect("coalesces streaming message deltas before publishing thread state", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isSome(value.data),
+      );
+
+      yield* Queue.offer(harness.inputs, streamingDelta("hello ", 2));
+      yield* Queue.offer(harness.inputs, streamingDelta("world", 3));
+      // Let the subscription consume both inputs and arm its presentation
+      // delay before advancing the virtual clock.
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      expect(Option.getOrThrow((yield* Ref.get(harness.latest)).data).messages).toEqual([]);
+
+      yield* TestClock.adjust("40 millis");
+      const streamed = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) && value.data.value.messages[0]?.text === "hello world",
+      );
+      expect(Option.getOrThrow(streamed.data).messages).toHaveLength(1);
+    }),
+  );
+
+  it.effect("flushes pending text immediately when a streaming message completes", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isSome(value.data),
+      );
+
+      yield* Queue.offer(harness.inputs, streamingDelta("complete text", 2));
+      yield* Queue.offer(harness.inputs, streamingCompleted(3));
+      const completed = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && value.data.value.messages[0]?.streaming === false,
+      );
+      expect(Option.getOrThrow(completed.data).messages[0]?.text).toBe("complete text");
+
+      // A queued presentation signal from the delta must be harmless after
+      // the immediate completion flush.
+      yield* TestClock.adjust("80 millis");
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      expect(Option.getOrThrow((yield* Ref.get(harness.latest)).data).messages[0]?.text).toBe(
+        "complete text",
+      );
+    }),
+  );
+
+  it.effect("discards pending pre-snapshot deltas instead of duplicating snapshot text", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isSome(value.data),
+      );
+
+      yield* Queue.offer(harness.inputs, streamingDelta("stale delta", 2));
+      yield* Queue.offer(
+        harness.inputs,
+        snapshot(
+          {
+            ...BASE_THREAD,
+            messages: [
+              {
+                id: MessageId.make("assistant-1"),
+                role: "assistant",
+                text: "authoritative snapshot",
+                turnId: null,
+                streaming: false,
+                createdAt: "2026-04-01T01:00:00.000Z",
+                updatedAt: "2026-04-01T01:00:01.000Z",
+              },
+            ],
+          },
+          3,
+        ),
+      );
+
+      const restored = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) &&
+          value.data.value.messages[0]?.text === "authoritative snapshot",
+      );
+      yield* TestClock.adjust("80 millis");
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      expect(Option.getOrThrow(restored.data).messages[0]?.text).toBe("authoritative snapshot");
+      expect(Option.getOrThrow((yield* Ref.get(harness.latest)).data).messages[0]?.text).toBe(
+        "authoritative snapshot",
+      );
     }),
   );
 

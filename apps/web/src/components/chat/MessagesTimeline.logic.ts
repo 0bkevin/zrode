@@ -16,6 +16,87 @@ export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
 export const TIMELINE_CONTENT_MAX_WIDTH = 768;
 export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
+export const LARGE_STREAMING_MARKDOWN_THRESHOLD = 24_000;
+
+export interface LargeStreamingMarkdownParts {
+  readonly prefix: string;
+  readonly tail: string;
+}
+
+interface MarkdownFence {
+  readonly marker: "`" | "~";
+  readonly length: number;
+}
+
+function openingMarkdownFence(line: string): MarkdownFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  const fence = match?.[1];
+  if (!fence) return null;
+  return {
+    marker: fence[0] as MarkdownFence["marker"],
+    length: fence.length,
+  };
+}
+
+function closesMarkdownFence(line: string, fence: MarkdownFence): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length < fence.length || trimmed[0] !== fence.marker) {
+    return false;
+  }
+  let markerLength = 0;
+  while (trimmed[markerLength] === fence.marker) {
+    markerLength += 1;
+  }
+  return markerLength >= fence.length && trimmed.slice(markerLength).trim().length === 0;
+}
+
+function lastTopLevelMarkdownBlockBoundary(text: string, limit: number): number {
+  let cursor = 0;
+  let fence: MarkdownFence | null = null;
+  let lastBoundary = 0;
+
+  while (cursor <= limit) {
+    const newline = text.indexOf("\n", cursor);
+    const lineEnd = newline === -1 ? text.length : newline;
+    if (lineEnd > limit) break;
+    const line = text.slice(cursor, lineEnd);
+
+    if (fence) {
+      if (closesMarkdownFence(line, fence)) {
+        fence = null;
+      }
+    } else {
+      fence = openingMarkdownFence(line);
+      if (fence === null && line.trim().length === 0) {
+        lastBoundary = newline === -1 ? lineEnd : lineEnd + 1;
+      }
+    }
+
+    if (newline === -1) break;
+    cursor = newline + 1;
+  }
+
+  return lastBoundary;
+}
+
+/**
+ * Freeze a sizeable, preferably block-aligned prefix for Markdown rendering.
+ * Further streamed text can then update as one cheap text node instead of
+ * reparsing the entire growing document for every publication.
+ */
+export function resolveLargeStreamingMarkdownParts(
+  text: string,
+): LargeStreamingMarkdownParts | null {
+  if (text.length <= LARGE_STREAMING_MARKDOWN_THRESHOLD) {
+    return null;
+  }
+
+  const prefixEnd = lastTopLevelMarkdownBlockBoundary(text, LARGE_STREAMING_MARKDOWN_THRESHOLD);
+  return {
+    prefix: text.slice(0, prefixEnd),
+    tail: text.slice(prefixEnd),
+  };
+}
 
 export interface TimelineEndState {
   readonly isAtEnd?: boolean;

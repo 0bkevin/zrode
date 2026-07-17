@@ -25,7 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makePartitionedDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -1808,7 +1808,15 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processInputSafely);
+  // Provider output is multiplexed across threads. Keep each thread ordered,
+  // but allow unrelated threads to progress concurrently so a token-heavy
+  // response cannot hide lifecycle and output events from every other thread.
+  const worker = yield* makePartitionedDrainableWorker({
+    concurrency: 8,
+    key: (input: RuntimeIngestionInput) =>
+      input.source === "runtime" ? input.event.threadId : input.event.payload.threadId,
+    process: processInputSafely,
+  });
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
