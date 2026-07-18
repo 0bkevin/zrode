@@ -97,6 +97,18 @@ const CODEX_APP_SERVER_USAGE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`;
 const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
+const CodexResetCreditConsumePayload = Schema.Struct({
+  redeem_request_id: Schema.String,
+});
+const setCodexResetCreditConsumeBody = HttpClientRequest.schemaBodyJson(
+  CodexResetCreditConsumePayload,
+);
+const CodexResetCreditConsumeResponse = Schema.Struct({
+  code: Schema.Literals(["reset", "nothing_to_reset", "no_credit", "already_redeemed"]),
+});
+const decodeCodexResetCreditConsumeResponse = Schema.decodeUnknownOption(
+  CodexResetCreditConsumeResponse,
+);
 const GROK_DEFAULT_API_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 const KILO_DEFAULT_API_BASE_URL = "https://api.kilo.ai";
 const GROK_AUTH_REFRESH_TIMEOUT = "15 seconds" as const;
@@ -1652,11 +1664,20 @@ interface CodexResetCreditPayload {
   readonly expires_at?: unknown;
 }
 
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 export function parseCodexResetCredits(payload: unknown): ProviderUsageResetCredits | null {
   if (payload === null || typeof payload !== "object") {
     return null;
   }
-  const credits = (payload as { credits?: ReadonlyArray<CodexResetCreditPayload> | null }).credits;
+  const resetCreditsPayload = payload as {
+    readonly credits?: ReadonlyArray<CodexResetCreditPayload> | null;
+    readonly available_count?: unknown;
+    readonly total_earned_count?: unknown;
+  };
+  const credits = resetCreditsPayload.credits;
   if (!Array.isArray(credits)) {
     return null;
   }
@@ -1668,8 +1689,10 @@ export function parseCodexResetCredits(payload: unknown): ProviderUsageResetCred
     .map((credit) => normalizeResetsAt(credit.expires_at))
     .filter((value): value is number => value !== null);
   return {
-    availableCount: available.length,
-    totalEarnedCount: credits.length,
+    availableCount:
+      nonNegativeIntegerOrNull(resetCreditsPayload.available_count) ?? available.length,
+    totalEarnedCount:
+      nonNegativeIntegerOrNull(resetCreditsPayload.total_earned_count) ?? credits.length,
     nextExpiresAt: expirations.length > 0 ? Math.min(...expirations) : null,
   };
 }
@@ -1798,12 +1821,12 @@ const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit
       message: "No rate-limit reset credits are available on this account.",
     } satisfies ServerConsumeCodexResetCreditResult;
   }
-  const request = HttpClientRequest.post(CODEX_RESET_CREDITS_CONSUME_URL).pipe(
+  const request = yield* HttpClientRequest.post(CODEX_RESET_CREDITS_CONSUME_URL).pipe(
     HttpClientRequest.setHeaders({
       ...codexBackendHeaders(auth),
       "Content-Type": "application/json",
     }),
-    HttpClientRequest.bodyText("{}", "application/json"),
+    setCodexResetCreditConsumeBody({ redeem_request_id: NodeCrypto.randomUUID() }),
   );
   const response = yield* fetchJsonWithTimeout(request);
   if (response === null) {
@@ -1834,9 +1857,37 @@ const performConsumeCodexResetCredit = Effect.fn("performConsumeCodexResetCredit
       message: `Codex reset-credit API returned HTTP ${response.status}.`,
     } satisfies ServerConsumeCodexResetCreditResult;
   }
-  setConsumeResetCooldown(DateTime.toEpochMillis(yield* DateTime.now), CONSUME_RESET_COOLDOWN_MS);
-  invalidateProviderUsageCache("codex");
-  return { ok: true, message: null } satisfies ServerConsumeCodexResetCreditResult;
+  const consumeResponse = Option.getOrNull(decodeCodexResetCreditConsumeResponse(response.payload));
+  const completedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  setConsumeResetCooldown(completedAt, CONSUME_RESET_COOLDOWN_MS);
+  if (consumeResponse === null) {
+    // A successful HTTP status with an unreadable outcome is ambiguous: the
+    // backend may have spent the credit before its response was lost or
+    // changed. Refresh usage and prevent an immediate second consume.
+    invalidateProviderUsageCache("codex");
+    return {
+      ok: false,
+      message:
+        "Codex returned an unrecognized reset response — the reset may still have gone through. Usage will refresh shortly; wait a moment before retrying.",
+    } satisfies ServerConsumeCodexResetCreditResult;
+  }
+  switch (consumeResponse.code) {
+    case "reset":
+    case "already_redeemed":
+      invalidateProviderUsageCache("codex");
+      return { ok: true, message: null } satisfies ServerConsumeCodexResetCreditResult;
+    case "nothing_to_reset":
+      return {
+        ok: false,
+        message: "Codex did not consume a reset because there is no eligible limit to reset.",
+      } satisfies ServerConsumeCodexResetCreditResult;
+    case "no_credit":
+      invalidateProviderUsageCache("codex");
+      return {
+        ok: false,
+        message: "Codex did not consume a reset because no reset credits are available.",
+      } satisfies ServerConsumeCodexResetCreditResult;
+  }
 });
 
 /**

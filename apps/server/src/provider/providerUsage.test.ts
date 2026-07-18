@@ -15,6 +15,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
@@ -51,6 +52,7 @@ import {
 const TestLayer = Layer.mergeAll(ProcessRunner.layer, FetchHttpClient.layer).pipe(
   Layer.provideMerge(NodeServicesLayer),
 );
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 /** Both providers disabled: usage resolves instantly with no external calls. */
 const DISABLED_SETTINGS: ServerSettings = {
@@ -747,6 +749,19 @@ describe("parseCodexResetCredits", () => {
     const parsed = parseCodexResetCredits({ credits: [{ status: "redeemed" }] });
     expect(parsed).toEqual({ availableCount: 0, totalEarnedCount: 1, nextExpiresAt: null });
   });
+
+  it("uses authoritative counts when detailed credit rows are capped", () => {
+    const parsed = parseCodexResetCredits({
+      credits: [{ status: "available", expires_at: "2026-07-10T00:00:00Z" }],
+      available_count: 3,
+      total_earned_count: 5,
+    });
+    expect(parsed).toEqual({
+      availableCount: 3,
+      totalEarnedCount: 5,
+      nextExpiresAt: Date.parse("2026-07-10T00:00:00Z"),
+    });
+  });
 });
 
 describe("usageSettingsKey", () => {
@@ -1149,6 +1164,7 @@ describe("consumeCodexResetCredit guards", () => {
 
   effectIt.live("honors reset-credit consume Retry-After without repeat HTTP calls", () => {
     const requests: Array<{ readonly method: string; readonly url: string }> = [];
+    let consumePayload: unknown;
     const httpLayer = Layer.succeed(
       HttpClient.HttpClient,
       HttpClient.make((request) => {
@@ -1167,6 +1183,9 @@ describe("consumeCodexResetCredit guards", () => {
           request.method === "POST" &&
           request.url.endsWith("/rate-limit-reset-credits/consume")
         ) {
+          const rawBody = (request.body as { readonly body?: Uint8Array }).body;
+          expect(rawBody).toBeDefined();
+          consumePayload = decodeUnknownJson(new TextDecoder().decode(rawBody));
           return Effect.succeed(
             HttpClientResponse.fromWeb(
               request,
@@ -1200,6 +1219,76 @@ describe("consumeCodexResetCredit guards", () => {
         expect(second.ok).toBe(false);
         expect(second.message).toContain("wait a moment");
         expect(requests.map((request) => request.method)).toEqual(["GET", "POST"]);
+        expect(consumePayload).toEqual({
+          redeem_request_id: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          ),
+        });
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, httpLayer)));
+  });
+
+  effectIt.live("interprets successful HTTP consume outcomes instead of assuming success", () => {
+    const outcomes: Array<unknown> = [
+      { code: "reset" },
+      { code: "already_redeemed" },
+      { code: "nothing_to_reset" },
+      { code: "no_credit" },
+      {},
+    ];
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        if (request.method === "GET" && request.url.endsWith("/rate-limit-reset-credits")) {
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              Response.json({ credits: [{ status: "available" }] }),
+            ),
+          );
+        }
+        if (
+          request.method === "POST" &&
+          request.url.endsWith("/rate-limit-reset-credits/consume")
+        ) {
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(request, Response.json(outcomes.shift())),
+          );
+        }
+        return Effect.succeed(
+          HttpClientResponse.fromWeb(request, Response.json({}, { status: 404 })),
+        );
+      }),
+    );
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const codexHome = yield* makeTempCodexHomeWithAuth();
+        const settings = {
+          ...DEFAULT_SERVER_SETTINGS.providers.codex,
+          enabled: true,
+          homePath: codexHome,
+          shadowHomePath: "",
+        };
+        const cases = [
+          { ok: true, message: null },
+          { ok: true, message: null },
+          { ok: false, message: "no eligible limit" },
+          { ok: false, message: "no reset credits" },
+          { ok: false, message: "unrecognized reset response" },
+        ] as const;
+
+        for (const expected of cases) {
+          resetProviderUsageStateForTests();
+          const result = yield* consumeCodexResetCredit(settings);
+          expect(result.ok).toBe(expected.ok);
+          if (expected.message === null) {
+            expect(result.message).toBeNull();
+          } else {
+            expect(result.message).toContain(expected.message);
+          }
+        }
+        expect(outcomes).toEqual([]);
       }),
     ).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, httpLayer)));
   });
