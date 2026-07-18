@@ -26,6 +26,7 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveEditableLastUserMessage,
   resolveSendEnvMode,
+  shouldRouteFileCloseShortcut,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
 
@@ -152,6 +153,29 @@ function makeTurnStartFailureActivity(
     ...overrides,
   };
 }
+
+describe("file close shortcut routing", () => {
+  it("routes only from the focused pane when its active surface is a file", () => {
+    expect(
+      shouldRouteFileCloseShortcut({
+        activeSurfaceKind: "file",
+        globalShortcutRoutingEnabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRouteFileCloseShortcut({
+        activeSurfaceKind: "file",
+        globalShortcutRoutingEnabled: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRouteFileCloseShortcut({
+        activeSurfaceKind: "terminal",
+        globalShortcutRoutingEnabled: true,
+      }),
+    ).toBe(false);
+  });
+});
 
 function makeTurnRetryRequestedActivity(
   overrides: Partial<Thread["activities"][number]> = {},

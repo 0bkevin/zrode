@@ -45,7 +45,11 @@ import {
   type WorkspaceCreationKind,
   type WorkspaceCreationSession,
 } from "./fileBrowserCreation";
-import { directoriesNeedingLazyLoad, mergeWorkspaceEntries } from "./fileBrowserLazyEntries";
+import {
+  directoriesNeedingLazyLoad,
+  directoriesNeedingLazyLoadAfterBulkAction,
+  mergeWorkspaceEntries,
+} from "./fileBrowserLazyEntries";
 import { type FilePreviewLayoutMode, resolveFileExplorerToolbarLayout } from "./fileExplorerLayout";
 import { useProjectDirectoryQuery, useProjectEntriesQuery } from "./projectFilesQueryState";
 
@@ -593,8 +597,18 @@ function FileBrowserPanel({
     [directoryPaths, model, treeRevision],
   );
   const toggleAllFolders = useCallback(() => {
-    toggleAllFileTreeDirectories({ directoryPaths, model });
-  }, [directoryPaths, model]);
+    const action = toggleAllFileTreeDirectories({ directoryPaths, model });
+    if (!showIgnoredFiles) return;
+    const needed = directoriesNeedingLazyLoadAfterBulkAction({
+      action,
+      directoryPaths,
+      loadedDirectories,
+      requestedDirectories,
+    });
+    if (needed.length > 0) {
+      setRequestedDirectories((current) => new Set([...current, ...needed]));
+    }
+  }, [directoryPaths, loadedDirectories, model, requestedDirectories, showIgnoredFiles]);
   const bulkFolderActionLabel =
     bulkFolderAction === "collapse" ? "Collapse All Folders" : "Expand All Folders";
 

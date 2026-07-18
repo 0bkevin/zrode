@@ -266,6 +266,7 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  shouldRouteFileCloseShortcut,
   waitForSettledTurnAssistantText,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -452,6 +453,8 @@ type ChatViewProps =
        * shared bottom-corner slot, so it shows once instead of once per pane).
        */
       serverStatusSlot?: HTMLElement | null;
+      /** Whether this view owns window-global keyboard shortcut routing. */
+      globalShortcutRoutingEnabled?: boolean;
       routeKind: "server";
       draftId?: never;
     }
@@ -462,6 +465,8 @@ type ChatViewProps =
       reserveTitleBarControlInset?: boolean;
       topBarSlot?: HTMLElement | null;
       serverStatusSlot?: HTMLElement | null;
+      /** Whether this view owns window-global keyboard shortcut routing. */
+      globalShortcutRoutingEnabled?: boolean;
       routeKind: "draft";
       draftId: DraftId;
     };
@@ -942,6 +947,7 @@ function ChatViewContent(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
     topBarSlot,
     serverStatusSlot,
+    globalShortcutRoutingEnabled = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
@@ -6680,7 +6686,10 @@ function ChatViewContent(props: ChatViewProps) {
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
           pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}
-          {...(activeRightPanelSurface.kind === "file"
+          {...(shouldRouteFileCloseShortcut({
+            activeSurfaceKind: activeRightPanelSurface.kind,
+            globalShortcutRoutingEnabled,
+          })
             ? { onCloseActiveFile: closeActiveFileSurface }
             : {})}
           onCloseFile={closeRightPanelSurface}
