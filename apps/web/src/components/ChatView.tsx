@@ -78,7 +78,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   derivePhase,
-  deriveTimelineEntries,
+  computeStableTimelineEntries,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
   findSidebarProposedPlan,
@@ -86,6 +86,7 @@ import {
   deriveWorkLogEntries,
   hasActionableProposedPlan,
   isLatestTurnSettled,
+  type StableTimelineEntriesState,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import { getAnchoredTurnMetrics, type TimelineScrollMode } from "./chat/timelineScrollAnchoring";
@@ -308,6 +309,7 @@ import { FileDocumentCloseDialog } from "./files/FileDocumentCloseDialog";
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
+const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID = new Map<MessageId, AssistantNerdStats>();
@@ -417,6 +419,26 @@ interface PendingLastUserMessageEditState {
   readonly messageId: MessageId;
   readonly text: string;
   readonly requestedAt: string;
+}
+
+interface ResolvedAttachmentPreviewCacheEntry {
+  readonly previewUrls: ReadonlyArray<string | undefined>;
+  readonly message: ChatMessage;
+}
+
+function attachmentPreviewUrlsEqual(
+  left: ReadonlyArray<string | undefined>,
+  right: ReadonlyArray<string | undefined>,
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function composerDraftTargetKey(target: ComposerDraftTarget): string {
@@ -2330,19 +2352,34 @@ function ChatViewContent(props: ChatViewProps) {
       ),
     [serverAttachmentIds, serverAttachmentUrls],
   );
+  const resolvedAttachmentPreviewCacheRef = useRef(
+    new WeakMap<ChatMessage, ResolvedAttachmentPreviewCacheEntry>(),
+  );
   const displayServerMessages = useMemo<ReadonlyArray<ChatMessage>>(() => {
     if (!serverMessages) return [];
     return serverMessages.map((message) => {
       if (!message.attachments || message.attachments.length === 0) {
         return message;
       }
-      return {
+      const previewUrls = message.attachments.map((attachment) =>
+        serverAttachmentUrlById.get(attachment.id),
+      );
+      const cached = resolvedAttachmentPreviewCacheRef.current.get(message);
+      if (cached && attachmentPreviewUrlsEqual(cached.previewUrls, previewUrls)) {
+        return cached.message;
+      }
+      const resolvedMessage: ChatMessage = {
         ...message,
-        attachments: message.attachments.map((attachment) => {
-          const previewUrl = serverAttachmentUrlById.get(attachment.id);
+        attachments: message.attachments.map((attachment, index) => {
+          const previewUrl = previewUrls[index];
           return previewUrl ? { ...attachment, previewUrl } : attachment;
         }),
       };
+      resolvedAttachmentPreviewCacheRef.current.set(message, {
+        previewUrls,
+        message: resolvedMessage,
+      });
+      return resolvedMessage;
     });
   }, [serverAttachmentUrlById, serverMessages]);
   useEffect(() => {
@@ -2481,20 +2518,30 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
+  const timelineEntriesStateRef = useRef<StableTimelineEntriesState | null>(null);
+  const timelineEntriesState = useMemo(() => {
+    const next = computeStableTimelineEntries(
+      {
+        messages: timelineMessages,
+        proposedPlans: activeThread?.proposedPlans ?? EMPTY_PROPOSED_PLANS,
+        workEntries: workLogEntries,
+      },
+      timelineEntriesStateRef.current,
+    );
+    timelineEntriesStateRef.current = next;
+    return next;
+  }, [activeThread?.proposedPlans, timelineMessages, workLogEntries]);
+  const timelineEntries = timelineEntriesState.result;
+  const structuralTimelineEntries = timelineEntriesState.structuralResult;
   const assistantNerdStatsByMessageId = useMemo(
     () =>
       showNerdStats
         ? deriveAssistantNerdStatsByMessageId({
-            messages: timelineMessages,
+            messages: timelineEntriesState.structuralMessages,
             activities: threadActivities,
           })
         : EMPTY_ASSISTANT_NERD_STATS_BY_MESSAGE_ID,
-    [showNerdStats, threadActivities, timelineMessages],
-  );
-  const timelineEntries = useMemo(
-    () =>
-      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
-    [activeThread?.proposedPlans, timelineMessages, workLogEntries],
+    [showNerdStats, threadActivities, timelineEntriesState.structuralMessages],
   );
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
@@ -2508,14 +2555,18 @@ function ChatViewContent(props: ChatViewProps) {
   }, [turnDiffSummaries]);
   const revertTurnCountByUserMessageId = useMemo(() => {
     const byUserMessageId = new Map<MessageId, number>();
-    for (let index = 0; index < timelineEntries.length; index += 1) {
-      const entry = timelineEntries[index];
+    for (let index = 0; index < structuralTimelineEntries.length; index += 1) {
+      const entry = structuralTimelineEntries[index];
       if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
         continue;
       }
 
-      for (let nextIndex = index + 1; nextIndex < timelineEntries.length; nextIndex += 1) {
-        const nextEntry = timelineEntries[nextIndex];
+      for (
+        let nextIndex = index + 1;
+        nextIndex < structuralTimelineEntries.length;
+        nextIndex += 1
+      ) {
+        const nextEntry = structuralTimelineEntries[nextIndex];
         if (!nextEntry || nextEntry.kind !== "message") {
           continue;
         }
@@ -2537,7 +2588,11 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     return byUserMessageId;
-  }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  }, [
+    inferredCheckpointTurnCountByTurnId,
+    structuralTimelineEntries,
+    turnDiffSummaryByAssistantMessageId,
+  ]);
 
   const gitCwd = activeProject
     ? projectScriptCwd({

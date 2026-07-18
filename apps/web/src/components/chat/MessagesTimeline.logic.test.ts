@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  computeIncrementalMessagesTimelineRows,
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
@@ -7,6 +8,236 @@ import {
   resolveLargeStreamingMarkdownParts,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
+
+describe("computeIncrementalMessagesTimelineRows", () => {
+  it("patches only the growing assistant row during a streaming turn", () => {
+    const historicalMessage = {
+      id: "user-1" as never,
+      role: "user" as const,
+      text: "Start",
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    };
+    const streamingMessage = {
+      id: "assistant-1" as never,
+      role: "assistant" as const,
+      text: "Hello",
+      turnId: "turn-1" as never,
+      createdAt: "2026-01-01T00:00:01Z",
+      updatedAt: "2026-01-01T00:00:01Z",
+      streaming: true,
+    };
+    const turnDiffs = new Map();
+    const revertCounts = new Map();
+    const latestTurn = {
+      turnId: "turn-1" as never,
+      state: "running" as const,
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: null,
+    };
+    const initialInput = {
+      timelineEntries: [
+        {
+          id: "user-1",
+          kind: "message" as const,
+          createdAt: historicalMessage.createdAt,
+          message: historicalMessage,
+        },
+        {
+          id: "assistant-1",
+          kind: "message" as const,
+          createdAt: streamingMessage.createdAt,
+          message: streamingMessage,
+        },
+      ],
+      latestTurn,
+      runningTurnId: latestTurn.turnId,
+      isWorking: true,
+      activeTurnStartedAt: latestTurn.startedAt,
+      turnDiffSummaryByAssistantMessageId: turnDiffs,
+      revertTurnCountByUserMessageId: revertCounts,
+    };
+    const initial = computeIncrementalMessagesTimelineRows(initialInput, null);
+    const grownMessage = { ...streamingMessage, text: "Hello world" };
+    const next = computeIncrementalMessagesTimelineRows(
+      {
+        ...initialInput,
+        timelineEntries: [
+          initialInput.timelineEntries[0]!,
+          { ...initialInput.timelineEntries[1]!, message: grownMessage },
+        ],
+        latestTurn: { ...latestTurn },
+      },
+      initial,
+    );
+
+    expect(next.result).not.toBe(initial.result);
+    expect(next.result[0]).toBe(initial.result[0]);
+    expect(next.result[1]).not.toBe(initial.result[1]);
+    expect(next.result[1]).toMatchObject({
+      kind: "message",
+      message: { text: "Hello world" },
+    });
+    expect(next.result[2]).toBe(initial.result[2]);
+    expect(next.structuralResult).toBe(initial.structuralResult);
+    expect(next.rowIndexById).toBe(initial.rowIndexById);
+  });
+
+  it("falls back when the streaming update also changes row metadata", () => {
+    const streamingMessage = {
+      id: "assistant-1" as never,
+      role: "assistant" as const,
+      text: "Hello",
+      turnId: "turn-1" as never,
+      createdAt: "2026-01-01T00:00:01Z",
+      updatedAt: "2026-01-01T00:00:01Z",
+      streaming: true,
+    };
+    const turnDiffs = new Map();
+    const revertCounts = new Map();
+    const initialInput = {
+      timelineEntries: [
+        {
+          id: "assistant-1",
+          kind: "message" as const,
+          createdAt: streamingMessage.createdAt,
+          message: streamingMessage,
+        },
+      ],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: turnDiffs,
+      revertTurnCountByUserMessageId: revertCounts,
+    };
+    const initial = computeIncrementalMessagesTimelineRows(initialInput, null);
+    const next = computeIncrementalMessagesTimelineRows(
+      {
+        ...initialInput,
+        isWorking: false,
+        timelineEntries: [
+          {
+            ...initialInput.timelineEntries[0]!,
+            message: { ...streamingMessage, text: "Hello world" },
+          },
+        ],
+      },
+      initial,
+    );
+
+    expect(next.rowIndexById).not.toBe(initial.rowIndexById);
+    expect(next.result.some((row) => row.kind === "working")).toBe(false);
+  });
+
+  it("settles correctly after multiple incremental text patches", () => {
+    const historicalMessage = {
+      id: "user-1" as never,
+      role: "user" as const,
+      text: "Start",
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    };
+    const streamingMessage = {
+      id: "assistant-1" as never,
+      role: "assistant" as const,
+      text: "A",
+      turnId: "turn-1" as never,
+      createdAt: "2026-01-01T00:00:01Z",
+      updatedAt: "2026-01-01T00:00:01Z",
+      streaming: true,
+    };
+    const turnDiffs = new Map();
+    const revertCounts = new Map();
+    const runningTurn = {
+      turnId: "turn-1" as never,
+      state: "running" as const,
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: null,
+    };
+    const baseInput = {
+      timelineEntries: [
+        {
+          id: "user-1",
+          kind: "message" as const,
+          createdAt: historicalMessage.createdAt,
+          message: historicalMessage,
+        },
+        {
+          id: "assistant-1",
+          kind: "message" as const,
+          createdAt: streamingMessage.createdAt,
+          message: streamingMessage,
+        },
+      ],
+      latestTurn: runningTurn,
+      runningTurnId: runningTurn.turnId,
+      isWorking: true,
+      activeTurnStartedAt: runningTurn.startedAt,
+      turnDiffSummaryByAssistantMessageId: turnDiffs,
+      revertTurnCountByUserMessageId: revertCounts,
+    };
+    const initial = computeIncrementalMessagesTimelineRows(baseInput, null);
+    const firstPatch = computeIncrementalMessagesTimelineRows(
+      {
+        ...baseInput,
+        timelineEntries: [
+          baseInput.timelineEntries[0]!,
+          {
+            ...baseInput.timelineEntries[1]!,
+            message: { ...streamingMessage, text: "AB" },
+          },
+        ],
+      },
+      initial,
+    );
+    const secondStreamingMessage = { ...streamingMessage, text: "ABC" };
+    const secondPatch = computeIncrementalMessagesTimelineRows(
+      {
+        ...baseInput,
+        timelineEntries: [
+          baseInput.timelineEntries[0]!,
+          { ...baseInput.timelineEntries[1]!, message: secondStreamingMessage },
+        ],
+      },
+      firstPatch,
+    );
+    const completedMessage = {
+      ...secondStreamingMessage,
+      updatedAt: "2026-01-01T00:00:05Z",
+      streaming: false,
+    };
+    const completed = computeIncrementalMessagesTimelineRows(
+      {
+        ...baseInput,
+        timelineEntries: [
+          baseInput.timelineEntries[0]!,
+          { ...baseInput.timelineEntries[1]!, message: completedMessage },
+        ],
+        latestTurn: {
+          ...runningTurn,
+          state: "completed",
+          completedAt: completedMessage.updatedAt,
+        },
+        runningTurnId: null,
+        isWorking: false,
+      },
+      secondPatch,
+    );
+
+    expect(completed.result[0]).toBe(initial.result[0]);
+    expect(completed.structuralResult).not.toBe(secondPatch.structuralResult);
+    expect(completed.result).toHaveLength(2);
+    expect(completed.result[1]).toMatchObject({
+      kind: "message",
+      message: { text: "ABC", streaming: false },
+      showAssistantMeta: true,
+      assistantCopyStreaming: false,
+    });
+  });
+});
 
 describe("resolveLargeStreamingMarkdownParts", () => {
   it("keeps small streaming messages in one Markdown document", () => {

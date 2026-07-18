@@ -1404,6 +1404,130 @@ export function deriveTimelineEntries(
   );
 }
 
+export interface StableTimelineEntriesState {
+  readonly messages: ReadonlyArray<ChatMessage>;
+  /** Stable across suffix-only text updates; consumers must not read live text from this array. */
+  readonly structuralMessages: ReadonlyArray<ChatMessage>;
+  readonly proposedPlans: ReadonlyArray<ProposedPlan>;
+  readonly workEntries: ReadonlyArray<WorkLogEntry>;
+  readonly result: TimelineEntry[];
+  /** Stable ordering/identity view for projections that do not inspect message text. */
+  readonly structuralResult: TimelineEntry[];
+  readonly messageEntryIndexById: ReadonlyMap<string, number>;
+}
+
+function timelineMessageCanBePatched(previous: ChatMessage, next: ChatMessage): boolean {
+  return (
+    previous.id === next.id &&
+    previous.role === next.role &&
+    previous.createdAt === next.createdAt &&
+    previous.turnId === next.turnId &&
+    previous.attachments === next.attachments &&
+    previous.streaming &&
+    next.streaming &&
+    next.text.startsWith(previous.text)
+  );
+}
+
+function indexTimelineMessageEntries(entries: ReadonlyArray<TimelineEntry>): Map<string, number> {
+  const result = new Map<string, number>();
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry?.kind === "message") {
+      result.set(entry.message.id, index);
+    }
+  }
+  return result;
+}
+
+/**
+ * Preserve the sorted timeline when a provider only appends text to one
+ * existing streaming message. Long threads otherwise remap and re-sort their
+ * complete history for every presentation tick. Any snapshot-shaped or
+ * structural change deliberately falls back to the authoritative full derive.
+ */
+export function computeStableTimelineEntries(
+  input: {
+    readonly messages: ReadonlyArray<ChatMessage>;
+    readonly proposedPlans: ReadonlyArray<ProposedPlan>;
+    readonly workEntries: ReadonlyArray<WorkLogEntry>;
+  },
+  previous: StableTimelineEntriesState | null,
+): StableTimelineEntriesState {
+  if (
+    previous !== null &&
+    input.proposedPlans === previous.proposedPlans &&
+    input.workEntries === previous.workEntries &&
+    input.messages.length === previous.messages.length
+  ) {
+    let changedMessageIndex = -1;
+    let patchable = true;
+    for (let index = 0; index < input.messages.length; index += 1) {
+      const nextMessage = input.messages[index];
+      const previousMessage = previous.messages[index];
+      if (nextMessage === previousMessage) {
+        continue;
+      }
+      if (
+        changedMessageIndex !== -1 ||
+        !nextMessage ||
+        !previousMessage ||
+        !timelineMessageCanBePatched(previousMessage, nextMessage)
+      ) {
+        patchable = false;
+        break;
+      }
+      changedMessageIndex = index;
+    }
+
+    if (patchable && changedMessageIndex === -1) {
+      return input.messages === previous.messages
+        ? previous
+        : { ...previous, messages: input.messages };
+    }
+
+    if (patchable) {
+      const message = input.messages[changedMessageIndex];
+      const entryIndex = message ? previous.messageEntryIndexById.get(message.id) : undefined;
+      const previousEntry = entryIndex === undefined ? undefined : previous.result[entryIndex];
+      if (
+        message &&
+        entryIndex !== undefined &&
+        previousEntry?.kind === "message" &&
+        previousEntry.message === previous.messages[changedMessageIndex]
+      ) {
+        const result = [...previous.result];
+        result[entryIndex] = {
+          id: message.id,
+          kind: "message",
+          createdAt: message.createdAt,
+          message,
+        };
+        return {
+          messages: input.messages,
+          structuralMessages: previous.structuralMessages,
+          proposedPlans: input.proposedPlans,
+          workEntries: input.workEntries,
+          result,
+          structuralResult: previous.structuralResult,
+          messageEntryIndexById: previous.messageEntryIndexById,
+        };
+      }
+    }
+  }
+
+  const result = deriveTimelineEntries(input.messages, input.proposedPlans, input.workEntries);
+  return {
+    messages: input.messages,
+    structuralMessages: input.messages,
+    proposedPlans: input.proposedPlans,
+    workEntries: input.workEntries,
+    result,
+    structuralResult: result,
+    messageEntryIndexById: indexTimelineMessageEntries(result),
+  };
+}
+
 export function inferCheckpointTurnCountByTurnId(
   summaries: ReadonlyArray<TurnDiffSummary>,
 ): Record<TurnId, number> {
