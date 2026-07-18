@@ -408,6 +408,8 @@ export interface ModelUsageSummary {
 
 export interface ApiCostEstimate {
   readonly totalUsd: number;
+  /** At least one row had either authoritative recorded cost or known list pricing. */
+  readonly hasPricedUsage: boolean;
   readonly pricedTokens: number;
   readonly totalTokens: number;
   readonly models: ReadonlyArray<ModelUsageSummary>;
@@ -440,10 +442,12 @@ export function estimateApiEquivalentCost(
       totalTokens: number;
       cost: number;
       priced: number;
+      hasCost: boolean;
     }
   >();
   const providerCosts = new Map<ProviderTokenActivityKind, number>();
   let totalUsd = 0;
+  let hasPricedUsage = false;
   let pricedTokens = 0;
   let totalTokens = 0;
 
@@ -473,12 +477,15 @@ export function estimateApiEquivalentCost(
       totalTokens: 0,
       cost: 0,
       priced: 0,
+      hasCost: false,
     };
     current.totalTokens += row.totalTokens;
     if (cost !== null) {
       current.cost += cost;
       current.priced += row.totalTokens;
+      current.hasCost = true;
       totalUsd += cost;
+      hasPricedUsage = true;
       pricedTokens += row.totalTokens;
       providerCosts.set(row.provider, (providerCosts.get(row.provider) ?? 0) + cost);
     }
@@ -491,9 +498,9 @@ export function estimateApiEquivalentCost(
       model: entry.model,
       totalTokens: entry.totalTokens,
       pricedTokens: entry.priced,
-      costUsd: entry.priced > 0 ? entry.cost : null,
+      costUsd: entry.hasCost ? entry.cost : null,
     }))
     .toSorted((left, right) => right.totalTokens - left.totalTokens);
 
-  return { totalUsd, pricedTokens, totalTokens, models, providerCosts };
+  return { totalUsd, hasPricedUsage, pricedTokens, totalTokens, models, providerCosts };
 }

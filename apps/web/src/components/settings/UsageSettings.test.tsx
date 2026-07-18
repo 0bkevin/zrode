@@ -357,6 +357,7 @@ describe("ProviderSpendBreakdown", () => {
       <ProviderSpendBreakdown
         estimate={{
           totalUsd: 12.5,
+          hasPricedUsage: true,
           pricedTokens: 100,
           totalTokens: 150,
           providerCosts: new Map([["claude", 12.5]]),
@@ -386,6 +387,33 @@ describe("ProviderSpendBreakdown", () => {
     expect(markup).toContain("Codex");
     expect(markup).toContain("Not priced");
     expect(markup).toContain("0% covered");
+  });
+
+  it("shows authoritative spend even when the provider omitted token counts", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderSpendBreakdown
+        estimate={{
+          totalUsd: 0.25,
+          hasPricedUsage: true,
+          pricedTokens: 0,
+          totalTokens: 0,
+          providerCosts: new Map([["grok", 0.25]]),
+          models: [
+            {
+              provider: "grok",
+              model: "Unattributed",
+              totalTokens: 0,
+              pricedTokens: 0,
+              costUsd: 0.25,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain("Grok");
+    expect(markup).toContain("$0.2500");
+    expect(markup).not.toContain("0% covered");
   });
 });
 

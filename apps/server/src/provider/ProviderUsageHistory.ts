@@ -1479,31 +1479,33 @@ export const make = Effect.gen(function* () {
    * running check), so a double-fired rescan can't sweep the disk twice.
    */
   const ensureTokenActivitySync = (settings: ServerSettings, force: boolean) =>
-    Effect.gen(function* () {
-      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-      const minIntervalMs = force ? TOKEN_SYNC_FORCE_MIN_INTERVAL_MS : TOKEN_SYNC_MIN_INTERVAL_MS;
-      const claimed = yield* Ref.modify(syncState, (state) => {
-        if (state.running || nowMs - state.lastCompletedAt < minIntervalMs) {
-          return [false, state] as const;
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+        const minIntervalMs = force ? TOKEN_SYNC_FORCE_MIN_INTERVAL_MS : TOKEN_SYNC_MIN_INTERVAL_MS;
+        const claimed = yield* Ref.modify(syncState, (state) => {
+          if (state.running || nowMs - state.lastCompletedAt < minIntervalMs) {
+            return [false, state] as const;
+          }
+          return [true, { ...state, running: true }] as const;
+        });
+        if (!claimed) {
+          return;
         }
-        return [true, { ...state, running: true }] as const;
-      });
-      if (!claimed) {
-        return;
-      }
-      yield* syncOnce(settings, force).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Provider token activity scan failed", { cause }),
-        ),
-        Effect.onExit(() =>
-          Effect.gen(function* () {
-            const completedAt = DateTime.toEpochMillis(yield* DateTime.now);
-            yield* Ref.set(syncState, { running: false, lastCompletedAt: completedAt });
-          }),
-        ),
-        Effect.forkDetach,
-      );
-    });
+        yield* syncOnce(settings, force).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Provider token activity scan failed", { cause }),
+          ),
+          Effect.onExit(() =>
+            Effect.gen(function* () {
+              const completedAt = DateTime.toEpochMillis(yield* DateTime.now);
+              yield* Ref.set(syncState, { running: false, lastCompletedAt: completedAt });
+            }),
+          ),
+          Effect.forkDetach({ startImmediately: true }),
+        );
+      }),
+    );
 
   const readHistory: ProviderUsageHistory["Service"]["readHistory"] = (input, settings) =>
     Effect.gen(function* () {

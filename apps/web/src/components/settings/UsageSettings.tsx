@@ -1360,7 +1360,7 @@ export function ProviderSpendBreakdown({ estimate }: { estimate: ApiCostEstimate
       costUsd: estimate.providerCosts.get(provider) ?? null,
     };
   })
-    .filter((entry) => entry.totalTokens > 0)
+    .filter((entry) => entry.totalTokens > 0 || entry.costUsd !== null)
     .toSorted((left, right) => (right.costUsd ?? -1) - (left.costUsd ?? -1));
   const maxCost = Math.max(0, ...rows.map((entry) => entry.costUsd ?? 0));
 
@@ -1375,7 +1375,7 @@ export function ProviderSpendBreakdown({ estimate }: { estimate: ApiCostEstimate
       </span>
       {rows.map((entry) => {
         const coverage =
-          entry.totalTokens > 0 ? Math.round((entry.pricedTokens / entry.totalTokens) * 100) : 0;
+          entry.totalTokens > 0 ? Math.round((entry.pricedTokens / entry.totalTokens) * 100) : null;
         return (
           <div key={entry.provider} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1">
             <div className="flex min-w-0 items-center gap-1.5 text-[11px]">
@@ -1384,7 +1384,7 @@ export function ProviderSpendBreakdown({ estimate }: { estimate: ApiCostEstimate
                 className="size-3 shrink-0 text-muted-foreground"
               />
               <span className="truncate text-foreground">{PROVIDER_LABEL[entry.provider]}</span>
-              {coverage < 100 ? (
+              {coverage !== null && coverage < 100 ? (
                 <span className="text-[9px] tabular-nums text-muted-foreground/50">
                   {coverage}% covered
                 </span>
@@ -2215,7 +2215,7 @@ export function UsageSettingsPanel() {
                               API-equivalent estimate
                             </span>
                             <span className="text-2xl font-semibold tracking-[-0.02em] text-foreground">
-                              {apiCostEstimate.pricedTokens > 0
+                              {apiCostEstimate.hasPricedUsage
                                 ? formatUsd(apiCostEstimate.totalUsd)
                                 : "Not available yet"}
                             </span>
@@ -2224,7 +2224,9 @@ export function UsageSettingsPanel() {
                               an amount Zrode or your subscriptions charged. Covers{" "}
                               {apiCostEstimate.totalTokens > 0
                                 ? `${Math.round((apiCostEstimate.pricedTokens / apiCostEstimate.totalTokens) * 100)}% of model-attributed tokens`
-                                : "model-attributed usage after the next log scan"}
+                                : apiCostEstimate.hasPricedUsage
+                                  ? "provider-recorded charges without token detail"
+                                  : "model-attributed usage after the next log scan"}
                               . Pricing reviewed {API_PRICING_AS_OF}; measured 5-minute/1-hour cache
                               writes, fast/priority turns, and recorded long-context requests are
                               priced separately. Provider-recorded costs are used when available.

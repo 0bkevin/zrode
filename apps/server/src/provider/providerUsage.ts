@@ -283,12 +283,21 @@ interface ProviderUsageFetchResult {
 let usageCache = new Map<ProviderUsageProviderKind, ProviderUsageCacheState>();
 let usageInFlight = new Map<ProviderUsageProviderKind, ProviderUsageInFlightState>();
 let usageGeneration = new Map<ProviderUsageProviderKind, number>();
-let copilotBillingCache: {
+interface GitHubCopilotBillingCacheState {
   readonly key: string;
   readonly expiresAt: number;
   readonly history: GitHubCopilotBillingHistory;
-} | null = null;
-let copilotBillingRefreshInFlight = false;
+}
+
+interface GitHubCopilotBillingInFlightState {
+  readonly key: string;
+  readonly generation: number;
+  readonly deferred: Deferred.Deferred<GitHubCopilotBillingHistory | null>;
+}
+
+let copilotBillingCache = new Map<string, GitHubCopilotBillingCacheState>();
+let copilotBillingInFlight = new Map<string, GitHubCopilotBillingInFlightState>();
+let copilotBillingGeneration = 0;
 
 const PROVIDER_USAGE_KINDS = [
   "claude",
@@ -325,12 +334,18 @@ export function invalidateProviderUsageCache(provider?: ProviderUsageProviderKin
     usageCache.delete(provider);
     usageInFlight.delete(provider);
     bumpProviderUsageGeneration(provider);
-    if (provider === "githubCopilot") copilotBillingCache = null;
+    if (provider === "githubCopilot") {
+      copilotBillingCache = new Map();
+      copilotBillingInFlight = new Map();
+      copilotBillingGeneration += 1;
+    }
     return;
   }
   usageCache = new Map();
   usageInFlight = new Map();
-  copilotBillingCache = null;
+  copilotBillingCache = new Map();
+  copilotBillingInFlight = new Map();
+  copilotBillingGeneration += 1;
   for (const kind of PROVIDER_USAGE_KINDS) {
     bumpProviderUsageGeneration(kind);
   }
@@ -2155,6 +2170,66 @@ const fetchGitHubCopilotBillingHistory = Effect.fn("fetchGitHubCopilotBillingHis
   } satisfies GitHubBillingFetchResult;
 });
 
+const startGitHubCopilotBillingRefresh = Effect.fn("startGitHubCopilotBillingRefresh")(function* (
+  settings: ServerSettings,
+  key: string,
+  tokens: ReadonlyArray<string>,
+  previous: GitHubCopilotBillingHistory | null,
+) {
+  return yield* Effect.uninterruptible(
+    Effect.gen(function* () {
+      const generation = copilotBillingGeneration;
+      const active = copilotBillingInFlight.get(key) ?? null;
+      if (active !== null && active.generation === generation) {
+        return active.deferred;
+      }
+
+      const deferred = yield* Deferred.make<GitHubCopilotBillingHistory | null>();
+      const ownRecord: GitHubCopilotBillingInFlightState = { key, generation, deferred };
+      const settle = fetchGitHubCopilotBillingHistory(settings, tokens).pipe(
+        Effect.matchCauseEffect({
+          onFailure: (cause) =>
+            Effect.gen(function* () {
+              if (copilotBillingInFlight.get(key) === ownRecord) {
+                copilotBillingInFlight.delete(key);
+              }
+              yield* Effect.logWarning("GitHub Copilot billing refresh crashed", { cause });
+              yield* Deferred.succeed(deferred, previous);
+            }),
+          onSuccess: (refresh) =>
+            Effect.gen(function* () {
+              const isCurrent =
+                copilotBillingGeneration === generation &&
+                copilotBillingInFlight.get(key) === ownRecord;
+              if (copilotBillingInFlight.get(key) === ownRecord) {
+                copilotBillingInFlight.delete(key);
+              }
+              if (!isCurrent || refresh === null) {
+                yield* Deferred.succeed(deferred, previous);
+                return;
+              }
+              const history = mergeGitHubBillingRefresh(previous, refresh);
+              const completedAt = DateTime.toEpochMillis(yield* DateTime.now);
+              copilotBillingCache.set(key, {
+                key,
+                expiresAt:
+                  completedAt +
+                  (history.status === "ok"
+                    ? GITHUB_COPILOT_BILLING_CACHE_TTL_MS
+                    : USAGE_CACHE_TTL_MS),
+                history,
+              });
+              yield* Deferred.succeed(deferred, history);
+            }),
+        }),
+      );
+      copilotBillingInFlight.set(key, ownRecord);
+      yield* settle.pipe(Effect.forkDetach({ startImmediately: true }));
+      return deferred;
+    }),
+  );
+});
+
 const getGitHubCopilotBillingHistory = Effect.fn("getGitHubCopilotBillingHistory")(function* (
   settings: ServerSettings,
 ) {
@@ -2163,56 +2238,21 @@ const getGitHubCopilotBillingHistory = Effect.fn("getGitHubCopilotBillingHistory
   const tokens = yield* resolveGitHubBillingTokens(settings);
   const credentialSetKey = githubCredentialFingerprint(tokens.join("\0"));
   const key = `${githubCopilotUsageSettingsKey(settings)}:${credentialSetKey}`;
-  const matchingCache = copilotBillingCache?.key.startsWith(`${key}:`) ? copilotBillingCache : null;
-  if (matchingCache?.expiresAt && matchingCache.expiresAt > now) {
+  const matchingCache = copilotBillingCache.get(key) ?? null;
+  if (matchingCache !== null && matchingCache.expiresAt > now) {
     return matchingCache.history;
   }
+
+  const deferred = yield* startGitHubCopilotBillingRefresh(
+    settings,
+    key,
+    tokens,
+    matchingCache?.history ?? null,
+  );
   if (matchingCache !== null) {
-    if (!copilotBillingRefreshInFlight) {
-      copilotBillingRefreshInFlight = true;
-      yield* fetchGitHubCopilotBillingHistory(settings, tokens).pipe(
-        Effect.tap((refresh) =>
-          refresh === null
-            ? Effect.void
-            : Effect.sync(() => {
-                const history = mergeGitHubBillingRefresh(matchingCache.history, refresh);
-                copilotBillingCache = {
-                  key: `${key}:${refresh.credentialKey}`,
-                  expiresAt:
-                    now +
-                    (history.status === "ok"
-                      ? GITHUB_COPILOT_BILLING_CACHE_TTL_MS
-                      : USAGE_CACHE_TTL_MS),
-                  history,
-                };
-              }),
-        ),
-        Effect.ensuring(
-          Effect.sync(() => {
-            copilotBillingRefreshInFlight = false;
-          }),
-        ),
-        Effect.forkDetach({ startImmediately: true }),
-      );
-    }
     return matchingCache.history;
   }
-  const fetched = yield* fetchGitHubCopilotBillingHistory(settings, tokens);
-  let resolvedHistory: GitHubCopilotBillingHistory | null = null;
-  if (fetched !== null) {
-    const history = mergeGitHubBillingRefresh(
-      copilotBillingCache?.key.startsWith(`${key}:`) ? copilotBillingCache.history : null,
-      fetched,
-    );
-    copilotBillingCache = {
-      key: `${key}:${fetched.credentialKey}`,
-      expiresAt:
-        now + (history.status === "ok" ? GITHUB_COPILOT_BILLING_CACHE_TTL_MS : USAGE_CACHE_TTL_MS),
-      history,
-    };
-    resolvedHistory = history;
-  }
-  return resolvedHistory;
+  return yield* Deferred.await(deferred);
 });
 
 /**
@@ -2234,26 +2274,16 @@ export const getGitHubCopilotBillingHistoryNonBlocking = Effect.fn(
       updatedAt: nowMs,
     }) satisfies GitHubCopilotBillingHistory;
 
-  // The UI polls while a cold load is pending. Do not start another bounded
-  // attempt on every poll when there is no stale snapshot to return yet.
-  if (copilotBillingRefreshInFlight && copilotBillingCache === null) {
-    return loadingHistory();
-  }
   const quick = yield* getGitHubCopilotBillingHistory(settings).pipe(
     Effect.timeoutOption(Duration.millis(500)),
   );
   if (Option.isSome(quick)) return quick.value;
-  if (!copilotBillingRefreshInFlight) {
-    copilotBillingRefreshInFlight = true;
-    yield* getGitHubCopilotBillingHistory(settings).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          copilotBillingRefreshInFlight = false;
-        }),
-      ),
-      Effect.forkDetach({ startImmediately: true }),
-    );
-  }
+  // The underlying refresh is detached from the bounded waiter, so timing out
+  // here does not cancel the network sweep. This second call either joins that
+  // refresh or completes credential resolution if the timeout interrupted it.
+  yield* getGitHubCopilotBillingHistory(settings).pipe(
+    Effect.forkDetach({ startImmediately: true }),
+  );
   return loadingHistory();
 });
 
@@ -2944,7 +2974,7 @@ export const getProviderUsageSnapshots = Effect.fn("getProviderUsageSnapshots")(
 
 export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
   const [usage, githubCopilotBilling] = yield* Effect.all(
-    [getProviderUsageSnapshots(settings), getGitHubCopilotBillingHistory(settings)],
+    [getProviderUsageSnapshots(settings), getGitHubCopilotBillingHistoryNonBlocking(settings)],
     { concurrency: "unbounded" },
   );
   return { usage, githubCopilotBilling } satisfies ServerProviderUsageResult;
@@ -3001,6 +3031,8 @@ function providerUsageFetchOptionsForTests(input: ProviderUsageFetchResultForTes
 /** Exposed for tests. */
 export const __testing = {
   mergeGitHubBillingRefresh,
+  getGitHubCopilotBillingHistory,
+  startGitHubCopilotBillingRefresh,
   getProviderUsageSnapshot: <R>(
     provider: ProviderUsageProviderKind,
     key: string,
@@ -3054,6 +3086,7 @@ export function resetProviderUsageStateForTests(): void {
   claudeTokenCache = null;
   consumeResetInFlight = false;
   consumeResetCooldownUntil = 0;
-  copilotBillingCache = null;
-  copilotBillingRefreshInFlight = false;
+  copilotBillingCache = new Map();
+  copilotBillingInFlight = new Map();
+  copilotBillingGeneration = 0;
 }

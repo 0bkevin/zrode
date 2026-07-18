@@ -342,4 +342,23 @@ describe("usage API pricing", () => {
     expect(estimate.models[0]?.costUsd).toBeCloseTo(12);
     expect(estimate.models[0]?.pricedTokens).toBe(2_000_000);
   });
+
+  it("retains provider-recorded spend when the log has no token detail", () => {
+    const estimate = estimateApiEquivalentCost([
+      row({
+        provider: "grok",
+        model: "Unattributed",
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        recordedCostUsd: 0.25,
+      }),
+    ]);
+    expect(estimate.hasPricedUsage).toBe(true);
+    expect(estimate.pricedTokens).toBe(0);
+    expect(estimate.totalUsd).toBe(0.25);
+    expect(estimate.models[0]?.costUsd).toBe(0.25);
+    expect(estimate.providerCosts.get("grok")).toBe(0.25);
+  });
 });

@@ -16,6 +16,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -217,6 +218,144 @@ describe("GitHub Copilot billing history", () => {
 const TestLayer = Layer.mergeAll(ProcessRunner.layer, FetchHttpClient.layer).pipe(
   Layer.provideMerge(NodeServicesLayer),
 );
+
+describe("GitHub Copilot billing refresh concurrency", () => {
+  effectIt.live("coalesces concurrent cold-cache ledger sweeps", () => {
+    let identityRequests = 0;
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        const response = request.url.endsWith("/user")
+          ? (() => {
+              identityRequests += 1;
+              return Response.json({ login: "octocat" });
+            })()
+          : Response.json({ usageItems: [] });
+        return Effect.sleep("20 millis").pipe(
+          Effect.as(HttpClientResponse.fromWeb(request, response)),
+        );
+      }),
+    );
+    const processRunnerLayer = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({
+        run: () =>
+          Effect.succeed({
+            stdout: "",
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }),
+      }),
+    );
+    const settings: ServerSettings = {
+      ...DISABLED_SETTINGS,
+      providers: {
+        ...DISABLED_SETTINGS.providers,
+        githubCopilot: { ...DISABLED_SETTINGS.providers.githubCopilot, enabled: true },
+      },
+    };
+    const previousToken = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = "billing-token";
+
+    return Effect.all(
+      [
+        __testing.getGitHubCopilotBillingHistory(settings),
+        __testing.getGitHubCopilotBillingHistory(settings),
+      ],
+      { concurrency: "unbounded" },
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousToken === undefined) delete process.env.GH_TOKEN;
+          else process.env.GH_TOKEN = previousToken;
+        }),
+      ),
+      Effect.map(([left, right]) => {
+        expect(identityRequests).toBe(1);
+        expect(left?.status).toBe("ok");
+        expect(right).toEqual(left);
+      }),
+      Effect.provide(Layer.mergeAll(NodeServicesLayer, processRunnerLayer, httpLayer)),
+    );
+  });
+
+  effectIt.live("does not let an invalidated refresh overwrite the replacement", () =>
+    Effect.gen(function* () {
+      const firstIdentityStarted = yield* Deferred.make<void>();
+      const releaseFirstIdentity = yield* Deferred.make<void>();
+      let identityRequests = 0;
+      const httpLayer = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          if (!request.url.endsWith("/user")) {
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(request, Response.json({ usageItems: [] })),
+            );
+          }
+          identityRequests += 1;
+          const response = HttpClientResponse.fromWeb(
+            request,
+            Response.json({ login: identityRequests === 1 ? "old-account" : "new-account" }),
+          );
+          return identityRequests === 1
+            ? Deferred.succeed(firstIdentityStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseFirstIdentity)),
+                Effect.as(response),
+              )
+            : Effect.succeed(response);
+        }),
+      );
+      const processRunnerLayer = Layer.succeed(
+        ProcessRunner.ProcessRunner,
+        ProcessRunner.ProcessRunner.of({
+          run: () =>
+            Effect.succeed({
+              stdout: "",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(1),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+        }),
+      );
+      const settings: ServerSettings = {
+        ...DISABLED_SETTINGS,
+        providers: {
+          ...DISABLED_SETTINGS.providers,
+          githubCopilot: { ...DISABLED_SETTINGS.providers.githubCopilot, enabled: true },
+        },
+      };
+      const result = yield* Effect.gen(function* () {
+        const staleDeferred = yield* __testing.startGitHubCopilotBillingRefresh(
+          settings,
+          "same-account",
+          ["billing-token"],
+          null,
+        );
+        yield* Deferred.await(firstIdentityStarted);
+        invalidateProviderUsageCache("githubCopilot");
+        const replacementDeferred = yield* __testing.startGitHubCopilotBillingRefresh(
+          settings,
+          "same-account",
+          ["billing-token"],
+          null,
+        );
+        const replacement = yield* Deferred.await(replacementDeferred);
+        yield* Deferred.succeed(releaseFirstIdentity, undefined);
+        const stale = yield* Deferred.await(staleDeferred);
+        return { stale, replacement };
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, processRunnerLayer, httpLayer)));
+
+      expect(identityRequests).toBe(2);
+      expect(result.stale).toBeNull();
+      expect(result.replacement?.status).toBe("ok");
+    }),
+  );
+});
 
 /** Both providers disabled: usage resolves instantly with no external calls. */
 const DISABLED_SETTINGS: ServerSettings = {
