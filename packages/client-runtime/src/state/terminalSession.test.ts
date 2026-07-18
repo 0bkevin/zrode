@@ -130,7 +130,36 @@ describe("terminal session reducers", () => {
       status: "running",
       error: null,
       version: 2,
+      snapshotVersion: 1,
     });
+  });
+
+  it("keeps render and snapshot versions monotonic across reconnects and restarts", () => {
+    const initial = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
+      type: "snapshot",
+      snapshot: BASE_SNAPSHOT,
+    });
+    const withOutput = applyTerminalAttachStreamEvent(initial, {
+      type: "output",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      data: " world",
+    });
+    const reconnected = applyTerminalAttachStreamEvent(withOutput, {
+      type: "snapshot",
+      snapshot: { ...BASE_SNAPSHOT, history: "hello world" },
+    });
+    const restarted = applyTerminalAttachStreamEvent(reconnected, {
+      type: "restarted",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      snapshot: { ...BASE_SNAPSHOT, pid: 456, history: "" },
+    });
+
+    expect(initial.snapshotVersion).toBe(1);
+    expect(withOutput.snapshotVersion).toBe(1);
+    expect(reconnected).toMatchObject({ version: 3, snapshotVersion: 2 });
+    expect(restarted).toMatchObject({ version: 4, snapshotVersion: 3 });
   });
 
   it("reduces terminal metadata snapshots, upserts, and removals", () => {

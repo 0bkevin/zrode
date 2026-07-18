@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -67,10 +68,21 @@ import { previewEnvironment } from "../state/preview";
 import { terminalEnvironment } from "../state/terminal";
 import { openTerminalLinkInPreview } from "./preview/openTerminalLinkInPreview";
 import { useAtomCommand } from "../state/use-atom-command";
+import {
+  createTerminalFitController,
+  type TerminalFitController,
+  type TerminalGeometry,
+} from "../lib/terminalFit";
+import { createTerminalInputQueue } from "../lib/terminalInputQueue";
+import {
+  createTerminalReplayInputGuard,
+  subscribeToTerminalUserInput,
+} from "../lib/terminalReplayInput";
+import { consumeTerminalSelectionWheelRows } from "../lib/terminalSelectionScroll";
+import { createTerminalWebglController, type TerminalWebglController } from "../lib/terminalWebgl";
 
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
-const MULTI_CLICK_SELECTION_ACTION_DELAY_MS = 260;
 
 function maxDrawerHeight(): number {
   if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
@@ -87,20 +99,8 @@ function writeSystemMessage(terminal: Terminal, message: string): void {
   terminal.write(`\r\n[terminal] ${message}\r\n`);
 }
 
-function writeTerminalBuffer(terminal: Terminal, buffer: string): void {
-  terminal.write("\u001bc");
-  if (buffer.length > 0) {
-    terminal.write(buffer);
-  }
-}
-
-function fitTerminalSafely(fitAddon: FitAddon): boolean {
-  try {
-    fitAddon.fit();
-    return true;
-  } catch {
-    return false;
-  }
+function writeTerminalBuffer(terminal: Terminal, buffer: string, onParsed: () => void): void {
+  terminal.write(`\u001bc${buffer}`, onParsed);
 }
 
 function runtimeEnvSignature(runtimeEnv: Record<string, string> | undefined): string {
@@ -259,17 +259,6 @@ export function resolveTerminalSelectionActionPosition(options: {
   };
 }
 
-export function terminalSelectionActionDelayForClickCount(clickCount: number): number {
-  return clickCount >= 2 ? MULTI_CLICK_SELECTION_ACTION_DELAY_MS : 0;
-}
-
-export function shouldHandleTerminalSelectionMouseUp(
-  selectionGestureActive: boolean,
-  button: number,
-): boolean {
-  return selectionGestureActive && button === 0;
-}
-
 interface TerminalViewportProps {
   threadRef: ScopedThreadRef;
   threadId: ThreadId;
@@ -285,6 +274,7 @@ interface TerminalViewportProps {
   resizeEpoch: number;
   drawerHeight: number;
   keybindings: ResolvedKeybindingsConfig;
+  visible: boolean;
 }
 
 interface TerminalLaunchLocation {
@@ -308,11 +298,20 @@ export function TerminalViewport({
   resizeEpoch,
   drawerHeight,
   keybindings,
+  visible,
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
+  const fitControllerRef = useRef<TerminalFitController | null>(null);
+  const webglControllerRef = useRef<TerminalWebglController | null>(null);
   const environmentId = threadRef.environmentId;
+  const terminalSessionKey = `${environmentId}\u0000${threadId}\u0000${terminalId}`;
+  const [geometryState, setGeometryState] = useState<{
+    readonly key: string;
+    readonly geometry: TerminalGeometry;
+  } | null>(null);
+  const terminalGeometry =
+    geometryState?.key === terminalSessionKey ? geometryState.geometry : null;
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
     environmentId,
@@ -351,11 +350,19 @@ export function TerminalViewport({
     reportFailure: false,
   });
   const hasHandledExitRef = useRef(false);
+  const exitCloseTimeoutRef = useRef<number | null>(null);
   const selectionPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const selectionGestureActiveRef = useRef(false);
   const selectionActionRequestIdRef = useRef(0);
-  const selectionActionOpenRef = useRef(false);
-  const selectionActionTimerRef = useRef<number | null>(null);
+  const selectionActionOpenRequestRef = useRef<number | null>(null);
+  const replayWritesInFlightRef = useRef(0);
+  const latestGeometryRef = useRef<{
+    readonly key: string;
+    readonly geometry: TerminalGeometry;
+  } | null>(null);
+  const attachedSnapshotRef = useRef<{
+    readonly key: string;
+    readonly snapshotVersion: number;
+  } | null>(null);
   const keybindingsRef = useRef(keybindings);
   const runtimeEnvKey = useMemo(() => runtimeEnvSignature(runtimeEnv), [runtimeEnv]);
   const handleSessionExited = useEffectEvent(() => {
@@ -367,13 +374,18 @@ export function TerminalViewport({
   const readTerminalLabel = useEffectEvent(() => terminalLabel);
   const terminalSession = useAttachedTerminalSession({
     environmentId,
-    terminal: {
-      threadId,
-      terminalId,
-      cwd,
-      ...(worktreePath !== undefined ? { worktreePath } : {}),
-      ...(runtimeEnv ? { env: runtimeEnv } : {}),
-    },
+    terminal:
+      terminalGeometry === null
+        ? null
+        : {
+            threadId,
+            terminalId,
+            cwd,
+            cols: terminalGeometry.cols,
+            rows: terminalGeometry.rows,
+            ...(worktreePath !== undefined ? { worktreePath } : {}),
+            ...(runtimeEnv ? { env: runtimeEnv } : {}),
+          },
   });
   const writeTerminal = useEffectEvent((data: string) =>
     runTerminalWrite({
@@ -391,6 +403,18 @@ export function TerminalViewport({
   const terminalError = terminalSession.error;
   const terminalStatus = terminalSession.status;
   const terminalVersion = terminalSession.version;
+  const terminalSnapshotVersion = terminalSession.snapshotVersion;
+  const handleTerminalGeometry = useEffectEvent((geometry: TerminalGeometry) => {
+    latestGeometryRef.current = { key: terminalSessionKey, geometry };
+    setGeometryState((current) =>
+      current?.key === terminalSessionKey ? current : { key: terminalSessionKey, geometry },
+    );
+    // The first measured grid is carried by attach/open so the shell never
+    // starts at a stale 80x24. Later measurements resize the live PTY.
+    if (terminalVersion > 0) {
+      void resizeTerminal(geometry.cols, geometry.rows);
+    }
+  });
   const previousSessionRef = useRef({
     buffer: terminalBuffer,
     error: terminalError,
@@ -403,13 +427,34 @@ export function TerminalViewport({
   }, [keybindings]);
 
   useEffect(() => {
+    if (terminalSnapshotVersion <= 0) return;
+    const attachedSnapshot = attachedSnapshotRef.current;
+    if (
+      attachedSnapshot?.key === terminalSessionKey &&
+      attachedSnapshot.snapshotVersion === terminalSnapshotVersion
+    ) {
+      return;
+    }
+    attachedSnapshotRef.current = {
+      key: terminalSessionKey,
+      snapshotVersion: terminalSnapshotVersion,
+    };
+    const latest = latestGeometryRef.current;
+    if (latest?.key === terminalSessionKey) {
+      void resizeTerminal(latest.geometry.cols, latest.geometry.rows);
+    }
+  }, [terminalSessionKey, terminalSnapshotVersion]);
+
+  useEffect(() => {
     const mount = containerRef.current;
     if (!mount) return;
 
     const localApi = readLocalApi();
 
     const fitAddon = new FitAddon();
+    const unicode11Addon = new Unicode11Addon();
     const terminal = new Terminal({
+      allowProposedApi: true,
       cursorBlink: true,
       lineHeight: 1,
       fontSize: 12,
@@ -420,10 +465,23 @@ export function TerminalViewport({
     });
     terminal.loadAddon(fitAddon);
     terminal.open(mount);
-    fitTerminalSafely(fitAddon);
+    terminal.loadAddon(unicode11Addon);
+    terminal.unicode.activeVersion = "11";
 
     terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
+    const fitController = createTerminalFitController({
+      container: mount,
+      terminal,
+      fitAddon,
+      onGeometry: handleTerminalGeometry,
+    });
+    fitControllerRef.current = fitController;
+    const webglController = createTerminalWebglController(terminal, () => {
+      terminal.refresh(0, terminal.rows - 1);
+      fitControllerRef.current?.requestFit();
+    });
+    webglControllerRef.current = webglController;
+    if (visible) webglController.attach();
     previousSessionRef.current = {
       buffer: "",
       status: "closed",
@@ -433,10 +491,7 @@ export function TerminalViewport({
 
     const clearSelectionAction = () => {
       selectionActionRequestIdRef.current += 1;
-      if (selectionActionTimerRef.current !== null) {
-        window.clearTimeout(selectionActionTimerRef.current);
-        selectionActionTimerRef.current = null;
-      }
+      selectionActionOpenRequestRef.current = null;
     };
 
     const readSelectionAction = (): {
@@ -484,7 +539,7 @@ export function TerminalViewport({
         clearSelectionAction();
         return;
       }
-      if (selectionActionOpenRef.current) {
+      if (selectionActionOpenRequestRef.current !== null) {
         return;
       }
       const nextAction = readSelectionAction();
@@ -493,7 +548,7 @@ export function TerminalViewport({
         return;
       }
       const requestId = ++selectionActionRequestIdRef.current;
-      selectionActionOpenRef.current = true;
+      selectionActionOpenRequestRef.current = requestId;
       try {
         const clicked = await localApi.contextMenu.show(
           [{ id: "add-to-chat", label: "Add to chat" }],
@@ -506,18 +561,34 @@ export function TerminalViewport({
         terminalRef.current?.clearSelection();
         terminalRef.current?.focus();
       } finally {
-        selectionActionOpenRef.current = false;
+        if (selectionActionOpenRequestRef.current === requestId) {
+          selectionActionOpenRequestRef.current = null;
+        }
       }
     };
 
-    const sendTerminalInput = async (data: string, fallbackError: string) => {
+    let terminalInputFallbackError = "Terminal write failed";
+    const inputQueue = createTerminalInputQueue({
+      write: async (data) => {
+        const result = await writeTerminal(data);
+        if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+        throw squashAtomCommandFailure(result);
+      },
+      onWriteError: (error) => {
+        const activeTerminal = terminalRef.current;
+        if (!activeTerminal) return;
+        writeSystemMessage(
+          activeTerminal,
+          error instanceof Error ? error.message : terminalInputFallbackError,
+        );
+      },
+    });
+
+    const sendTerminalInput = (data: string, fallbackError: string) => {
       const activeTerminal = terminalRef.current;
       if (!activeTerminal) return;
-      const result = await writeTerminal(data);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        writeSystemMessage(activeTerminal, error instanceof Error ? error.message : fallbackError);
-      }
+      terminalInputFallbackError = fallbackError;
+      inputQueue.enqueue(data);
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
@@ -538,7 +609,7 @@ export function TerminalViewport({
       if (navigationData !== null) {
         event.preventDefault();
         event.stopPropagation();
-        void sendTerminalInput(navigationData, "Failed to move cursor");
+        sendTerminalInput(navigationData, "Failed to move cursor");
         return false;
       }
 
@@ -546,14 +617,14 @@ export function TerminalViewport({
       if (deleteData !== null) {
         event.preventDefault();
         event.stopPropagation();
-        void sendTerminalInput(deleteData, "Failed to delete terminal input");
+        sendTerminalInput(deleteData, "Failed to delete terminal input");
         return false;
       }
 
       if (!isTerminalClearShortcut(event)) return true;
       event.preventDefault();
       event.stopPropagation();
-      void sendTerminalInput("\u000c", "Failed to clear terminal");
+      sendTerminalInput("\u000c", "Failed to clear terminal");
       return false;
     });
 
@@ -630,18 +701,16 @@ export function TerminalViewport({
       },
     });
 
+    const replayInputGuard = createTerminalReplayInputGuard();
+    const userInputDisposable = subscribeToTerminalUserInput(terminal, () => {
+      replayInputGuard.markUserInput();
+    });
     const inputDisposable = terminal.onData((data) => {
-      void (async () => {
-        const result = await writeTerminal(data);
-        if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-          return;
-        }
-        const error = squashAtomCommandFailure(result);
-        writeSystemMessage(
-          terminal,
-          error instanceof Error ? error.message : "Terminal write failed",
-        );
-      })();
+      // Replaying persisted PTY bytes can make xterm answer old device queries.
+      // Those replies are not user input and must not enter the current shell.
+      if (!replayInputGuard.shouldForwardData(replayWritesInFlightRef.current > 0)) return;
+      terminalInputFallbackError = "Terminal write failed";
+      inputQueue.enqueue(data);
     });
 
     const selectionDisposable = terminal.onSelectionChange(() => {
@@ -649,32 +718,40 @@ export function TerminalViewport({
         return;
       }
       clearSelectionAction();
+      selectedWheelState.remainder = 0;
     });
 
-    const handleMouseUp = (event: MouseEvent) => {
-      const shouldHandle = shouldHandleTerminalSelectionMouseUp(
-        selectionGestureActiveRef.current,
-        event.button,
-      );
-      selectionGestureActiveRef.current = false;
-      if (!shouldHandle) {
+    const handleSelectionContextMenu = (event: MouseEvent) => {
+      if (!terminal.hasSelection()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      clearSelectionAction();
+      selectionPointerRef.current = { x: event.clientX, y: event.clientY };
+      void showSelectionAction();
+    };
+
+    const selectedWheelState = { remainder: 0 };
+    const handleWheelWhileSelected = (event: WheelEvent) => {
+      if (
+        !terminal.hasSelection() ||
+        !terminal.element?.classList.contains("enable-mouse-events")
+      ) {
         return;
       }
-      selectionPointerRef.current = { x: event.clientX, y: event.clientY };
-      const delay = terminalSelectionActionDelayForClickCount(event.detail);
-      selectionActionTimerRef.current = window.setTimeout(() => {
-        selectionActionTimerRef.current = null;
-        window.requestAnimationFrame(() => {
-          void showSelectionAction();
-        });
-      }, delay);
+      const screen = terminal.element.querySelector<HTMLElement>(".xterm-screen");
+      const screenHeight = screen?.getBoundingClientRect().height ?? 0;
+      const rows = consumeTerminalSelectionWheelRows(selectedWheelState, {
+        deltaY: event.deltaY,
+        deltaMode: event.deltaMode,
+        rows: terminal.rows,
+        cellHeight: screenHeight > 0 ? screenHeight / terminal.rows : 1,
+      });
+      if (rows !== 0) terminal.scrollLines(rows);
+      event.preventDefault();
+      event.stopImmediatePropagation();
     };
-    const handlePointerDown = (event: PointerEvent) => {
-      clearSelectionAction();
-      selectionGestureActiveRef.current = event.button === 0;
-    };
-    window.addEventListener("mouseup", handleMouseUp);
-    mount.addEventListener("pointerdown", handlePointerDown);
+    mount.addEventListener("contextmenu", handleSelectionContextMenu);
+    mount.addEventListener("wheel", handleWheelWhileSelected, { capture: true, passive: false });
 
     const themeObserver = new MutationObserver(() => {
       const activeTerminal = terminalRef.current;
@@ -687,36 +764,27 @@ export function TerminalViewport({
       attributeFilter: ["class", "style"],
     });
 
-    const fitTimer = window.setTimeout(() => {
-      const activeTerminal = terminalRef.current;
-      const activeFitAddon = fitAddonRef.current;
-      if (!activeTerminal || !activeFitAddon) return;
-      const wasAtBottom =
-        activeTerminal.buffer.active.viewportY >= activeTerminal.buffer.active.baseY;
-      fitTerminalSafely(activeFitAddon);
-      if (wasAtBottom) {
-        activeTerminal.scrollToBottom();
-      }
-      void resizeTerminal(activeTerminal.cols, activeTerminal.rows);
-    }, 30);
-
     return () => {
-      window.clearTimeout(fitTimer);
+      clearSelectionAction();
+      inputQueue.dispose();
+      replayInputGuard.reset();
+      userInputDisposable?.dispose();
       inputDisposable.dispose();
       selectionDisposable.dispose();
       terminalLinksDisposable.dispose();
-      if (selectionActionTimerRef.current !== null) {
-        window.clearTimeout(selectionActionTimerRef.current);
-      }
-      window.removeEventListener("mouseup", handleMouseUp);
-      mount.removeEventListener("pointerdown", handlePointerDown);
+      mount.removeEventListener("contextmenu", handleSelectionContextMenu);
+      mount.removeEventListener("wheel", handleWheelWhileSelected, { capture: true });
       themeObserver.disconnect();
+      fitController.dispose();
       terminalRef.current = null;
-      fitAddonRef.current = null;
+      fitControllerRef.current = null;
+      webglControllerRef.current = null;
+      replayWritesInFlightRef.current = 0;
+      webglController.dispose();
       terminal.dispose();
     };
-    // autoFocus is intentionally omitted;
-    // it is only read at mount time and must not trigger terminal teardown/recreation.
+    // autoFocus and visible are intentionally omitted; they are managed by
+    // focused effects and must not tear down the terminal session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, environmentId, runtimeEnvKey, terminalId, threadId, worktreePath]);
 
@@ -734,19 +802,28 @@ export function TerminalViewport({
     }
 
     const previous = previousSessionRef.current;
-    if (current.version === previous.version) {
+    const bufferChanged = current.version !== previous.version;
+    const presentationChanged =
+      current.error !== previous.error || current.status !== previous.status;
+    if (!bufferChanged && !presentationChanged) {
       return;
     }
 
-    if (
-      current.buffer.length >= previous.buffer.length &&
-      current.buffer.startsWith(previous.buffer)
-    ) {
-      terminal.write(current.buffer.slice(previous.buffer.length));
-    } else {
-      writeTerminalBuffer(terminal, current.buffer);
+    if (bufferChanged) {
+      const canAppend =
+        previous.version > 0 &&
+        current.buffer.length >= previous.buffer.length &&
+        current.buffer.startsWith(previous.buffer);
+      if (canAppend) {
+        terminal.write(current.buffer.slice(previous.buffer.length));
+      } else {
+        replayWritesInFlightRef.current += 1;
+        writeTerminalBuffer(terminal, current.buffer, () => {
+          replayWritesInFlightRef.current = Math.max(0, replayWritesInFlightRef.current - 1);
+        });
+      }
+      terminal.clearSelection();
     }
-    terminal.clearSelection();
 
     if (current.error !== null && current.error !== previous.error) {
       writeSystemMessage(terminal, current.error);
@@ -754,6 +831,10 @@ export function TerminalViewport({
 
     if (current.status === "running") {
       hasHandledExitRef.current = false;
+      if (exitCloseTimeoutRef.current !== null) {
+        window.clearTimeout(exitCloseTimeoutRef.current);
+        exitCloseTimeoutRef.current = null;
+      }
     } else if (
       (current.status === "closed" || current.status === "exited") &&
       current.status !== previous.status &&
@@ -764,20 +845,24 @@ export function TerminalViewport({
         terminal,
         current.status === "closed" ? "Terminal closed" : "Process exited",
       );
-      window.setTimeout(() => {
+      exitCloseTimeoutRef.current = window.setTimeout(() => {
+        exitCloseTimeoutRef.current = null;
         if (hasHandledExitRef.current) {
           handleSessionExited();
         }
       }, 0);
     }
-
-    if (previous.version === 0 && autoFocus) {
-      window.requestAnimationFrame(() => {
-        terminal.focus();
-      });
-    }
     previousSessionRef.current = current;
-  }, [autoFocus, terminalBuffer, terminalError, terminalStatus, terminalVersion]);
+  }, [terminalBuffer, terminalError, terminalStatus, terminalVersion]);
+
+  useEffect(() => {
+    return () => {
+      if (exitCloseTimeoutRef.current !== null) {
+        window.clearTimeout(exitCloseTimeoutRef.current);
+        exitCloseTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -792,16 +877,27 @@ export function TerminalViewport({
   }, [autoFocus, focusRequestId]);
 
   useEffect(() => {
-    const terminal = terminalRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) return;
-    const wasAtBottom = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
+    const webglController = webglControllerRef.current;
+    if (!webglController) return;
+    if (!visible) {
+      webglController.dispose();
+      return;
+    }
+
     const frame = window.requestAnimationFrame(() => {
-      fitTerminalSafely(fitAddon);
-      if (wasAtBottom) {
-        terminal.scrollToBottom();
-      }
-      void resizeTerminal(terminal.cols, terminal.rows);
+      webglController.attach();
+      const terminal = terminalRef.current;
+      if (terminal) terminal.refresh(0, terminal.rows - 1);
+      fitControllerRef.current?.requestFit();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [visible]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      fitControllerRef.current?.requestFit();
     });
     return () => {
       window.cancelAnimationFrame(frame);
@@ -1360,6 +1456,7 @@ export default function ThreadTerminalDrawer({
                           resizeEpoch={resizeEpoch}
                           drawerHeight={drawerHeight}
                           keybindings={keybindings}
+                          visible={visible}
                         />
                       </div>
                     </div>
@@ -1388,6 +1485,7 @@ export default function ThreadTerminalDrawer({
                   resizeEpoch={resizeEpoch}
                   drawerHeight={drawerHeight}
                   keybindings={keybindings}
+                  visible={visible}
                 />
               </div>
             )}
