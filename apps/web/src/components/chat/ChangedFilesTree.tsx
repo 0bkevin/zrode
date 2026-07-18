@@ -6,7 +6,7 @@ import {
   summarizeTurnDiffStats,
   type TurnDiffTreeNode,
 } from "../../lib/turnDiffTree";
-import { ChevronRightIcon, FolderIcon, FolderClosedIcon } from "lucide-react";
+import { ChevronRightIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { PierreEntryIcon } from "./PierreEntryIcon";
@@ -139,14 +139,14 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
             <ChevronRightIcon
               aria-hidden="true"
               className={cn(
-                "size-3.5 shrink-0 text-muted-foreground/70 transition-transform group-hover:text-foreground/80",
+                "size-3 shrink-0 text-muted-foreground/70 transition-transform group-hover:text-foreground/80",
                 isExpanded && "rotate-90",
               )}
             />
             {isExpanded ? (
-              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/75" />
+              <FolderOpenIcon className="size-3 shrink-0 text-muted-foreground/50" />
             ) : (
-              <FolderClosedIcon className="size-3.5 shrink-0 text-muted-foreground/75" />
+              <FolderIcon className="size-3 shrink-0 text-muted-foreground/50" />
             )}
             <span className="truncate font-mono text-[11px] text-muted-foreground/90 group-hover:text-foreground/90">
               {node.name}
@@ -175,13 +175,13 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
         onClick={() => onOpenTurnDiff(turnId, node.path)}
       >
         {hasDirectoryNodes || depth > 0 ? (
-          <span aria-hidden="true" className="size-3.5 shrink-0" />
+          <span aria-hidden="true" className="size-3 shrink-0" />
         ) : null}
         <PierreEntryIcon
           pathValue={node.path}
           kind="file"
           theme={resolvedTheme}
-          className="size-3.5 text-muted-foreground/70"
+          className="size-3 text-muted-foreground/70"
         />
         <span className="truncate font-mono text-[11px] text-muted-foreground/80 group-hover:text-foreground/90">
           {node.name}

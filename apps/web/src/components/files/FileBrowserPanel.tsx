@@ -16,7 +16,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
-import { ZRODE_PIERRE_ICONS } from "~/pierre-icons";
+import { ZRODE_PIERRE_ICONS, ZRODE_PIERRE_ICON_TREE_CSS } from "~/pierre-icons";
 
 import {
   resetFileTreePathsPreservingExpansion,
@@ -91,8 +91,44 @@ const TREE_UNSAFE_CSS = `
     --trees-border-color-override: color-mix(in srgb, currentColor 14%, transparent);
     --trees-font-family-override: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     --trees-font-size-override: 12px;
+    ${ZRODE_PIERRE_ICON_TREE_CSS}
+    --zrode-folder-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    --zrode-folder-open-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
   button[data-type='item'] { border-radius: 0; }
+  [data-item-section='icon'] {
+    width: calc(var(--trees-icon-width) * 2);
+    justify-content: flex-start;
+  }
+  [data-item-type='file'] > [data-item-section='icon'] > svg {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 12px;
+    margin-inline: calc(var(--trees-icon-width) + 2px) 2px;
+  }
+  [data-icon-name='file-tree-icon-file'] { color: var(--trees-fg-muted); }
+  [data-item-type='folder'] > [data-item-section='icon'] > svg {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    margin-inline: 1px;
+    opacity: 0.7;
+  }
+  [data-item-type='folder'] > [data-item-section='icon']::after {
+    content: '';
+    width: 12px;
+    height: 12px;
+    flex: 0 0 12px;
+    margin-inline: 2px;
+    background: currentColor;
+    opacity: 0.5;
+    -webkit-mask: var(--zrode-folder-mask) center / contain no-repeat;
+    mask: var(--zrode-folder-mask) center / contain no-repeat;
+  }
+  [data-item-type='folder'][aria-expanded='true'] > [data-item-section='icon']::after {
+    -webkit-mask-image: var(--zrode-folder-open-mask);
+    mask-image: var(--zrode-folder-open-mask);
+  }
 `;
 
 function treePath(entry: ProjectEntry): string {
