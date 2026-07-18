@@ -17,6 +17,8 @@ import * as VcsProcess from "./VcsProcess.ts";
 export interface VcsCaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  /** Keep an existing ref instead of replacing it. Used for turn-start snapshots. */
+  readonly ifMissing?: boolean;
 }
 
 export interface VcsRestoreCheckpointInput {
@@ -28,6 +30,8 @@ export interface VcsRestoreCheckpointInput {
 export interface VcsDiffCheckpointsInput {
   readonly cwd: string;
   readonly fromCheckpointRef: CheckpointRef;
+  /** Older checkpoints do not have a dedicated turn-start ref. */
+  readonly fallbackFromCheckpointRef?: CheckpointRef;
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;

@@ -39,6 +39,33 @@ function normalizePathSegments(pathValue: string): string[] {
     .filter((segment) => segment.length > 0);
 }
 
+/** Normalize separators and collapse duplicate summary rows into one file. */
+export function normalizeTurnDiffFiles(
+  files: ReadonlyArray<TurnDiffFileChange>,
+): TurnDiffFileChange[] {
+  const filesByPath = new Map<string, TurnDiffFileChange>();
+  for (const file of files) {
+    const pathValue = normalizePathSegments(file.path).join("/");
+    if (pathValue.length === 0) continue;
+
+    const existing = filesByPath.get(pathValue);
+    filesByPath.set(
+      pathValue,
+      existing
+        ? {
+            ...file,
+            path: pathValue,
+            additions: existing.additions + file.additions,
+            deletions: existing.deletions + file.deletions,
+          }
+        : { ...file, path: pathValue },
+    );
+  }
+  return Array.from(filesByPath.values()).toSorted((left, right) =>
+    left.path.localeCompare(right.path, undefined, SORT_LOCALE_OPTIONS),
+  );
+}
+
 function compareByName(a: { name: string }, b: { name: string }): number {
   return a.name.localeCompare(b.name, undefined, SORT_LOCALE_OPTIONS);
 }
@@ -97,7 +124,7 @@ function toTreeNodes(directory: MutableDirectoryNode): TurnDiffTreeNode[] {
 }
 
 export function summarizeTurnDiffStats(files: ReadonlyArray<TurnDiffFileChange>): TurnDiffStat {
-  return files.reduce(
+  return normalizeTurnDiffFiles(files).reduce(
     (acc, file) => {
       const stat = readStat(file);
       if (!stat) return acc;
@@ -119,7 +146,7 @@ export function buildTurnDiffTree(files: ReadonlyArray<TurnDiffFileChange>): Tur
     files: [],
   };
 
-  for (const file of files) {
+  for (const file of normalizeTurnDiffFiles(files)) {
     const segments = normalizePathSegments(file.path);
     if (segments.length === 0) {
       continue;

@@ -25,6 +25,8 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 export interface CaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  /** Atomically keep an existing ref instead of replacing it. */
+  readonly ifMissing?: boolean;
 }
 
 export interface RestoreCheckpointInput {
@@ -36,6 +38,8 @@ export interface RestoreCheckpointInput {
 export interface DiffCheckpointsInput {
   readonly cwd: string;
   readonly fromCheckpointRef: CheckpointRef;
+  /** Fallback used by checkpoints created before per-turn baseline refs existed. */
+  readonly fallbackFromCheckpointRef?: CheckpointRef;
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;

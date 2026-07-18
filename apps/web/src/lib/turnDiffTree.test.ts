@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildTurnDiffTree, summarizeTurnDiffStats } from "./turnDiffTree";
+import { buildTurnDiffTree, normalizeTurnDiffFiles, summarizeTurnDiffStats } from "./turnDiffTree";
+
+describe("normalizeTurnDiffFiles", () => {
+  it("normalizes separators and merges duplicate file rows", () => {
+    expect(
+      normalizeTurnDiffFiles([
+        { path: "apps\\web\\index.ts", kind: "modified", additions: 2, deletions: 1 },
+        { path: "apps/web/index.ts", kind: "modified", additions: 3, deletions: 4 },
+      ]),
+    ).toEqual([{ path: "apps/web/index.ts", kind: "modified", additions: 5, deletions: 5 }]);
+  });
+});
 
 describe("summarizeTurnDiffStats", () => {
   it("sums only files with numeric additions/deletions", () => {

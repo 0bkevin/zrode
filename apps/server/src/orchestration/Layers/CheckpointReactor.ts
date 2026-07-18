@@ -21,7 +21,9 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
+import { captureTurnBaseline } from "../../checkpointing/TurnBaseline.ts";
 import {
+  checkpointBaselineRefForThreadTurn,
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
@@ -80,10 +82,6 @@ function autoTitleCandidatesForMessageText(text: string): ReadonlySet<string> {
     candidates.add(truncate(withoutPromptEffortPrefix));
   }
   return candidates;
-}
-
-function isHistoryImportDomainEvent(event: OrchestrationEvent): boolean {
-  return event.metadata.adapterKey?.startsWith("history-import:") ?? false;
 }
 
 function isTurnCompletionActivityEvent(
@@ -309,22 +307,13 @@ const make = Effect.gen(function* () {
     readonly assistantMessageId: MessageId | undefined;
     readonly createdAt: string;
   }) {
-    const fromTurnCount = Math.max(0, input.turnCount - 1);
-    const fromCheckpointRef = checkpointRefForThreadTurn(input.threadId, fromTurnCount);
+    const fromCheckpointRef = checkpointBaselineRefForThreadTurn(input.threadId, input.turnCount);
     const targetCheckpointRef = checkpointRefForThreadTurn(input.threadId, input.turnCount);
 
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
       checkpointRef: fromCheckpointRef,
     });
-    if (!fromCheckpointExists) {
-      yield* Effect.logWarning("checkpoint capture missing pre-turn baseline", {
-        threadId: input.threadId,
-        turnId: input.turnId,
-        fromTurnCount,
-      });
-    }
-
     yield* checkpointStore.captureCheckpoint({
       cwd: input.cwd,
       checkpointRef: targetCheckpointRef,
@@ -334,40 +323,60 @@ const make = Effect.gen(function* () {
     // reflects files created or deleted during this turn.
     yield* workspaceEntries.refresh(input.cwd);
 
-    const files = yield* checkpointStore
-      .diffCheckpoints({
-        cwd: input.cwd,
-        fromCheckpointRef,
-        toCheckpointRef: targetCheckpointRef,
-        fallbackFromToHead: false,
-        ignoreWhitespace: false,
-      })
-      .pipe(
-        Effect.map((diff) =>
-          parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
-            path: file.path,
-            kind: "modified" as const,
-            additions: file.additions,
-            deletions: file.deletions,
-          })),
-        ),
-        Effect.tapError((error) =>
-          appendCaptureFailureActivity({
-            threadId: input.threadId,
-            turnId: input.turnId,
-            detail: `Checkpoint captured, but turn diff summary is unavailable: ${error.message}`,
-            createdAt: input.createdAt,
-          }),
-        ),
-        Effect.catch((error) =>
-          Effect.logWarning("failed to derive checkpoint file summary", {
+    const unavailableSummary = (detail: string) =>
+      appendCaptureFailureActivity({
+        threadId: input.threadId,
+        turnId: input.turnId,
+        detail,
+        createdAt: input.createdAt,
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to record unavailable checkpoint file summary", {
             threadId: input.threadId,
             turnId: input.turnId,
             turnCount: input.turnCount,
-            detail: error.message,
-          }).pipe(Effect.as([])),
+            cause: Cause.pretty(cause),
+          }),
         ),
+        Effect.andThen(
+          Effect.logWarning("checkpoint file summary is unavailable", {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            turnCount: input.turnCount,
+            detail,
+          }),
+        ),
+        Effect.as({ files: [], status: "error" as const }),
       );
+
+    const summary = fromCheckpointExists
+      ? yield* checkpointStore
+          .diffCheckpoints({
+            cwd: input.cwd,
+            fromCheckpointRef,
+            toCheckpointRef: targetCheckpointRef,
+            fallbackFromToHead: false,
+            ignoreWhitespace: false,
+          })
+          .pipe(
+            Effect.map((diff) => ({
+              files: parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
+                path: file.path,
+                kind: "modified" as const,
+                additions: file.additions,
+                deletions: file.deletions,
+              })),
+              status: input.status,
+            })),
+            Effect.catch((error) =>
+              unavailableSummary(
+                `Checkpoint captured, but turn diff summary is unavailable: ${error.message}`,
+              ),
+            ),
+          )
+      : yield* unavailableSummary(
+          `Checkpoint captured, but its pre-turn baseline ${fromCheckpointRef} is unavailable.`,
+        );
 
     const assistantMessageId =
       input.assistantMessageId ??
@@ -383,8 +392,8 @@ const make = Effect.gen(function* () {
       turnId: input.turnId,
       completedAt: input.createdAt,
       checkpointRef: targetCheckpointRef,
-      status: input.status,
-      files,
+      status: summary.status,
+      files: summary.files,
       assistantMessageId,
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,
@@ -395,7 +404,7 @@ const make = Effect.gen(function* () {
       turnId: input.turnId,
       checkpointTurnCount: input.turnCount,
       checkpointRef: targetCheckpointRef,
-      status: input.status,
+      status: summary.status,
       createdAt: input.createdAt,
     });
     yield* receiptBus.publish({
@@ -417,7 +426,7 @@ const make = Effect.gen(function* () {
         summary: "Checkpoint captured",
         payload: {
           turnCount: input.turnCount,
-          status: input.status,
+          status: summary.status,
         },
         turnId: input.turnId,
         createdAt: input.createdAt,
@@ -593,24 +602,17 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const currentTurnCount = currentCheckpointTurnCount(thread);
-      const baselineCheckpointRef = checkpointRefForThreadTurn(thread.id, currentTurnCount);
-      const baselineExists = yield* checkpointStore.hasCheckpointRef({
+      const checkpointTurnCount = currentCheckpointTurnCount(thread) + 1;
+      const baselineCheckpointRef = yield* captureTurnBaseline({
+        checkpointStore,
         cwd: checkpointCwd,
-        checkpointRef: baselineCheckpointRef,
-      });
-      if (baselineExists) {
-        return;
-      }
-
-      yield* checkpointStore.captureCheckpoint({
-        cwd: checkpointCwd,
-        checkpointRef: baselineCheckpointRef,
+        threadId: thread.id,
+        turnCount: checkpointTurnCount,
       });
       yield* receiptBus.publish({
         type: "checkpoint.baseline.captured",
         threadId: thread.id,
-        checkpointTurnCount: currentTurnCount,
+        checkpointTurnCount,
         checkpointRef: baselineCheckpointRef,
         createdAt: event.createdAt,
       });
@@ -635,68 +637,6 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-  });
-
-  const ensurePreTurnBaselineFromDomainTurnStart = Effect.fn(
-    "ensurePreTurnBaselineFromDomainTurnStart",
-  )(function* (
-    event: Extract<
-      OrchestrationEvent,
-      { type: "thread.turn-start-requested" | "thread.message-sent" }
-    >,
-  ) {
-    if (isHistoryImportDomainEvent(event)) {
-      return;
-    }
-
-    if (event.type === "thread.message-sent") {
-      if (
-        event.payload.role !== "user" ||
-        event.payload.streaming ||
-        event.payload.turnId !== null
-      ) {
-        return;
-      }
-    }
-
-    const threadId = event.payload.threadId;
-    const thread = yield* resolveThreadDetail(threadId);
-    if (!thread) {
-      return;
-    }
-
-    const projects = yield* resolveThreadProjects(thread.projectId);
-    const checkpointCwd = yield* resolveCheckpointCwd({
-      threadId,
-      thread,
-      projects,
-      preferSessionRuntime: false,
-    });
-    if (!checkpointCwd) {
-      return;
-    }
-
-    const currentTurnCount = currentCheckpointTurnCount(thread);
-    const baselineCheckpointRef = checkpointRefForThreadTurn(threadId, currentTurnCount);
-    const baselineExists = yield* checkpointStore.hasCheckpointRef({
-      cwd: checkpointCwd,
-      checkpointRef: baselineCheckpointRef,
-    });
-    if (baselineExists) {
-      return;
-    }
-
-    yield* checkpointStore.captureCheckpoint({
-      cwd: checkpointCwd,
-      checkpointRef: baselineCheckpointRef,
-    });
-    yield* receiptBus.publish({
-      type: "checkpoint.baseline.captured",
-      threadId,
-      checkpointTurnCount: currentTurnCount,
-      checkpointRef: baselineCheckpointRef,
-      createdAt: event.occurredAt,
-    });
   });
 
   const restoreThreadToTurnCount = Effect.fn("restoreThreadToTurnCount")(function* (input: {
@@ -793,6 +733,9 @@ const make = Effect.gen(function* () {
     for (const checkpoint of thread.checkpoints) {
       if (checkpoint.checkpointTurnCount > input.turnCount) {
         staleCheckpointRefs.push(checkpoint.checkpointRef);
+        staleCheckpointRefs.push(
+          checkpointBaselineRefForThreadTurn(input.threadId, checkpoint.checkpointTurnCount),
+        );
       }
     }
 
@@ -983,11 +926,6 @@ const make = Effect.gen(function* () {
   );
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
-    if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
-      yield* ensurePreTurnBaselineFromDomainTurnStart(event);
-      return;
-    }
-
     if (event.type === "thread.checkpoint-revert-requested") {
       yield* handleRevertRequested(event).pipe(
         Effect.catch((error) =>
@@ -1154,8 +1092,6 @@ const make = Effect.gen(function* () {
           return enqueueTurnCompletionEvent(event);
         }
         if (
-          event.type !== "thread.turn-start-requested" &&
-          event.type !== "thread.message-sent" &&
           event.type !== "thread.checkpoint-revert-requested" &&
           event.type !== "thread.last-user-message-edit-requested" &&
           event.type !== "thread.turn-diff-completed"

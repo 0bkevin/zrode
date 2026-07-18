@@ -65,4 +65,26 @@ describe("parseTurnDiffFilesFromUnifiedDiff", () => {
       { path: "a.txt", additions: 2, deletions: 1 },
     ]);
   });
+
+  it("merges repeated patch sections for the same file", () => {
+    const diff = [
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -1 +1 @@",
+      "-one",
+      "+two",
+      "diff --git a/a.txt b/a.txt",
+      "--- a/a.txt",
+      "+++ b/a.txt",
+      "@@ -3 +3,2 @@",
+      " three",
+      "+four",
+      "",
+    ].join("\n");
+
+    expect(parseTurnDiffFilesFromUnifiedDiff(diff)).toEqual([
+      { path: "a.txt", additions: 2, deletions: 1 },
+    ]);
+  });
 });

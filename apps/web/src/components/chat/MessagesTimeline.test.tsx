@@ -1,4 +1,4 @@
-import { EnvironmentId, MessageId } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, TurnId } from "@t3tools/contracts";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
@@ -553,6 +553,68 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("zrode/apps/web/src/session-logic.ts");
     expect(markup).not.toContain("C:/Users/mike/dev-stuff/zrode/apps/web/src/session-logic.ts");
+  });
+
+  it("collapses a new changed-files tree by default", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const assistantMessageId = MessageId.make("assistant-with-diff");
+    const turnId = TurnId.make("turn-with-diff");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "assistant-entry-with-diff",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: assistantMessageId,
+              role: "assistant",
+              text: "Done.",
+              turnId,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: false,
+            },
+          },
+        ]}
+        turnDiffSummaryByAssistantMessageId={
+          new Map([
+            [
+              assistantMessageId,
+              {
+                turnId,
+                checkpointTurnCount: 1,
+                checkpointRef: "checkpoint-1" as never,
+                status: "ready" as const,
+                files: [
+                  {
+                    path: "apps/web/src/first.ts",
+                    kind: "modified",
+                    additions: 1,
+                    deletions: 0,
+                  },
+                  {
+                    path: "apps/web/src/second.ts",
+                    kind: "modified",
+                    additions: 2,
+                    deletions: 1,
+                  },
+                ],
+                assistantMessageId,
+                completedAt: MESSAGE_CREATED_AT,
+              },
+            ],
+          ])
+        }
+      />,
+    );
+
+    expect(markup).toContain("Changed files (2)");
+    expect(markup).toContain("Expand all");
+    expect(markup).not.toContain("Collapse all");
+    expect(markup).not.toContain("first.ts");
+    expect(markup).not.toContain("second.ts");
   });
 
   it("renders review comment contexts as structured cards instead of raw tags", async () => {

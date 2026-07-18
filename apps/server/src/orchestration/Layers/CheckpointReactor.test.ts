@@ -53,7 +53,10 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
-import { checkpointRefForThreadTurn } from "../../checkpointing/Utils.ts";
+import {
+  checkpointBaselineRefForThreadTurn,
+  checkpointRefForThreadTurn,
+} from "../../checkpointing/Utils.ts";
 import { ServerConfig } from "../../config.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
@@ -539,7 +542,7 @@ describe("CheckpointReactor", () => {
     });
     await waitForGitRefExists(
       harness.cwd,
-      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+      checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1),
     );
 
     NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
@@ -603,6 +606,67 @@ describe("CheckpointReactor", () => {
       (event) => event.type === "thread.turn-quiesced",
     );
     expect(events.some((event) => event.type === "thread.turn-quiesced")).toBe(true);
+  });
+
+  it("excludes workspace changes made between turns from the next turn summary", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-gap-turn-started-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId: asTurnId("gap-turn-1"),
+    });
+    await waitForGitRefExists(harness.cwd, checkpointBaselineRefForThreadTurn(threadId, 1));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-gap-turn-completed-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId: asTurnId("gap-turn-1"),
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) =>
+      thread.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 1),
+    );
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "unrelated.txt"), "outside the turn\n", "utf8");
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-gap-turn-started-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId: asTurnId("gap-turn-2"),
+    });
+    await waitForGitRefExists(harness.cwd, checkpointBaselineRefForThreadTurn(threadId, 2));
+
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v3\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-gap-turn-completed-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId: asTurnId("gap-turn-2"),
+      payload: { state: "completed" },
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 2),
+    );
+    const snapshot = await harness.readModel();
+    const thread = snapshot.threads.find((entry) => entry.id === threadId);
+    const secondTurn = thread?.checkpoints.find(
+      (checkpoint) => checkpoint.checkpointTurnCount === 2,
+    );
+    expect(secondTurn?.files.map((file) => file.path)).toEqual(["README.md"]);
   });
 
   it("recovers an unmatched durable turn completion before queued work can resume", async () => {
@@ -741,7 +805,7 @@ describe("CheckpointReactor", () => {
     });
     await waitForGitRefExists(
       harness.cwd,
-      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+      checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1),
     );
 
     NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
@@ -815,7 +879,7 @@ describe("CheckpointReactor", () => {
     });
     await waitForGitRefExists(
       harness.cwd,
-      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+      checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1),
     );
 
     NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
@@ -883,12 +947,13 @@ describe("CheckpointReactor", () => {
     );
 
     expect(thread.checkpoints[0]?.checkpointTurnCount).toBe(1);
+    expect(thread.checkpoints[0]).toMatchObject({ status: "error", files: [] });
     expect(
       thread.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
     ).toBe(true);
   });
 
-  it("captures pre-turn baseline from project workspace root when thread worktree is unset", async () => {
+  it("uses runtime turn start as the fallback baseline capture path", async () => {
     const harness = await createHarness({
       hasSession: false,
       seedFilesystemCheckpoints: false,
@@ -912,9 +977,23 @@ describe("CheckpointReactor", () => {
       }),
     );
 
+    await harness.drain();
+    expect(
+      gitRefExists(harness.cwd, checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1)),
+    ).toBe(false);
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-started-for-fallback-baseline"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-fallback-baseline"),
+    });
+
     await waitForGitRefExists(
       harness.cwd,
-      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+      checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1),
     );
     expect(
       gitShowFileAtRef(
@@ -1071,7 +1150,7 @@ describe("CheckpointReactor", () => {
 
     await waitForGitRefExists(
       harness.cwd,
-      checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+      checkpointBaselineRefForThreadTurn(ThreadId.make("thread-1"), 1),
     );
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0)),
