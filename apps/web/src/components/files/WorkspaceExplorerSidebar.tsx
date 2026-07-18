@@ -69,6 +69,7 @@ function WorkspaceExplorerSidebar({
   );
   const view = panelState.workspaceSidebarView;
   const writeFile = useAtomCommand(projectEnvironment.writeFile, { reportFailure: false });
+  const copyFile = useAtomCommand(projectEnvironment.copyFile, { reportFailure: false });
   const createDirectory = useAtomCommand(projectEnvironment.createDirectory, {
     reportFailure: false,
   });
@@ -136,6 +137,20 @@ function WorkspaceExplorerSidebar({
       throw error instanceof Error ? error : new Error("Could not create the folder.");
     },
     [createDirectory, cwd, environmentId],
+  );
+
+  const copyWorkspaceFile = useCallback(
+    async (sourceRelativePath: string, destinationDirectoryRelativePath: string) => {
+      const result = await copyFile({
+        environmentId,
+        input: { cwd, sourceRelativePath, destinationDirectoryRelativePath },
+      });
+      if (result._tag === "Success") return result.value.destinationRelativePath;
+      if (isAtomCommandInterrupted(result)) throw new Error("File copy was canceled.");
+      const error = squashAtomCommandFailure(result);
+      throw error instanceof Error ? error : new Error("Could not copy the file.");
+    },
+    [copyFile, cwd, environmentId],
   );
 
   const permanentlyDeleteEntry = useCallback(
@@ -306,6 +321,7 @@ function WorkspaceExplorerSidebar({
           onOpenFile={(relativePath) => onOpenFile(relativePath)}
           onCreateFile={createFile}
           onCreateDirectory={createFolder}
+          onCopyFile={copyWorkspaceFile}
           onDeleteEntry={permanentlyDeleteEntry}
           visible={view === "explorer"}
         />

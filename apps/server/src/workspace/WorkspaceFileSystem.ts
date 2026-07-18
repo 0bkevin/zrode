@@ -7,12 +7,15 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 
 import {
   PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
   PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
   ProjectFileDiskRevision,
   ProjectWriteFilePrecondition,
+  type ProjectCopyFileInput,
+  type ProjectCopyFileResult,
   type ProjectCreateDirectoryInput,
   type ProjectCreateDirectoryResult,
   type ProjectDeleteEntryInput,
@@ -48,6 +51,7 @@ const PROJECT_LIST_DIRECTORY_MAX_ENTRIES = 5_000;
 const PROJECT_LIST_DIRECTORY_MAX_CONCURRENCY = 8;
 const PROJECT_LIST_DIRECTORY_SYMLINK_CONCURRENCY = 32;
 const REVISION_READ_BUFFER_BYTES = 64 * 1024;
+const PORTABLE_FILESYSTEM_BASENAME_MAX_LENGTH = 255;
 const CREATE_DIRECTORY_STDERR_MAX_BYTES = 4_096;
 const CREATE_DIRECTORY_HELPER_MAX_CONCURRENCY = 4;
 const ENTRY_TREE_REVISION_CONCURRENCY = 32;
@@ -106,6 +110,7 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<W
       "close",
       "make-directory",
       "write-file",
+      "copy-file",
       "delete-entry",
       "move-entry",
     ]),
@@ -180,7 +185,7 @@ export class WorkspaceDirectoryParentChangedError extends Schema.TaggedErrorClas
   },
 ) {
   override get message(): string {
-    return `Workspace directory parent changed while creating '${this.relativePath}' in '${this.workspaceRoot}'.`;
+    return `Workspace directory parent changed during an operation on '${this.relativePath}' in '${this.workspaceRoot}'.`;
   }
 }
 
@@ -193,7 +198,7 @@ export class WorkspaceEntryChangedError extends Schema.TaggedErrorClass<Workspac
   },
 ) {
   override get message(): string {
-    return `Workspace entry '${this.relativePath}' changed before it could be deleted.`;
+    return `Workspace entry '${this.relativePath}' changed before the operation completed.`;
   }
 }
 
@@ -299,6 +304,13 @@ export class WorkspaceFileSystem extends Context.Service<
       ProjectCreateDirectoryResult,
       WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
+    /** Copy a file byte-for-byte into a directory using a non-conflicting name. */
+    readonly copyFile: (
+      input: ProjectCopyFileInput,
+    ) => Effect.Effect<
+      ProjectCopyFileResult,
+      WorkspaceFileOperationError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
     /** Permanently delete an entry without following a final symlink. */
     readonly deleteEntry: (
       input: ProjectDeleteEntryInput,
@@ -350,6 +362,45 @@ function isWithinRoot(path: Path.Path, root: string, candidate: string): boolean
     relative === "" ||
     (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
   );
+}
+
+function copyDestinationName(input: {
+  readonly sourceBasename: string;
+  readonly destinationDirectoryRelativePath: string;
+  readonly copyIndex: number;
+}): { readonly basename: string; readonly relativePath: string } | null {
+  const extension = NodePath.extname(input.sourceBasename);
+  const stem = input.sourceBasename.slice(0, input.sourceBasename.length - extension.length);
+  const suffix =
+    input.copyIndex === 0 ? "" : input.copyIndex === 1 ? " copy" : ` copy ${input.copyIndex}`;
+  const stemCodePoints = Array.from(stem);
+  const extensionCodePoints = Array.from(extension);
+
+  while (true) {
+    const basename = `${stemCodePoints.join("")}${suffix}${extensionCodePoints.join("")}`;
+    const relativePath =
+      input.destinationDirectoryRelativePath === "."
+        ? basename
+        : `${input.destinationDirectoryRelativePath}/${basename}`;
+    if (
+      (input.copyIndex === 0 ||
+        (basename.length <= PORTABLE_FILESYSTEM_BASENAME_MAX_LENGTH &&
+          Buffer.byteLength(basename, "utf8") <= PORTABLE_FILESYSTEM_BASENAME_MAX_LENGTH)) &&
+      relativePath.length <= PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS &&
+      Buffer.byteLength(relativePath, "utf8") <= PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+    ) {
+      return basename.length === 0 ? null : { basename, relativePath };
+    }
+    if (stemCodePoints.length > 0) {
+      stemCodePoints.pop();
+      continue;
+    }
+    if (extensionCodePoints.length > 0) {
+      extensionCodePoints.pop();
+      continue;
+    }
+    return null;
+  }
 }
 
 function revisionFromBytes(bytes: Uint8Array): ProjectFileDiskRevision {
@@ -415,6 +466,13 @@ export interface WorkspaceFileSystemMakeOptions {
     readonly cwd: string;
     readonly relativePath: string;
     readonly canonicalTargetPath: string;
+  }) => Effect.Effect<void>;
+  /** Test-only race barrier, invoked after a copied file is staged but before publication. */
+  readonly beforeCopyPublish?: (input: {
+    readonly cwd: string;
+    readonly sourceRelativePath: string;
+    readonly destinationDirectoryRelativePath: string;
+    readonly temporaryPath: string;
   }) => Effect.Effect<void>;
   /** Test hooks for deterministic recovery-failure coverage. */
   readonly removeDeletedEntry?: (input: {
@@ -824,6 +882,21 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         ),
       );
 
+    const syncDirectoryBestEffort = (targetDirectory: string) =>
+      Effect.promise(async () => {
+        try {
+          const directoryHandle = await NodeFSP.open(targetDirectory, "r");
+          try {
+            await directoryHandle.sync();
+          } finally {
+            await directoryHandle.close();
+          }
+        } catch {
+          // Directory syncing is unsupported on some platforms. Publication
+          // already succeeded, so durability hardening here is best effort.
+        }
+      });
+
     type CanonicalDirectoryParent = {
       readonly requestedParentPath: string;
       readonly canonicalParentPath: string;
@@ -1154,6 +1227,453 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         } satisfies PreparedWriteTarget;
       },
     );
+
+    const copyFile: WorkspaceFileSystem["Service"]["copyFile"] = Effect.fn(
+      "WorkspaceFileSystem.copyFile",
+    )(function* (input) {
+      const requestedSource = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.sourceRelativePath,
+      });
+      const workspaceRoot = path.resolve(input.cwd);
+      const requestedDestinationDirectory =
+        input.destinationDirectoryRelativePath === "."
+          ? { absolutePath: workspaceRoot, relativePath: "." }
+          : yield* workspacePaths.resolveRelativePathWithinRoot({
+              workspaceRoot,
+              relativePath: input.destinationDirectoryRelativePath,
+            });
+      const root = yield* realWorkspaceRoot({
+        workspaceRoot: input.cwd,
+        relativePath: requestedSource.relativePath,
+        resolvedPath: requestedSource.absolutePath,
+      });
+
+      return yield* withWorkspaceMutationLock(
+        root,
+        "exclusive",
+        Effect.gen(function* () {
+          const realSourcePath = yield* Effect.tryPromise({
+            try: () => NodeFSP.realpath(requestedSource.absolutePath),
+            catch: (cause) =>
+              operationError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedSource.relativePath,
+                resolvedPath: requestedSource.absolutePath,
+                operationPath: requestedSource.absolutePath,
+                operation: "realpath-target",
+                cause,
+              }),
+          });
+          yield* assertWithinRoot({
+            workspaceRoot: input.cwd,
+            relativePath: requestedSource.relativePath,
+            realWorkspaceRoot: root,
+            resolvedPath: realSourcePath,
+          });
+
+          const realDestinationDirectory = yield* Effect.tryPromise({
+            try: () => NodeFSP.realpath(requestedDestinationDirectory.absolutePath),
+            catch: (cause) =>
+              operationError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedDestinationDirectory.relativePath,
+                resolvedPath: requestedDestinationDirectory.absolutePath,
+                operationPath: requestedDestinationDirectory.absolutePath,
+                operation: "realpath-target",
+                cause,
+              }),
+          });
+          yield* assertWithinRoot({
+            workspaceRoot: input.cwd,
+            relativePath: requestedDestinationDirectory.relativePath,
+            realWorkspaceRoot: root,
+            resolvedPath: realDestinationDirectory,
+          });
+          const destinationStat = yield* Effect.tryPromise({
+            try: () => NodeFSP.stat(realDestinationDirectory, { bigint: true }),
+            catch: (cause) =>
+              operationError({
+                workspaceRoot: input.cwd,
+                relativePath: requestedDestinationDirectory.relativePath,
+                resolvedPath: realDestinationDirectory,
+                operationPath: realDestinationDirectory,
+                operation: "stat",
+                cause,
+              }),
+          });
+          if (!destinationStat.isDirectory()) {
+            return yield* new WorkspacePathNotDirectoryError({
+              workspaceRoot: input.cwd,
+              relativePath: requestedDestinationDirectory.relativePath,
+              resolvedPath: realDestinationDirectory,
+            });
+          }
+
+          const copied = yield* Effect.acquireUseRelease(
+            Effect.tryPromise({
+              try: () => NodeFSP.open(realSourcePath, READ_NO_FOLLOW_FLAGS),
+              catch: (cause) =>
+                operationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: requestedSource.relativePath,
+                  resolvedPath: realSourcePath,
+                  operationPath: realSourcePath,
+                  operation: "open",
+                  cause,
+                }),
+            }),
+            (sourceHandle) =>
+              Effect.gen(function* () {
+                const sourceStat = yield* Effect.tryPromise({
+                  try: () => sourceHandle.stat({ bigint: true }),
+                  catch: (cause) =>
+                    operationError({
+                      workspaceRoot: input.cwd,
+                      relativePath: requestedSource.relativePath,
+                      resolvedPath: realSourcePath,
+                      operationPath: realSourcePath,
+                      operation: "stat",
+                      cause,
+                    }),
+                });
+                if (!sourceStat.isFile()) {
+                  return yield* new WorkspacePathNotFileError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedSource.relativePath,
+                    resolvedPath: realSourcePath,
+                  });
+                }
+                if (sourceStat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+                  const cause = new Error("The source file is too large to copy safely.");
+                  (cause as NodeJS.ErrnoException).code = "EFBIG";
+                  return yield* operationError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedSource.relativePath,
+                    resolvedPath: realSourcePath,
+                    operationPath: realSourcePath,
+                    operation: "copy-file",
+                    cause,
+                  });
+                }
+
+                const stagedCopy = yield* Effect.acquireUseRelease(
+                  Effect.tryPromise({
+                    try: async () => {
+                      const temporaryPath = path.join(
+                        realDestinationDirectory,
+                        `.zrode-copy-${process.pid}-${NodeCrypto.randomUUID()}.tmp`,
+                      );
+                      let temporaryHandle: NodeFSP.FileHandle | null = null;
+                      let staged = false;
+                      try {
+                        const mode = Number(sourceStat.mode & 0o7777n);
+                        temporaryHandle = await NodeFSP.open(temporaryPath, "wx", mode);
+                        const expectedByteLength = Number(sourceStat.size);
+                        const buffer = Buffer.allocUnsafe(REVISION_READ_BUFFER_BYTES);
+                        let position = 0;
+                        while (position < expectedByteLength) {
+                          const { bytesRead } = await sourceHandle.read(
+                            buffer,
+                            0,
+                            Math.min(buffer.byteLength, expectedByteLength - position),
+                            position,
+                          );
+                          if (bytesRead === 0) {
+                            const cause = new Error("The source file changed while being copied.");
+                            (cause as NodeJS.ErrnoException).code = "ESTALE";
+                            throw cause;
+                          }
+                          let written = 0;
+                          while (written < bytesRead) {
+                            const { bytesWritten } = await temporaryHandle.write(
+                              buffer,
+                              written,
+                              bytesRead - written,
+                              position + written,
+                            );
+                            if (bytesWritten === 0) {
+                              const cause = new Error("Writing the staged copy made no progress.");
+                              (cause as NodeJS.ErrnoException).code = "EIO";
+                              throw cause;
+                            }
+                            written += bytesWritten;
+                          }
+                          position += bytesRead;
+                        }
+                        await temporaryHandle.chmod(mode);
+                        await temporaryHandle.sync();
+                        const stagedStat = await temporaryHandle.stat({ bigint: true });
+                        await temporaryHandle.close();
+                        temporaryHandle = null;
+                        staged = true;
+                        return {
+                          temporaryPath,
+                          byteLength: expectedByteLength,
+                          identity: {
+                            device: stagedStat.dev,
+                            inode: stagedStat.ino,
+                            size: stagedStat.size,
+                            modifiedAt: stagedStat.mtimeNs,
+                            changedAt: stagedStat.ctimeNs,
+                          },
+                        };
+                      } finally {
+                        if (temporaryHandle) {
+                          await temporaryHandle.close().catch(() => undefined);
+                        }
+                        if (!staged) await NodeFSP.unlink(temporaryPath).catch(() => undefined);
+                      }
+                    },
+                    catch: (cause) =>
+                      operationError({
+                        workspaceRoot: input.cwd,
+                        relativePath: requestedSource.relativePath,
+                        resolvedPath: realDestinationDirectory,
+                        operationPath: realDestinationDirectory,
+                        operation: "copy-file",
+                        cause,
+                      }),
+                  }),
+                  (staged) =>
+                    Effect.gen(function* () {
+                      yield* (
+                        options.beforeCopyPublish?.({
+                          cwd: input.cwd,
+                          sourceRelativePath: requestedSource.relativePath,
+                          destinationDirectoryRelativePath:
+                            requestedDestinationDirectory.relativePath,
+                          temporaryPath: staged.temporaryPath,
+                        }) ?? Effect.void
+                      );
+
+                      const finalStagedStat = yield* Effect.tryPromise({
+                        try: () => NodeFSP.lstat(staged.temporaryPath, { bigint: true }),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedSource.relativePath,
+                            resolvedPath: staged.temporaryPath,
+                            operationPath: staged.temporaryPath,
+                            operation: "stat",
+                            cause,
+                          }),
+                      });
+                      if (
+                        !finalStagedStat.isFile() ||
+                        finalStagedStat.dev !== staged.identity.device ||
+                        finalStagedStat.ino !== staged.identity.inode ||
+                        finalStagedStat.size !== staged.identity.size ||
+                        finalStagedStat.mtimeNs !== staged.identity.modifiedAt ||
+                        finalStagedStat.ctimeNs !== staged.identity.changedAt
+                      ) {
+                        const cause = new Error("The staged copy changed before publication.");
+                        (cause as NodeJS.ErrnoException).code = "ESTALE";
+                        return yield* operationError({
+                          workspaceRoot: input.cwd,
+                          relativePath: requestedSource.relativePath,
+                          resolvedPath: staged.temporaryPath,
+                          operationPath: staged.temporaryPath,
+                          operation: "copy-file",
+                          cause,
+                        });
+                      }
+
+                      const finalSourceStat = yield* Effect.tryPromise({
+                        try: () => sourceHandle.stat({ bigint: true }),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedSource.relativePath,
+                            resolvedPath: realSourcePath,
+                            operationPath: realSourcePath,
+                            operation: "stat",
+                            cause,
+                          }),
+                      });
+                      const finalRealSourcePath = yield* Effect.tryPromise({
+                        try: () => NodeFSP.realpath(requestedSource.absolutePath),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedSource.relativePath,
+                            resolvedPath: requestedSource.absolutePath,
+                            operationPath: requestedSource.absolutePath,
+                            operation: "realpath-target",
+                            cause,
+                          }),
+                      });
+                      yield* assertWithinRoot({
+                        workspaceRoot: input.cwd,
+                        relativePath: requestedSource.relativePath,
+                        realWorkspaceRoot: root,
+                        resolvedPath: finalRealSourcePath,
+                      });
+                      const finalSourcePathStat = yield* Effect.tryPromise({
+                        try: () => NodeFSP.stat(finalRealSourcePath, { bigint: true }),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedSource.relativePath,
+                            resolvedPath: finalRealSourcePath,
+                            operationPath: finalRealSourcePath,
+                            operation: "stat",
+                            cause,
+                          }),
+                      });
+                      if (
+                        finalRealSourcePath !== realSourcePath ||
+                        finalSourcePathStat.dev !== sourceStat.dev ||
+                        finalSourcePathStat.ino !== sourceStat.ino ||
+                        finalSourceStat.dev !== sourceStat.dev ||
+                        finalSourceStat.ino !== sourceStat.ino ||
+                        finalSourceStat.size !== sourceStat.size ||
+                        finalSourceStat.mtimeNs !== sourceStat.mtimeNs ||
+                        finalSourceStat.ctimeNs !== sourceStat.ctimeNs
+                      ) {
+                        return yield* new WorkspaceEntryChangedError({
+                          workspaceRoot: input.cwd,
+                          relativePath: requestedSource.relativePath,
+                          resolvedPath: realSourcePath,
+                        });
+                      }
+
+                      const finalDestinationDirectory = yield* Effect.tryPromise({
+                        try: () => NodeFSP.realpath(requestedDestinationDirectory.absolutePath),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedDestinationDirectory.relativePath,
+                            resolvedPath: requestedDestinationDirectory.absolutePath,
+                            operationPath: requestedDestinationDirectory.absolutePath,
+                            operation: "realpath-target",
+                            cause,
+                          }),
+                      });
+                      yield* assertWithinRoot({
+                        workspaceRoot: input.cwd,
+                        relativePath: requestedDestinationDirectory.relativePath,
+                        realWorkspaceRoot: root,
+                        resolvedPath: finalDestinationDirectory,
+                      });
+                      const finalDestinationStat = yield* Effect.tryPromise({
+                        try: () => NodeFSP.stat(finalDestinationDirectory, { bigint: true }),
+                        catch: (cause) =>
+                          operationError({
+                            workspaceRoot: input.cwd,
+                            relativePath: requestedDestinationDirectory.relativePath,
+                            resolvedPath: finalDestinationDirectory,
+                            operationPath: finalDestinationDirectory,
+                            operation: "stat",
+                            cause,
+                          }),
+                      });
+                      if (
+                        !finalDestinationStat.isDirectory() ||
+                        finalDestinationDirectory !== realDestinationDirectory ||
+                        finalDestinationStat.dev !== destinationStat.dev ||
+                        finalDestinationStat.ino !== destinationStat.ino
+                      ) {
+                        return yield* new WorkspaceDirectoryParentChangedError({
+                          workspaceRoot: input.cwd,
+                          relativePath: requestedDestinationDirectory.relativePath,
+                          initialParentPath: realDestinationDirectory,
+                          currentParentPath: finalDestinationDirectory,
+                        });
+                      }
+
+                      return yield* Effect.uninterruptible(
+                        Effect.gen(function* () {
+                          const result = yield* Effect.tryPromise({
+                            try: async () => {
+                              const sourceBasename = path.basename(requestedSource.relativePath);
+                              for (let copyIndex = 0; copyIndex < 10_000; copyIndex += 1) {
+                                const destination = copyDestinationName({
+                                  sourceBasename,
+                                  destinationDirectoryRelativePath:
+                                    requestedDestinationDirectory.relativePath,
+                                  copyIndex,
+                                });
+                                if (destination === null) {
+                                  const cause = new Error("The copied file path is too long.");
+                                  (cause as NodeJS.ErrnoException).code = "ENAMETOOLONG";
+                                  throw cause;
+                                }
+
+                                try {
+                                  await NodeFSP.link(
+                                    staged.temporaryPath,
+                                    path.join(realDestinationDirectory, destination.basename),
+                                  );
+                                  return {
+                                    destinationRelativePath: destination.relativePath,
+                                    byteLength: staged.byteLength,
+                                  };
+                                } catch (cause) {
+                                  if (
+                                    cause instanceof Error &&
+                                    ((cause as NodeJS.ErrnoException).code === "EEXIST" ||
+                                      (copyIndex === 0 &&
+                                        (cause as NodeJS.ErrnoException).code === "ENAMETOOLONG"))
+                                  ) {
+                                    continue;
+                                  }
+                                  throw cause;
+                                }
+                              }
+
+                              const cause = new Error("No non-conflicting copy name is available.");
+                              (cause as NodeJS.ErrnoException).code = "EEXIST";
+                              throw cause;
+                            },
+                            catch: (cause) =>
+                              operationError({
+                                workspaceRoot: input.cwd,
+                                relativePath: requestedSource.relativePath,
+                                resolvedPath: realDestinationDirectory,
+                                operationPath: realDestinationDirectory,
+                                operation: "copy-file",
+                                cause,
+                              }),
+                          });
+                          yield* syncDirectoryBestEffort(realDestinationDirectory);
+                          return result;
+                        }),
+                      );
+                    }),
+                  (staged) =>
+                    Effect.promise(() =>
+                      NodeFSP.unlink(staged.temporaryPath).catch(() => undefined),
+                    ),
+                );
+
+                return stagedCopy;
+              }),
+            (sourceHandle) =>
+              Effect.tryPromise({
+                try: () => sourceHandle.close(),
+                catch: (cause) =>
+                  operationError({
+                    workspaceRoot: input.cwd,
+                    relativePath: requestedSource.relativePath,
+                    resolvedPath: realSourcePath,
+                    operationPath: realSourcePath,
+                    operation: "close",
+                    cause,
+                  }),
+              }),
+          );
+
+          yield* workspaceEntries
+            .refresh(input.cwd)
+            .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach({ startImmediately: true }));
+          return {
+            sourceRelativePath: requestedSource.relativePath,
+            ...copied,
+          };
+        }),
+      );
+    });
 
     const prepareAtomicWrite = Effect.fn("WorkspaceFileSystem.prepareAtomicWrite")(function* (
       input: ProjectWriteFileInput,
@@ -1600,21 +2120,6 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         ),
       );
     });
-
-    const syncDirectoryBestEffort = (targetDirectory: string) =>
-      Effect.promise(async () => {
-        try {
-          const directoryHandle = await NodeFSP.open(targetDirectory, "r");
-          try {
-            await directoryHandle.sync();
-          } finally {
-            await directoryHandle.close();
-          }
-        } catch {
-          // Directory syncing is unsupported on some platforms. Publication
-          // already succeeded, so durability hardening here is best effort.
-        }
-      });
 
     const updatePreparedMode = Effect.fn("WorkspaceFileSystem.updatePreparedMode")(function* (
       input: ProjectWriteFileInput,
@@ -2131,6 +2636,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
     });
 
     return WorkspaceFileSystem.of({
+      copyFile,
       createDirectory,
       deleteEntry,
       listDirectory,

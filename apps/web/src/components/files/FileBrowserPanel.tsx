@@ -14,6 +14,7 @@ import { FileTree, useFileTree } from "@pierre/trees/react";
 import {
   ChevronsDownUp,
   ChevronsUpDown,
+  ClipboardPaste,
   Ellipsis,
   Eye,
   FilePlus2,
@@ -62,6 +63,10 @@ interface FileBrowserPanelProps {
   onOpenFile: (relativePath: string) => void;
   onCreateFile: (relativePath: string) => Promise<void>;
   onCreateDirectory: (relativePath: string) => Promise<void>;
+  onCopyFile: (
+    sourceRelativePath: string,
+    destinationDirectoryRelativePath: string,
+  ) => Promise<string>;
   onDeleteEntry: (
     relativePath: string,
     kind: ProjectEntry["kind"],
@@ -221,6 +226,7 @@ function FileBrowserPanel({
   onOpenFile,
   onCreateFile,
   onCreateDirectory,
+  onCopyFile,
   onDeleteEntry,
   visible,
 }: FileBrowserPanelProps) {
@@ -245,8 +251,13 @@ function FileBrowserPanel({
   );
   const [creationError, setCreationError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copiedRelativePath, setCopiedRelativePath] = useState<string | null>(null);
   const [treeRevision, setTreeRevision] = useState(0);
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const copiedRelativePathRef = useRef<string | null>(null);
+  const copyingRef = useRef(false);
+  const mountedRef = useRef(true);
   const creationSessionRef = useRef<WorkspaceCreationSession | null>(creationSession);
   const modelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
   const commitCreationRef = useRef<(session: WorkspaceCreationSession) => void>(() => undefined);
@@ -337,6 +348,13 @@ function FileBrowserPanel({
     setLazyDirectoryResults(new Map());
     setLazyDirectoryErrors(new Map());
   }, [cwd, environmentId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const entryKinds = useMemo(
     () =>
@@ -564,7 +582,7 @@ function FileBrowserPanel({
 
   const startCreate = useCallback(
     (kind: WorkspaceCreationKind) => {
-      if (creationSessionRef.current !== null) return;
+      if (creationSessionRef.current !== null || copyingRef.current || deleting) return;
       setFilterValue("");
       model.setSearch(null);
       const path = nextPlaceholderPath(model, kind);
@@ -585,7 +603,7 @@ function FileBrowserPanel({
         setCreationError("Could not start inline creation.");
       }
     },
-    [model],
+    [deleting, model],
   );
 
   const queueUnchangedCreationCommit = useCallback(() => {
@@ -636,7 +654,7 @@ function FileBrowserPanel({
 
   const deleteTreeEntry = useCallback(
     (relativePath: string, kind: ProjectEntry["kind"]) => {
-      if (deleting || creationSession !== null) return;
+      if (deleting || copyingRef.current || creationSession !== null) return;
       setDeleting(true);
       setCreationError(null);
       void onDeleteEntry(relativePath, kind).then(
@@ -657,6 +675,49 @@ function FileBrowserPanel({
     [creationSession, deleting, onDeleteEntry, refreshAllEntries],
   );
 
+  const copyFocusedFile = useCallback((relativePath: string) => {
+    if (!mountedRef.current) return;
+    copiedRelativePathRef.current = relativePath;
+    setCopiedRelativePath(relativePath);
+    setCreationError(null);
+  }, []);
+
+  const pasteCopiedFile = useCallback(
+    (destinationDirectoryRelativePath: string) => {
+      const sourceRelativePath = copiedRelativePathRef.current;
+      if (
+        !mountedRef.current ||
+        sourceRelativePath === null ||
+        copyingRef.current ||
+        deleting ||
+        creationSession !== null
+      ) {
+        return;
+      }
+      copyingRef.current = true;
+      setCopying(true);
+      setCreationError(null);
+      void Promise.resolve()
+        .then(() => onCopyFile(sourceRelativePath, destinationDirectoryRelativePath))
+        .then(
+          (destinationRelativePath) => {
+            if (!mountedRef.current) return;
+            copyingRef.current = false;
+            refreshAllEntries();
+            setCopying(false);
+            onOpenFileRef.current(destinationRelativePath);
+          },
+          (error: unknown) => {
+            if (!mountedRef.current) return;
+            copyingRef.current = false;
+            setCreationError(error instanceof Error ? error.message : "Could not copy the file.");
+            setCopying(false);
+          },
+        );
+    },
+    [creationSession, deleting, onCopyFile, refreshAllEntries],
+  );
+
   const toggleFilter = useCallback(() => {
     if (filterVisible) setFilterValue("");
     setFilterVisible((visible) => !visible);
@@ -670,22 +731,39 @@ function FileBrowserPanel({
     }
 
     model.getItem(item.path)?.focus();
-    const menuItems: readonly ContextMenuItem<"new-file" | "new-folder" | "delete">[] = [
+    const destinationDirectoryRelativePath =
+      item.kind === "directory"
+        ? withoutTrailingSlash(item.path)
+        : parentDirectory(item.path) || ".";
+    const menuItems: readonly ContextMenuItem<
+      "new-file" | "new-folder" | "copy" | "paste" | "delete"
+    >[] = [
       {
         id: "new-file",
         label: "New File",
-        disabled: creationSession !== null,
+        disabled: creationSession !== null || copying || deleting,
       },
       {
         id: "new-folder",
         label: "New Folder",
-        disabled: creationSession !== null,
+        disabled: creationSession !== null || copying || deleting,
+      },
+      {
+        id: "copy",
+        label: "Copy",
+        disabled: item.kind !== "file" || creationSession !== null,
+        icon: "copy",
+      },
+      {
+        id: "paste",
+        label: "Paste",
+        disabled: copiedRelativePath === null || creationSession !== null || copying || deleting,
       },
       {
         id: "delete",
         label: item.kind === "directory" ? "Delete Folder Permanently" : "Delete Permanently",
         destructive: true,
-        disabled: creationSession !== null || deleting,
+        disabled: creationSession !== null || copying || deleting,
         icon: "trash",
       },
     ];
@@ -699,6 +777,10 @@ function FileBrowserPanel({
         context.close({ restoreFocus: action !== "new-file" && action !== "new-folder" });
         if (action === "new-file") startCreate("file");
         if (action === "new-folder") startCreate("directory");
+        if (action === "copy" && item.kind === "file") {
+          copyFocusedFile(withoutTrailingSlash(item.path));
+        }
+        if (action === "paste") pasteCopiedFile(destinationDirectoryRelativePath);
         if (action === "delete") {
           deleteTreeEntry(withoutTrailingSlash(item.path), item.kind);
         }
@@ -741,7 +823,7 @@ function FileBrowserPanel({
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
           aria-label="New file"
           title="New File"
-          disabled={creationSession !== null}
+          disabled={creationSession !== null || copying || deleting}
           onClick={() => startCreate("file")}
         >
           <FilePlus2 className="size-3.5" />
@@ -751,7 +833,7 @@ function FileBrowserPanel({
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
           aria-label="New folder"
           title="New Folder"
-          disabled={creationSession !== null}
+          disabled={creationSession !== null || copying || deleting}
           onClick={() => startCreate("directory")}
         >
           <FolderPlus className="size-3.5" />
@@ -794,6 +876,15 @@ function FileBrowserPanel({
             <Ellipsis className="size-3.5" />
           </MenuTrigger>
           <MenuPopup align="end" className="min-w-48">
+            <MenuItem
+              disabled={
+                copiedRelativePath === null || creationSession !== null || copying || deleting
+              }
+              onClick={() => pasteCopiedFile(".")}
+            >
+              <ClipboardPaste />
+              Paste into Project Root
+            </MenuItem>
             <MenuItem onClick={toggleFilter}>
               <ListFilter />
               {filterVisible ? "Hide file filter" : "Filter files"}
@@ -847,9 +938,9 @@ function FileBrowserPanel({
           ) : null}
         </div>
       ) : null}
-      {creationBusy || deleting ? (
+      {creationBusy || deleting || copying ? (
         <div className="shrink-0 px-2 py-1 text-[10px] text-muted-foreground">
-          {deleting ? "Deleting permanently…" : "Creating…"}
+          {deleting ? "Deleting permanently…" : copying ? "Copying…" : "Creating…"}
         </div>
       ) : null}
       {creationError ? (
@@ -870,6 +961,33 @@ function FileBrowserPanel({
           onKeyDownCapture={(event) => {
             if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               queueUnchangedCreationCommit();
+            }
+            if (
+              event.nativeEvent.isComposing ||
+              event.altKey ||
+              (!event.metaKey && !event.ctrlKey)
+            ) {
+              return;
+            }
+            const focused = model.getFocusedItem();
+            if (
+              event.key.toLowerCase() === "c" &&
+              creationSession === null &&
+              focused &&
+              !focused.isDirectory()
+            ) {
+              event.preventDefault();
+              copyFocusedFile(withoutTrailingSlash(focused.getPath()));
+              return;
+            }
+            if (event.key.toLowerCase() === "v" && copiedRelativePathRef.current !== null) {
+              event.preventDefault();
+              const destinationDirectoryRelativePath = focused
+                ? focused.isDirectory()
+                  ? withoutTrailingSlash(focused.getPath())
+                  : parentDirectory(focused.getPath()) || "."
+                : ".";
+              pasteCopiedFile(destinationDirectoryRelativePath);
             }
           }}
           onBlurCapture={queueUnchangedCreationCommit}

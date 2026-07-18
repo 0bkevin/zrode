@@ -633,6 +633,293 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
     );
   });
 
+  describe("copyFile", () => {
+    it.effect("copies binary files byte-for-byte and keeps the original basename", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = new Uint8Array(1024 * 1024 + 17);
+        bytes.set([0, 1, 2, 127, 128, 255]);
+        bytes[bytes.byteLength - 1] = 42;
+        yield* fileSystem.makeDirectory(path.join(cwd, "public"));
+        yield* fileSystem.writeFile(path.join(cwd, "asset.bin"), bytes);
+
+        const result = yield* workspaceFileSystem.copyFile({
+          cwd,
+          sourceRelativePath: "asset.bin",
+          destinationDirectoryRelativePath: "public",
+        });
+
+        expect(result).toEqual({
+          sourceRelativePath: "asset.bin",
+          destinationRelativePath: "public/asset.bin",
+          byteLength: bytes.byteLength,
+        });
+        const copied = yield* fileSystem.readFile(path.join(cwd, "public/asset.bin"));
+        expect(Buffer.compare(Buffer.from(copied), Buffer.from(bytes))).toBe(0);
+      }),
+    );
+
+    it.effect("chooses stable non-conflicting names when pasting beside the source", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "notes.md", "original\n");
+        yield* writeTextFile(cwd, "notes copy.md", "existing\n");
+
+        const result = yield* workspaceFileSystem.copyFile({
+          cwd,
+          sourceRelativePath: "notes.md",
+          destinationDirectoryRelativePath: ".",
+        });
+
+        expect(result.destinationRelativePath).toBe("notes copy 2.md");
+        expect(yield* fileSystem.readFileString(path.join(cwd, "notes copy 2.md"))).toBe(
+          "original\n",
+        );
+        expect(yield* fileSystem.readFileString(path.join(cwd, "notes.md"))).toBe("original\n");
+      }),
+    );
+
+    it.effect("truncates long basenames to keep collision copies portable", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const sourceName = `${"a".repeat(250)}.txt`;
+        yield* writeTextFile(cwd, sourceName, "long name\n");
+
+        const result = yield* workspaceFileSystem.copyFile({
+          cwd,
+          sourceRelativePath: sourceName,
+          destinationDirectoryRelativePath: ".",
+        });
+        const destinationBasename = path.basename(result.destinationRelativePath);
+
+        expect(destinationBasename.endsWith(" copy.txt")).toBe(true);
+        expect(Buffer.byteLength(destinationBasename, "utf8")).toBeLessThanOrEqual(255);
+        expect(
+          yield* fileSystem.readFileString(path.join(cwd, result.destinationRelativePath)),
+        ).toBe("long name\n");
+      }),
+    );
+
+    it.effect(
+      "keeps the final name hidden until a durable staged copy is atomically published",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "asset.bin", "copied bytes\n");
+          yield* fileSystem.makeDirectory(path.join(cwd, "public"));
+          const staged = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+            beforeCopyPublish: () =>
+              Deferred.succeed(staged, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          });
+
+          const copyFiber = yield* workspaceFileSystem
+            .copyFile({
+              cwd,
+              sourceRelativePath: "asset.bin",
+              destinationDirectoryRelativePath: "public",
+            })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(staged).pipe(Effect.timeout("2 seconds"));
+
+          const namesWhileStaged = yield* fileSystem.readDirectory(path.join(cwd, "public"));
+          expect(namesWhileStaged).not.toContain("asset.bin");
+          expect(namesWhileStaged.some((name) => name.startsWith(".zrode-copy-"))).toBe(true);
+
+          yield* Deferred.succeed(release, undefined);
+          const result = yield* Fiber.join(copyFiber);
+          expect(result.destinationRelativePath).toBe("public/asset.bin");
+          expect(yield* fileSystem.readDirectory(path.join(cwd, "public"))).toEqual(["asset.bin"]);
+        }),
+    );
+
+    it.effect("rejects a source changed after staging and removes the unpublished copy", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "source.txt", "original source\n");
+        yield* fileSystem.makeDirectory(path.join(cwd, "public"));
+        const staged = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeCopyPublish: () =>
+            Deferred.succeed(staged, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        });
+
+        const copyFiber = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "source.txt",
+            destinationDirectoryRelativePath: "public",
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(staged).pipe(Effect.timeout("2 seconds"));
+        yield* Effect.promise(() =>
+          NodeFSP.rename(path.join(cwd, "source.txt"), path.join(cwd, "source-original.txt")),
+        );
+        yield* fileSystem.writeFileString(path.join(cwd, "source.txt"), "changed source\n");
+        yield* Deferred.succeed(release, undefined);
+
+        const error = yield* Fiber.join(copyFiber).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryChangedError);
+        expect(yield* fileSystem.readDirectory(path.join(cwd, "public"))).toEqual([]);
+      }),
+    );
+
+    it.effect("removes staged data when a copy is interrupted before publication", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "source.txt", "interrupt me\n");
+        yield* fileSystem.makeDirectory(path.join(cwd, "public"));
+        const staged = yield* Deferred.make<void>();
+        const neverPublish = yield* Deferred.make<void>();
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeCopyPublish: () =>
+            Deferred.succeed(staged, undefined).pipe(Effect.andThen(Deferred.await(neverPublish))),
+        });
+
+        const copyFiber = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "source.txt",
+            destinationDirectoryRelativePath: "public",
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(staged).pipe(Effect.timeout("2 seconds"));
+        yield* Fiber.interrupt(copyFiber);
+
+        expect(yield* fileSystem.readDirectory(path.join(cwd, "public"))).toEqual([]);
+      }),
+    );
+
+    it.effect("rejects and removes staged data modified before publication", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "source.txt", "trusted bytes\n");
+        yield* fileSystem.makeDirectory(path.join(cwd, "public"));
+        const workspaceFileSystem = yield* WorkspaceFileSystem.makeWithOptions({
+          beforeCopyPublish: ({ temporaryPath }) =>
+            Effect.promise(() => NodeFSP.writeFile(temporaryPath, "tampered bytes\n")),
+        });
+
+        const error = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "source.txt",
+            destinationDirectoryRelativePath: "public",
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+        expect(error).toMatchObject({ operation: "copy-file" });
+        expect(yield* fileSystem.readDirectory(path.join(cwd, "public"))).toEqual([]);
+      }),
+    );
+
+    it.effect(
+      "serializes concurrent pastes and publishes one unique complete file per request",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "notes.md", "complete\n");
+
+          const results = yield* Effect.all(
+            Array.from({ length: 8 }, () =>
+              workspaceFileSystem.copyFile({
+                cwd,
+                sourceRelativePath: "notes.md",
+                destinationDirectoryRelativePath: ".",
+              }),
+            ),
+            { concurrency: "unbounded" },
+          );
+          const resultPaths = new Set(results.map((result) => result.destinationRelativePath));
+
+          expect(resultPaths).toEqual(
+            new Set([
+              "notes copy.md",
+              "notes copy 2.md",
+              "notes copy 3.md",
+              "notes copy 4.md",
+              "notes copy 5.md",
+              "notes copy 6.md",
+              "notes copy 7.md",
+              "notes copy 8.md",
+            ]),
+          );
+          for (const resultPath of resultPaths) {
+            expect(yield* fileSystem.readFileString(path.join(cwd, resultPath))).toBe("complete\n");
+          }
+        }),
+    );
+
+    it.effect("rejects directories and destination symlinks outside the workspace", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        const outsideSource = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "source"));
+        yield* writeTextFile(cwd, "source.txt", "inside\n");
+        yield* writeTextFile(outsideSource, "secret.txt", "outside\n");
+        yield* fileSystem.symlink(outside, path.join(cwd, "outside-link"));
+        yield* fileSystem.symlink(
+          path.join(outsideSource, "secret.txt"),
+          path.join(cwd, "outside-source.txt"),
+        );
+
+        const directoryError = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "source",
+            destinationDirectoryRelativePath: ".",
+          })
+          .pipe(Effect.flip);
+        const escapeError = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "source.txt",
+            destinationDirectoryRelativePath: "outside-link",
+          })
+          .pipe(Effect.flip);
+        const sourceEscapeError = yield* workspaceFileSystem
+          .copyFile({
+            cwd,
+            sourceRelativePath: "outside-source.txt",
+            destinationDirectoryRelativePath: ".",
+          })
+          .pipe(Effect.flip);
+
+        expect(directoryError).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
+        expect(escapeError).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(sourceEscapeError).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+        expect(yield* fileSystem.readDirectory(outside)).toEqual([]);
+      }),
+    );
+  });
+
   describe("writeFile", () => {
     it.effect("rejects oversized UTF-8 contents before creating target directories", () =>
       Effect.gen(function* () {
