@@ -4,10 +4,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildCalendar,
+  CopilotBillingHistoryPanel,
   computeStats,
   formatTokens,
   isActiveUsage,
   makeTokenLevelScale,
+  ProviderSpendBreakdown,
+  ProviderUsageCard,
+  StatsRow,
   toDayKey,
   usageLevel,
   UsageHeatmap,
@@ -116,6 +120,27 @@ describe("buildCalendar", () => {
 });
 
 describe("computeStats", () => {
+  it("counts billing-only Copilot days without inflating token totals", () => {
+    const byDay = new Map([
+      [
+        "2026-06-17",
+        [
+          usage("githubCopilot", {
+            activityLevel: 4,
+            billingRequests: 12,
+            billingAiCredits: 3,
+          }),
+        ],
+      ],
+    ]);
+    const stats = computeStats(byDay, TODAY);
+
+    expect(stats.activeDays).toBe(1);
+    expect(stats.totalTokens).toBe(0);
+    expect(stats.currentStreak).toBe(1);
+    expect(stats.peakDay?.key).toBe("2026-06-17");
+  });
+
   it("computes token totals, active days, streaks, and the peak day", () => {
     const byDay = new Map([
       ["2026-06-15", [usage("claude", { tokens: 100_000 })]],
@@ -145,6 +170,253 @@ describe("computeStats", () => {
   });
 });
 
+describe("StatsRow", () => {
+  it("keeps the complete overall summary visible at a glance", () => {
+    const markup = renderToStaticMarkup(
+      <StatsRow
+        stats={{
+          totalTokens: 12_000_000_000,
+          activeDays: 116,
+          currentStreak: 18,
+          longestStreak: 24,
+          peakDay: { key: "2026-07-12", tokens: 849_000_000, percent: null },
+        }}
+      />,
+    );
+
+    expect(markup).toContain("Total tokens");
+    expect(markup).toContain("Active days");
+    expect(markup).toContain("Current streak");
+    expect(markup).toContain("Longest streak");
+    expect(markup).toContain("Peak day");
+    expect(markup).toContain("Avg. active day");
+    expect(markup).toContain("12B");
+    expect(markup).toContain("849M");
+  });
+});
+
+describe("ProviderUsageCard", () => {
+  it("shows a compact provider summary before its details are expanded", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderUsageCard
+        section={{
+          provider: "codex",
+          stats: {
+            totalTokens: 2_400_000,
+            activeDays: 8,
+            currentStreak: 3,
+            longestStreak: 5,
+            peakDay: { key: "2026-06-16", tokens: 900_000, percent: null },
+          },
+          calendar: buildCalendar({
+            byDay: new Map([
+              [
+                "2026-06-16",
+                [
+                  {
+                    provider: "codex",
+                    tokens: 900_000,
+                    models: [],
+                    peakSessionPercent: null,
+                    peakWeeklyPercent: null,
+                  },
+                ],
+              ],
+            ]),
+            weeksCount: 12,
+            today: new Date(2026, 6, 18),
+          }),
+          tokenScale: makeTokenLevelScale([900_000]),
+          providerDayLabels: [],
+          providerTokenChart: [],
+          pressureDayLabels: [],
+          pressureSeries: [],
+          sampledDayCount: 0,
+          topModel: null,
+          estimatedCostUsd: 4.25,
+          copilotBilling: null,
+        }}
+        tokenMode="daily"
+        modelRows={[]}
+        totalTokens={12_000_000}
+      />,
+    );
+
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("20% of recorded tokens");
+    expect(markup).toContain("Top model");
+    expect(markup).toContain("API estimate");
+    expect(markup).toContain("Details");
+    expect(markup).not.toContain("Current streak");
+  });
+});
+
+describe("CopilotBillingHistoryPanel", () => {
+  it("shows GitHub's exact daily billing history separately from local tokens", () => {
+    const markup = renderToStaticMarkup(
+      <CopilotBillingHistoryPanel
+        history={{
+          status: "ok",
+          message: null,
+          days: [
+            {
+              day: "2025-08-01",
+              unit: "requests",
+              quantity: 19,
+              grossAmountUsd: 0.76,
+              discountAmountUsd: 0.76,
+              netAmountUsd: 0,
+              sku: "Copilot Premium Request",
+            },
+            {
+              day: "2025-08-02",
+              unit: "requests",
+              quantity: 7,
+              grossAmountUsd: 0.28,
+              discountAmountUsd: 0.28,
+              netAmountUsd: 0,
+              sku: "Copilot Premium Request",
+            },
+            {
+              day: "2026-06-01",
+              unit: "aiCredits",
+              quantity: 155.02431,
+              grossAmountUsd: 1.5502431,
+              discountAmountUsd: 1.5502431,
+              netAmountUsd: 0,
+              sku: "Copilot AI Credits",
+            },
+          ],
+          models: [
+            {
+              year: 2025,
+              unit: "requests",
+              model: "Claude Sonnet 4",
+              quantity: 373,
+              grossAmountUsd: 14.92,
+              discountAmountUsd: 14.92,
+              netAmountUsd: 0,
+            },
+          ],
+          updatedAt: 1,
+        }}
+        calendar={buildCalendar({ byDay: new Map(), weeksCount: 53, today: TODAY })}
+        tokenScale={makeTokenLevelScale([])}
+      />,
+    );
+
+    expect(markup).toContain("GitHub usage history");
+    expect(markup).toContain('data-testid="copilot-billing-heatmap"');
+    expect(markup).toContain("Exact daily GitHub billing entries");
+    expect(markup).toContain("Metered usage billed");
+    expect(markup).not.toContain("Actually billed");
+    expect(markup).toContain("Aug 1, 2025: 19 premium requests");
+    expect(markup).toContain("Aug 2, 2025: 7 premium requests");
+    expect(markup).toContain("repeat(53, minmax(0, 1fr))");
+    expect(markup).toContain("Premium requests by month");
+    expect(markup).toContain("AI credits by month");
+    expect(markup).toContain("26");
+    expect(markup).toContain("155.02");
+    expect(markup).toContain("Claude Sonnet 4");
+  });
+
+  it("keeps annual model reports visible when exact daily billing is unavailable", () => {
+    const markup = renderToStaticMarkup(
+      <CopilotBillingHistoryPanel
+        history={{
+          status: "error",
+          message: "Exact daily history unavailable",
+          days: [],
+          models: [
+            {
+              year: 2026,
+              unit: "requests",
+              model: "GPT-5.4",
+              quantity: 42,
+              grossAmountUsd: 1.68,
+              discountAmountUsd: 1.68,
+              netAmountUsd: 0,
+            },
+          ],
+          updatedAt: 1,
+        }}
+        calendar={buildCalendar({ byDay: new Map(), weeksCount: 53, today: TODAY })}
+        tokenScale={makeTokenLevelScale([])}
+      />,
+    );
+
+    expect(markup).toContain("annual model reports are");
+    expect(markup).toContain("GPT-5.4");
+    expect(markup).not.toContain('data-testid="copilot-billing-heatmap"');
+  });
+});
+
+describe("ProviderSpendBreakdown", () => {
+  it("shows estimated spend and pricing coverage for each active provider", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderSpendBreakdown
+        estimate={{
+          totalUsd: 12.5,
+          hasPricedUsage: true,
+          pricedTokens: 100,
+          totalTokens: 150,
+          providerCosts: new Map([["claude", 12.5]]),
+          models: [
+            {
+              provider: "claude",
+              model: "claude-sonnet-5",
+              totalTokens: 100,
+              pricedTokens: 100,
+              costUsd: 12.5,
+            },
+            {
+              provider: "codex",
+              model: "unknown",
+              totalTokens: 50,
+              pricedTokens: 0,
+              costUsd: null,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain("By provider");
+    expect(markup).toContain("Claude");
+    expect(markup).toContain("$12.50");
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("Not priced");
+    expect(markup).toContain("0% covered");
+  });
+
+  it("shows authoritative spend even when the provider omitted token counts", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderSpendBreakdown
+        estimate={{
+          totalUsd: 0.25,
+          hasPricedUsage: true,
+          pricedTokens: 0,
+          totalTokens: 0,
+          providerCosts: new Map([["grok", 0.25]]),
+          models: [
+            {
+              provider: "grok",
+              model: "Unattributed",
+              totalTokens: 0,
+              pricedTokens: 0,
+              costUsd: 0.25,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain("Grok");
+    expect(markup).toContain("$0.2500");
+    expect(markup).not.toContain("0% covered");
+  });
+});
+
 describe("UsageHeatmap", () => {
   const byDay = new Map([
     [
@@ -170,6 +442,9 @@ describe("UsageHeatmap", () => {
     expect(markup).toContain('aria-label="Jun 15, 2026: no usage recorded"');
     // The grid is keyboard-focusable for arrow-key inspection.
     expect(markup).toContain('tabindex="0"');
+    // Columns share the available width; the heatmap never creates a horizontal scroller.
+    expect(markup).toContain("repeat(2, minmax(0, 1fr))");
+    expect(markup).not.toContain("overflow-x-auto");
   });
 
   it("filters to the given subscription's own hue in per-provider view", () => {
@@ -179,5 +454,34 @@ describe("UsageHeatmap", () => {
 
     expect(markup).toContain("--color-sky-600");
     expect(markup).not.toContain("--color-orange-600");
+  });
+
+  it("describes unit-neutral Copilot billing activity without calling it tokens", () => {
+    const billingCalendar = buildCalendar({
+      byDay: new Map([
+        [
+          "2026-06-16",
+          [
+            usage("githubCopilot", {
+              activityLevel: 4,
+              billingRequests: 12.5,
+              billingAiCredits: 3,
+            }),
+          ],
+        ],
+      ]),
+      weeksCount: 2,
+      today: TODAY,
+    });
+    const markup = renderToStaticMarkup(
+      <UsageHeatmap
+        calendar={billingCalendar}
+        tokenScale={makeTokenLevelScale([])}
+        label="All subscriptions"
+      />,
+    );
+
+    expect(markup).toContain("12.5 premium requests, 3 AI credits");
+    expect(markup).not.toContain("12.5 tokens");
   });
 });

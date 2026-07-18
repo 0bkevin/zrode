@@ -17,6 +17,7 @@
  */
 import {
   ActivityIcon,
+  ChevronDownIcon,
   DownloadIcon,
   ExternalLinkIcon,
   FlameIcon,
@@ -32,7 +33,11 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
-import type { ProviderTokenActivityKind } from "@t3tools/contracts";
+import type {
+  GitHubCopilotBillingHistory,
+  ProviderModelTokenActivityDay,
+  ProviderTokenActivityKind,
+} from "@t3tools/contracts";
 
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
@@ -44,6 +49,7 @@ import {
   ClaudeAI,
   CursorIcon,
   DevinIcon,
+  GithubCopilotIcon,
   GrokIcon,
   KiloCodeIcon,
   OpenAI,
@@ -62,7 +68,9 @@ import {
 } from "./UsageCharts";
 import { ShareProfileButton, type ShareProfileData } from "./ShareProfileCard";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Skeleton } from "../ui/skeleton";
+import { API_PRICING_AS_OF, estimateApiEquivalentCost, type ApiCostEstimate } from "./usagePricing";
 
 const HISTORY_FETCH_DAYS = 371;
 
@@ -75,8 +83,9 @@ const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
   claude: "var(--color-orange-600)",
   codex: "var(--color-sky-600)",
   grok: "var(--color-violet-600)",
-  kilocode: "var(--color-pink-600)",
-  opencode: "var(--color-emerald-600)",
+  kilocode: "var(--color-yellow-500)",
+  opencode: "var(--color-zinc-500)",
+  githubCopilot: "var(--color-emerald-500)",
 };
 
 /**
@@ -88,8 +97,9 @@ const PROVIDER_SHARE_HEX: Record<ProviderTokenActivityKind, string> = {
   claude: "#ea580c",
   codex: "#0284c7",
   grok: "#7c3aed",
-  kilocode: "#db2777",
-  opencode: "#059669",
+  kilocode: "#eab308",
+  opencode: "#71717a",
+  githubCopilot: "#10b981",
 };
 
 const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
@@ -98,6 +108,7 @@ const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
   grok: "Grok",
   kilocode: "Kilo Code",
   opencode: "OpenCode",
+  githubCopilot: "GitHub Copilot",
 };
 
 /** Providers with backfillable local token history, in a fixed display order. */
@@ -107,6 +118,7 @@ const HISTORY_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ];
 
 function ProviderIcon({
@@ -127,6 +139,8 @@ function ProviderIcon({
       return <KiloCodeIcon className={className} />;
     case "opencode":
       return <OpenCodeIcon className={className} />;
+    case "githubCopilot":
+      return <GithubCopilotIcon className={className} />;
   }
 }
 
@@ -192,10 +206,9 @@ function formatPercent(value: number): string {
 
 // ── Unmetered subscriptions (no local token data) ────────────────────
 //
-// Cursor, Devin, and Grok integrate with zrode but keep no local per-message
-// token usage on disk (Cursor records code-authorship stats; Grok's local logs
-// only hold a constant system-prompt size), so there is nothing to backfill. We
-// still surface them honestly with a link to the vendor's own dashboard.
+// Cursor, Devin, and Copilot expose authoritative account usage in their own
+// dashboards. Grok is handled by the local unified-log scanner alongside the
+// other token-history providers.
 
 type UnmeteredKind = "cursor" | "devin";
 
@@ -236,6 +249,10 @@ export interface DayUsage {
   /** Peak session-window utilization sampled that day, when recorded. */
   readonly peakSessionPercent: number | null;
   readonly peakWeeklyPercent: number | null;
+  /** Unit-neutral activity signal for sources that report requests/credits, not tokens. */
+  readonly activityLevel?: number;
+  readonly billingRequests?: number;
+  readonly billingAiCredits?: number;
 }
 
 interface DayCell {
@@ -253,11 +270,13 @@ function peakPercent(usage: DayUsage): number {
 
 function usageRank(usage: DayUsage): number {
   // Tokens dominate; percent breaks ties for token-less sampled days.
-  return usage.tokens > 0 ? usage.tokens : peakPercent(usage) / 1_000;
+  return usage.tokens > 0
+    ? usage.tokens
+    : Math.max(peakPercent(usage) / 1_000, (usage.activityLevel ?? 0) / 10);
 }
 
 export function isActiveUsage(usage: DayUsage): boolean {
-  return usage.tokens > 0 || peakPercent(usage) > 0;
+  return usage.tokens > 0 || peakPercent(usage) > 0 || (usage.activityLevel ?? 0) > 0;
 }
 
 /**
@@ -297,6 +316,7 @@ export function usageLevel(usage: DayUsage, tokenScale: (tokens: number) => numb
     return tokenScale(usage.tokens);
   }
   const percent = peakPercent(usage);
+  if ((usage.activityLevel ?? 0) > 0) return usage.activityLevel ?? 0;
   if (percent <= 0) return 0;
   if (percent < 25) return 1;
   if (percent < 50) return 2;
@@ -369,6 +389,7 @@ interface UsageStats {
     readonly key: string;
     readonly tokens: number;
     readonly percent: number | null;
+    readonly activityLevel?: number;
   } | null;
 }
 
@@ -385,11 +406,21 @@ export function computeStats(
     const dayTokens = usages.reduce((total, usage) => total + usage.tokens, 0);
     totalTokens += dayTokens;
     const dayPercent = Math.max(0, ...usages.map(peakPercent));
-    const rank = dayTokens > 0 ? dayTokens : dayPercent / 1_000;
+    const dayActivityLevel = Math.max(0, ...usages.map((usage) => usage.activityLevel ?? 0));
+    const rank = dayTokens > 0 ? dayTokens : Math.max(dayPercent / 1_000, dayActivityLevel / 10);
     const bestRank =
-      peakDay === null ? -1 : peakDay.tokens > 0 ? peakDay.tokens : (peakDay.percent ?? 0) / 1_000;
+      peakDay === null
+        ? -1
+        : peakDay.tokens > 0
+          ? peakDay.tokens
+          : Math.max((peakDay.percent ?? 0) / 1_000, (peakDay.activityLevel ?? 0) / 10);
     if (rank > bestRank) {
-      peakDay = { key, tokens: dayTokens, percent: dayPercent > 0 ? dayPercent : null };
+      peakDay = {
+        key,
+        tokens: dayTokens,
+        percent: dayPercent > 0 ? dayPercent : null,
+        activityLevel: dayActivityLevel,
+      };
     }
   }
 
@@ -423,8 +454,7 @@ export function computeStats(
 
 // ── Heatmap ──────────────────────────────────────────────────────────
 
-const CELL_PX = 11;
-const CELL_GAP_PX = 3;
+const CELL_GAP = "clamp(1px, 0.2vw, 3px)";
 /** Keep the tooltip's center this far from the container edges. */
 const TOOLTIP_EDGE_PX = 90;
 
@@ -440,6 +470,12 @@ function usageSummary(usage: DayUsage): string {
   const parts: string[] = [];
   if (usage.tokens > 0) {
     parts.push(`${formatTokens(usage.tokens)} tokens`);
+  }
+  if ((usage.billingRequests ?? 0) > 0) {
+    parts.push(`${formatBillingQuantity(usage.billingRequests ?? 0)} premium requests`);
+  }
+  if ((usage.billingAiCredits ?? 0) > 0) {
+    parts.push(`${formatBillingQuantity(usage.billingAiCredits ?? 0)} AI credits`);
   }
   if (usage.peakSessionPercent !== null && usage.peakSessionPercent > 0) {
     parts.push(`session peak ${Math.round(usage.peakSessionPercent)}%`);
@@ -475,25 +511,7 @@ function HeatmapTooltipContent({ cell }: { cell: DayCell }) {
               aria-hidden
             />
             <span className="text-muted-foreground">
-              {PROVIDER_LABEL[usage.provider]}{" "}
-              {usage.tokens > 0 ? (
-                <>
-                  <span className="tabular-nums text-foreground">{formatTokens(usage.tokens)}</span>
-                  <span className="text-muted-foreground/60"> tokens</span>
-                </>
-              ) : null}
-              {usage.peakSessionPercent !== null && usage.peakSessionPercent > 0 ? (
-                <span className="text-muted-foreground/60">
-                  {usage.tokens > 0 ? " · " : " "}
-                  session {Math.round(usage.peakSessionPercent)}%
-                </span>
-              ) : null}
-              {usage.peakWeeklyPercent !== null && usage.peakWeeklyPercent > 0 ? (
-                <span className="text-muted-foreground/60">
-                  {" "}
-                  · wk {Math.round(usage.peakWeeklyPercent)}%
-                </span>
-              ) : null}
+              {PROVIDER_LABEL[usage.provider]} {usageSummary(usage)}
             </span>
           </div>
         ))
@@ -596,13 +614,13 @@ export function UsageHeatmap({
   };
 
   const tooltipCell = tooltip ? cellsByKey.get(tooltip.key) : undefined;
-  const columnTemplate = `repeat(${calendar.weeks.length}, ${CELL_PX}px)`;
+  const columnTemplate = `repeat(${calendar.weeks.length}, minmax(0, 1fr))`;
 
   return (
-    <div ref={outerRef} className="relative">
-      <div className="overflow-x-auto pt-1">
+    <div ref={outerRef} className="relative min-w-0 overflow-x-clip">
+      <div className="min-w-0 pt-1">
         <div
-          className="inline-flex flex-col gap-1"
+          className="flex w-full min-w-0 flex-col gap-1"
           onMouseOver={handleMouseOver}
           onMouseLeave={() => {
             // Keep the tooltip when it is anchored by keyboard navigation.
@@ -610,8 +628,8 @@ export function UsageHeatmap({
           }}
         >
           <div
-            className="grid text-[9px] leading-none text-muted-foreground/60"
-            style={{ gridTemplateColumns: columnTemplate, columnGap: `${CELL_GAP_PX}px` }}
+            className="ml-7 grid min-w-0 text-[9px] leading-none text-muted-foreground/60"
+            style={{ gridTemplateColumns: columnTemplate, columnGap: CELL_GAP }}
             aria-hidden
           >
             {calendar.monthLabels.map((month) => (
@@ -620,10 +638,10 @@ export function UsageHeatmap({
               </span>
             ))}
           </div>
-          <div className="flex gap-1.5">
+          <div className="flex w-full min-w-0 gap-1.5">
             <div
-              className="grid shrink-0 text-[9px] leading-none text-muted-foreground/60"
-              style={{ gridTemplateRows: `repeat(7, ${CELL_PX}px)`, rowGap: `${CELL_GAP_PX}px` }}
+              className="grid w-[22px] shrink-0 grid-rows-7 text-[9px] leading-none text-muted-foreground/60"
+              style={{ rowGap: CELL_GAP }}
               aria-hidden
             >
               {(
@@ -643,11 +661,11 @@ export function UsageHeatmap({
               ))}
             </div>
             <div
-              className="grid grid-flow-col rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="grid min-w-0 flex-1 grid-flow-col rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
               style={{
-                gridTemplateRows: `repeat(7, ${CELL_PX}px)`,
+                gridTemplateRows: "repeat(7, minmax(0, 1fr))",
                 gridTemplateColumns: columnTemplate,
-                gap: `${CELL_GAP_PX}px`,
+                gap: CELL_GAP,
               }}
               role="group"
               aria-label={`${label} — use arrow keys to inspect days`}
@@ -665,7 +683,7 @@ export function UsageHeatmap({
               {calendar.weeks.map((week) =>
                 week.map((cell) => {
                   if (cell.isFuture) {
-                    return <span key={cell.key} aria-hidden />;
+                    return <span key={cell.key} className="aspect-square min-w-0" aria-hidden />;
                   }
                   const usage =
                     provider === undefined
@@ -681,7 +699,7 @@ export function UsageHeatmap({
                       role="img"
                       aria-label={cellAriaLabel(cell)}
                       className={cn(
-                        "rounded-[2.5px]",
+                        "aspect-square min-w-0 rounded-[2.5px]",
                         background === undefined && "bg-muted/50",
                         activeKey === cell.key && "ring-2 ring-ring",
                       )}
@@ -768,7 +786,12 @@ function StatTile({
       <span className="truncate text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
         {label}
       </span>
-      <span className="text-base font-semibold tracking-[-0.01em] text-foreground">{value}</span>
+      <span
+        className="truncate text-base font-semibold tracking-[-0.01em] text-foreground"
+        title={value}
+      >
+        {value}
+      </span>
       {hint ? <span className="truncate text-[10px] text-muted-foreground/60">{hint}</span> : null}
     </div>
   );
@@ -777,12 +800,14 @@ function StatTile({
 function peakDayValue(stats: UsageStats): string {
   if (!stats.peakDay) return "—";
   if (stats.peakDay.tokens > 0) return formatTokens(stats.peakDay.tokens);
+  if ((stats.peakDay.activityLevel ?? 0) > 0) return "Activity";
   return stats.peakDay.percent !== null ? `${Math.round(stats.peakDay.percent)}%` : "—";
 }
 
-function StatsRow({ stats }: { stats: UsageStats }) {
+export function StatsRow({ stats }: { stats: UsageStats }) {
+  const average = stats.activeDays > 0 ? stats.totalTokens / stats.activeDays : 0;
   return (
-    <div className="flex flex-wrap gap-x-6 gap-y-3">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
       <StatTile label="Total tokens" value={formatTokens(stats.totalTokens)} />
       <StatTile label="Active days" value={`${stats.activeDays}`} />
       <StatTile
@@ -798,6 +823,675 @@ function StatsRow({ stats }: { stats: UsageStats }) {
         value={peakDayValue(stats)}
         hint={stats.peakDay ? formatDayLabel(stats.peakDay.key) : undefined}
       />
+      <StatTile label="Avg. active day" value={formatTokens(average)} />
+    </div>
+  );
+}
+
+interface ProviderUsageSection {
+  readonly provider: ProviderTokenActivityKind;
+  readonly stats: UsageStats;
+  readonly calendar: CalendarModel;
+  readonly tokenScale: (tokens: number) => number;
+  readonly providerDayLabels: ReadonlyArray<string>;
+  readonly providerTokenChart: ReadonlyArray<ChartSeries>;
+  readonly pressureDayLabels: ReadonlyArray<string>;
+  readonly pressureSeries: ReadonlyArray<ChartSeries>;
+  readonly sampledDayCount: number;
+  readonly peakAllowancePercent?: number | null;
+  readonly topModel: ReturnType<typeof estimateApiEquivalentCost>["models"][number] | null;
+  readonly estimatedCostUsd: number | null;
+  readonly copilotBilling: GitHubCopilotBillingHistory | null;
+}
+
+function formatBillingQuantity(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
+
+type CopilotBillingUnit = GitHubCopilotBillingHistory["days"][number]["unit"];
+type CopilotBillingTotals = Record<CopilotBillingUnit, number>;
+
+function copilotBillingCellColor(intensityRatio: number): string | undefined {
+  if (intensityRatio <= 0) return undefined;
+  const intensity = 18 + Math.max(0, Math.min(1, intensityRatio)) * 64;
+  return `color-mix(in srgb, ${PROVIDER_HUE.githubCopilot} ${intensity}%, transparent)`;
+}
+
+/**
+ * Exact daily GitHub billing activity. Requests and AI credits remain separate
+ * from token counts, while the intensity normalizes each billing unit against
+ * its own peak so the 2026 unit transition remains visually meaningful.
+ */
+export function CopilotBillingHeatmap({
+  days,
+  calendar,
+  tokenScale,
+}: {
+  days: GitHubCopilotBillingHistory["days"];
+  calendar: CalendarModel;
+  tokenScale: (tokens: number) => number;
+}) {
+  const totals = new Map<string, CopilotBillingTotals>();
+  for (const entry of days) {
+    const key = entry.day;
+    const current = totals.get(key) ?? { requests: 0, aiCredits: 0 };
+    current[entry.unit] += entry.quantity;
+    totals.set(key, current);
+  }
+  const maxRequests = Math.max(0, ...[...totals.values()].map((entry) => entry.requests));
+  const maxAiCredits = Math.max(0, ...[...totals.values()].map((entry) => entry.aiCredits));
+  const columnTemplate = `repeat(${calendar.weeks.length}, minmax(0, 1fr))`;
+
+  return (
+    <div className="min-w-0" data-testid="copilot-billing-heatmap">
+      <div
+        className="ml-7 grid min-w-0 text-[9px] leading-none text-muted-foreground/60"
+        style={{ gridTemplateColumns: columnTemplate, columnGap: CELL_GAP }}
+        aria-hidden
+      >
+        {calendar.monthLabels.map((month) => (
+          <span key={month.key} className="overflow-visible whitespace-nowrap">
+            {month.label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-1 flex w-full min-w-0 gap-1.5">
+        <div
+          className="grid w-[22px] shrink-0 grid-rows-7 text-[9px] leading-none text-muted-foreground/60"
+          style={{ rowGap: CELL_GAP }}
+          aria-hidden
+        >
+          {(
+            [
+              ["sun", ""],
+              ["mon", "Mon"],
+              ["tue", ""],
+              ["wed", "Wed"],
+              ["thu", ""],
+              ["fri", "Fri"],
+              ["sat", ""],
+            ] as const
+          ).map(([key, label]) => (
+            <span key={key} className="flex items-center">
+              {label}
+            </span>
+          ))}
+        </div>
+        <div
+          className="grid min-w-0 flex-1 grid-flow-col"
+          style={{
+            gridTemplateRows: "repeat(7, minmax(0, 1fr))",
+            gridTemplateColumns: columnTemplate,
+            gap: CELL_GAP,
+          }}
+          role="group"
+          aria-label="GitHub Copilot daily billing activity"
+        >
+          {calendar.weeks.map((week) =>
+            week.map((cell) => {
+              if (cell.isFuture) {
+                return <span key={cell.key} className="aspect-square min-w-0" aria-hidden />;
+              }
+              const value = totals.get(cell.key) ?? { requests: 0, aiCredits: 0 };
+              const localUsage = cell.usages.find((entry) => entry.provider === "githubCopilot");
+              const intensityRatio = Math.max(
+                maxRequests > 0 ? value.requests / maxRequests : 0,
+                maxAiCredits > 0 ? value.aiCredits / maxAiCredits : 0,
+                localUsage ? usageLevel(localUsage, tokenScale) / 4 : 0,
+              );
+              const backgroundColor = copilotBillingCellColor(intensityRatio);
+              const usageParts = [
+                value.requests > 0
+                  ? `${formatBillingQuantity(value.requests)} premium requests`
+                  : null,
+                value.aiCredits > 0 ? `${formatBillingQuantity(value.aiCredits)} AI credits` : null,
+                localUsage && localUsage.tokens > 0
+                  ? `${formatTokens(localUsage.tokens)} locally recorded tokens`
+                  : null,
+              ].filter((part): part is string => part !== null);
+              const title = `${formatDayLabel(cell.key)}: ${usageParts.length > 0 ? usageParts.join(", ") : "no GitHub billing usage"}`;
+              return (
+                <span
+                  key={cell.key}
+                  role="img"
+                  aria-label={title}
+                  title={title}
+                  className={cn(
+                    "aspect-square min-w-0 rounded-[2.5px]",
+                    backgroundColor === undefined && "bg-muted/50",
+                  )}
+                  style={backgroundColor === undefined ? undefined : { backgroundColor }}
+                />
+              );
+            }),
+          )}
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <p className="text-[9px] leading-relaxed text-muted-foreground/55">
+          Exact daily GitHub billing entries, with local token activity layered in when available.
+        </p>
+        <div className="flex shrink-0 items-center gap-1 text-[9px] text-muted-foreground/60">
+          Less
+          {[0, 0.25, 0.5, 0.75, 1].map((level) => (
+            <span
+              key={level}
+              className={cn("size-2.5 rounded-[2px]", level === 0 && "bg-muted/50")}
+              style={level === 0 ? undefined : { backgroundColor: copilotBillingCellColor(level) }}
+              aria-hidden
+            />
+          ))}
+          More
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function CopilotBillingHistoryPanel({
+  history,
+  calendar,
+  tokenScale,
+}: {
+  history: GitHubCopilotBillingHistory;
+  calendar: CalendarModel;
+  tokenScale: (tokens: number) => number;
+}) {
+  const monthKeys = [...new Set(history.days.map((entry) => entry.day.slice(0, 7)))].toSorted();
+  const quantityByMonth = new Map<string, { requests: number; aiCredits: number }>();
+  for (const entry of history.days) {
+    const month = entry.day.slice(0, 7);
+    const value = quantityByMonth.get(month) ?? { requests: 0, aiCredits: 0 };
+    value[entry.unit] += entry.quantity;
+    quantityByMonth.set(month, value);
+  }
+  const requests = history.days
+    .filter((entry) => entry.unit === "requests")
+    .reduce((sum, entry) => sum + entry.quantity, 0);
+  const aiCredits = history.days
+    .filter((entry) => entry.unit === "aiCredits")
+    .reduce((sum, entry) => sum + entry.quantity, 0);
+  const gross = history.days.reduce((sum, entry) => sum + entry.grossAmountUsd, 0);
+  const net = history.days.reduce((sum, entry) => sum + entry.netAmountUsd, 0);
+  const labels = monthKeys.map((month) =>
+    new Intl.DateTimeFormat("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }).format(
+      new Date(`${month}-01T00:00:00Z`),
+    ),
+  );
+  const modelGroups = (["requests", "aiCredits"] as const).map((unit) => {
+    const totals = new Map<string, number>();
+    for (const entry of history.models) {
+      if (entry.unit === unit)
+        totals.set(entry.model, (totals.get(entry.model) ?? 0) + entry.quantity);
+    }
+    return {
+      unit,
+      rows: [...totals].toSorted((left, right) => right[1] - left[1]).slice(0, 6),
+    };
+  });
+
+  // A partial refresh may fail after GitHub already returned usable ledger
+  // rows. Prefer rendering those rows with a stale/error note instead of
+  // hiding the entire historical view behind the latest status flag.
+  if (monthKeys.length === 0 && history.models.length === 0) {
+    return history.message ? (
+      <p className="text-[11px] text-muted-foreground/70">{history.message}</p>
+    ) : null;
+  }
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4 border-t border-border/40 pt-3">
+      <div>
+        <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+          GitHub usage history
+        </span>
+        <p className="mt-1 text-[10px] text-muted-foreground/60">
+          Authoritative account ledger. Requests and AI credits are separate from locally recorded
+          tokens. Metered usage billed excludes the Copilot plan fee.
+        </p>
+        {history.status !== "ok" && history.message ? (
+          <p className="mt-1 text-[10px] text-amber-500/80">{history.message}</p>
+        ) : null}
+      </div>
+      {monthKeys.length > 0 ? (
+        <>
+          <CopilotBillingHeatmap days={history.days} calendar={calendar} tokenScale={tokenScale} />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Premium requests" value={formatBillingQuantity(requests)} />
+            <StatTile label="AI credits" value={formatBillingQuantity(aiCredits)} />
+            <StatTile label="Allowance value" value={formatUsd(gross)} />
+            <StatTile label="Metered usage billed" value={formatUsd(net)} />
+          </div>
+        </>
+      ) : (
+        <p className="text-[10px] text-muted-foreground/65">
+          Exact daily billing history is unavailable for this account; annual model reports are
+          shown below.
+        </p>
+      )}
+      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+        {requests > 0 ? (
+          <div className="min-w-0">
+            <span className="text-[10px] text-muted-foreground/60">Premium requests by month</span>
+            <UsageAreaChart
+              dayLabels={labels}
+              series={[
+                {
+                  key: "githubCopilot",
+                  label: "Requests",
+                  colorVar: PROVIDER_HUE.githubCopilot,
+                  values: monthKeys.map((day) => quantityByMonth.get(day)?.requests ?? 0),
+                },
+              ]}
+              formatValue={formatBillingQuantity}
+              height={120}
+              ariaLabel="GitHub Copilot premium requests by month"
+            />
+          </div>
+        ) : null}
+        {aiCredits > 0 ? (
+          <div className="min-w-0">
+            <span className="text-[10px] text-muted-foreground/60">AI credits by month</span>
+            <UsageAreaChart
+              dayLabels={labels}
+              series={[
+                {
+                  key: "githubCopilot",
+                  label: "AI credits",
+                  colorVar: PROVIDER_HUE.githubCopilot,
+                  values: monthKeys.map((day) => quantityByMonth.get(day)?.aiCredits ?? 0),
+                },
+              ]}
+              formatValue={formatBillingQuantity}
+              height={120}
+              ariaLabel="GitHub Copilot AI credits by month"
+            />
+          </div>
+        ) : null}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        {modelGroups.map(({ unit, rows }) =>
+          rows.length > 0 ? (
+            <div key={unit} className="min-w-0">
+              <span className="text-[10px] text-muted-foreground/60">
+                Top models by {unit === "requests" ? "requests" : "AI credits"} (annual reports)
+              </span>
+              <div className="mt-2 flex flex-col gap-2">
+                {rows.map(([model, quantity]) => (
+                  <div key={model} className="flex items-center justify-between gap-3 text-[10px]">
+                    <span className="truncate text-foreground/80">{model}</span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {formatBillingQuantity(quantity)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null,
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ProviderUsageCard({
+  section,
+  tokenMode,
+  modelRows,
+  totalTokens,
+}: {
+  section: ProviderUsageSection;
+  tokenMode: "daily" | "cumulative";
+  modelRows: ReadonlyArray<ProviderModelTokenActivityDay>;
+  totalTokens: number;
+}) {
+  const hasTokens = section.stats.totalTokens > 0;
+  const hasSamples = section.sampledDayCount > 0;
+  const share = totalTokens > 0 ? (section.stats.totalTokens / totalTokens) * 100 : 0;
+  const average =
+    section.stats.activeDays > 0 ? section.stats.totalTokens / section.stats.activeDays : 0;
+  const copilotRequests =
+    section.copilotBilling?.days
+      .filter((entry) => entry.unit === "requests")
+      .reduce((sum, entry) => sum + entry.quantity, 0) ?? 0;
+  const copilotAiCredits =
+    section.copilotBilling?.days
+      .filter((entry) => entry.unit === "aiCredits")
+      .reduce((sum, entry) => sum + entry.quantity, 0) ?? 0;
+  const hasCopilotDailyLedger =
+    section.provider === "githubCopilot" && (section.copilotBilling?.days.length ?? 0) > 0;
+
+  return (
+    <Collapsible className="rounded-2xl border bg-card text-card-foreground shadow-sm/4 transition-colors hover:border-border/80 dark:shadow-none">
+      <div className="flex flex-col gap-3 px-4 py-4 sm:px-5">
+        <CollapsibleTrigger className="group flex w-full cursor-pointer items-center justify-between gap-3 text-left">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="flex size-8 shrink-0 items-center justify-center rounded-lg border"
+              style={{
+                color: PROVIDER_HUE[section.provider],
+                backgroundColor: `color-mix(in srgb, ${PROVIDER_HUE[section.provider]} 10%, transparent)`,
+                borderColor: `color-mix(in srgb, ${PROVIDER_HUE[section.provider]} 20%, transparent)`,
+              }}
+            >
+              <ProviderIcon provider={section.provider} className="size-4" />
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-xs font-medium text-foreground">
+                {PROVIDER_LABEL[section.provider]}
+              </span>
+              <span className="text-[10px] text-muted-foreground/60">
+                {hasTokens
+                  ? `${share.toFixed(share >= 10 ? 0 : 1)}% of recorded tokens`
+                  : hasSamples
+                    ? "Allowance samples available"
+                    : "No local activity in this range"}
+              </span>
+            </span>
+          </div>
+          <span className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70">
+            Details
+            <ChevronDownIcon
+              className="size-3.5 transition-transform group-data-panel-open:rotate-180"
+              aria-hidden
+            />
+          </span>
+        </CollapsibleTrigger>
+        {section.provider === "githubCopilot" ? (
+          <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Recorded tokens" value={formatTokens(section.stats.totalTokens)} />
+            <StatTile label="Premium requests" value={formatBillingQuantity(copilotRequests)} />
+            <StatTile label="AI credits" value={formatBillingQuantity(copilotAiCredits)} />
+            <StatTile
+              label="Current quota used"
+              value={
+                section.peakAllowancePercent == null
+                  ? "Waiting for sample"
+                  : formatPercent(section.peakAllowancePercent)
+              }
+            />
+          </div>
+        ) : (
+          <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Tokens" value={formatTokens(section.stats.totalTokens)} />
+            <StatTile label="Active days" value={`${section.stats.activeDays}`} />
+            <StatTile
+              label="Top model"
+              value={section.topModel?.model ?? "Not recorded"}
+              hint={section.topModel ? formatTokens(section.topModel.totalTokens) : undefined}
+            />
+            <StatTile
+              label="API estimate"
+              value={section.estimatedCostUsd !== null ? formatUsd(section.estimatedCostUsd) : "—"}
+            />
+          </div>
+        )}
+        {hasTokens ? (
+          <span className="h-1 w-full overflow-hidden rounded-full bg-muted/50" aria-hidden>
+            <span
+              className="block h-full rounded-full"
+              style={{
+                width: `${Math.max(1, share)}%`,
+                backgroundColor: PROVIDER_HUE[section.provider],
+              }}
+            />
+          </span>
+        ) : null}
+      </div>
+      <CollapsiblePanel>
+        <div className="flex flex-col gap-4 border-t border-border/40 px-4 pb-4 pt-3 sm:px-5">
+          {section.provider === "githubCopilot" && section.copilotBilling !== null ? (
+            <CopilotBillingHistoryPanel
+              history={section.copilotBilling}
+              calendar={section.calendar}
+              tokenScale={section.tokenScale}
+            />
+          ) : null}
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile
+              label="Current streak"
+              value={`${section.stats.currentStreak} day${section.stats.currentStreak === 1 ? "" : "s"}`}
+            />
+            <StatTile
+              label="Longest streak"
+              value={`${section.stats.longestStreak} day${section.stats.longestStreak === 1 ? "" : "s"}`}
+            />
+            <StatTile
+              label="Peak day"
+              value={peakDayValue(section.stats)}
+              hint={section.stats.peakDay ? formatDayLabel(section.stats.peakDay.key) : undefined}
+            />
+            <StatTile label="Avg. active day" value={formatTokens(average)} />
+          </div>
+
+          {(hasTokens || hasSamples) && !hasCopilotDailyLedger ? (
+            <div className="flex min-w-0 flex-col gap-2 border-t border-border/40 pt-3">
+              <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                {section.provider === "githubCopilot"
+                  ? "Locally recorded token calendar"
+                  : "Activity calendar"}
+              </span>
+              <UsageHeatmap
+                calendar={section.calendar}
+                provider={section.provider}
+                tokenScale={section.tokenScale}
+                label={`${PROVIDER_LABEL[section.provider]} activity calendar`}
+              />
+              <HeatmapLegend provider={section.provider} />
+            </div>
+          ) : null}
+
+          {modelRows.length > 0 ? (
+            <div className="flex min-w-0 flex-col gap-2 border-t border-border/40 pt-3">
+              <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                Most-used models
+              </span>
+              <ModelUsageChart rows={modelRows} />
+            </div>
+          ) : null}
+
+          {section.providerTokenChart.length > 0 || section.sampledDayCount >= 1 ? (
+            <div className="grid min-w-0 gap-4 border-t border-border/40 pt-3 lg:grid-cols-2">
+              {section.providerTokenChart.length > 0 ? (
+                <div className="min-w-0">
+                  <span className="text-[10px] text-muted-foreground/60">
+                    Tokens {tokenMode === "cumulative" ? "(cumulative)" : "per day"}
+                  </span>
+                  <UsageAreaChart
+                    dayLabels={section.providerDayLabels}
+                    series={section.providerTokenChart}
+                    formatValue={formatTokens}
+                    height={120}
+                    ariaLabel={`${PROVIDER_LABEL[section.provider]} tokens over time`}
+                  />
+                </div>
+              ) : null}
+              {section.sampledDayCount >= 1 ? (
+                <div className="min-w-0">
+                  <span className="text-[10px] text-muted-foreground/60">
+                    Peak allowance pressure
+                  </span>
+                  <UsageAreaChart
+                    dayLabels={section.pressureDayLabels}
+                    series={section.pressureSeries}
+                    formatValue={formatPercent}
+                    maxValueOverride={100}
+                    height={120}
+                    ariaLabel={`${PROVIDER_LABEL[section.provider]} peak allowance utilization over time`}
+                  />
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground/70">
+              Zrode has not found local token records or enough allowance samples for this provider
+              in the selected range.
+            </p>
+          )}
+        </div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+function formatUsd(value: number): string {
+  if (value >= 1_000) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(value);
+  }
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value > 0) return `$${value.toFixed(4)}`;
+  return "$0.00";
+}
+
+export function ProviderSpendBreakdown({ estimate }: { estimate: ApiCostEstimate }) {
+  const rows = HISTORY_PROVIDERS.map((provider) => {
+    const models = estimate.models.filter((entry) => entry.provider === provider);
+    const totalTokens = models.reduce((sum, entry) => sum + entry.totalTokens, 0);
+    const pricedTokens = models.reduce((sum, entry) => sum + entry.pricedTokens, 0);
+    return {
+      provider,
+      totalTokens,
+      pricedTokens,
+      costUsd: estimate.providerCosts.get(provider) ?? null,
+    };
+  })
+    .filter((entry) => entry.totalTokens > 0 || entry.costUsd !== null)
+    .toSorted((left, right) => (right.costUsd ?? -1) - (left.costUsd ?? -1));
+  const maxCost = Math.max(0, ...rows.map((entry) => entry.costUsd ?? 0));
+
+  if (rows.length === 0) {
+    return <p className="text-[10px] text-muted-foreground/60">No model-attributed spend yet.</p>;
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 border-t border-border/40 pt-3">
+      <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+        By provider
+      </span>
+      {rows.map((entry) => {
+        const coverage =
+          entry.totalTokens > 0 ? Math.round((entry.pricedTokens / entry.totalTokens) * 100) : null;
+        return (
+          <div key={entry.provider} className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1">
+            <div className="flex min-w-0 items-center gap-1.5 text-[11px]">
+              <ProviderIcon
+                provider={entry.provider}
+                className="size-3 shrink-0 text-muted-foreground"
+              />
+              <span className="truncate text-foreground">{PROVIDER_LABEL[entry.provider]}</span>
+              {coverage !== null && coverage < 100 ? (
+                <span className="text-[9px] tabular-nums text-muted-foreground/50">
+                  {coverage}% covered
+                </span>
+              ) : null}
+            </div>
+            <span className="text-[11px] font-medium tabular-nums text-foreground">
+              {entry.costUsd !== null ? formatUsd(entry.costUsd) : "Not priced"}
+            </span>
+            <div className="col-span-2 h-1 overflow-hidden rounded-full bg-muted/50">
+              {entry.costUsd !== null && maxCost > 0 ? (
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${Math.max(1, (entry.costUsd / maxCost) * 100)}%`,
+                    backgroundColor: PROVIDER_HUE[entry.provider],
+                  }}
+                />
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProviderMixChart({ byDay }: { byDay: ReadonlyMap<string, ReadonlyArray<DayUsage>> }) {
+  const totals = HISTORY_PROVIDERS.map((provider) => ({
+    provider,
+    tokens: [...byDay.values()].reduce(
+      (sum, usages) => sum + (usages.find((usage) => usage.provider === provider)?.tokens ?? 0),
+      0,
+    ),
+  })).filter((entry) => entry.tokens > 0);
+  const grandTotal = totals.reduce((sum, entry) => sum + entry.tokens, 0);
+  if (grandTotal <= 0) return null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div
+        className="flex h-2.5 w-full overflow-hidden rounded-full bg-muted/50"
+        role="img"
+        aria-label="Token share by provider"
+      >
+        {totals.map((entry) => (
+          <span
+            key={entry.provider}
+            style={{
+              width: `${(entry.tokens / grandTotal) * 100}%`,
+              backgroundColor: PROVIDER_HUE[entry.provider],
+            }}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        {totals.map((entry) => (
+          <span key={entry.provider} className="flex items-center gap-1.5 text-[10px]">
+            <span
+              className="size-2 rounded-[2px]"
+              style={{ backgroundColor: PROVIDER_HUE[entry.provider] }}
+              aria-hidden
+            />
+            <span className="text-muted-foreground">{PROVIDER_LABEL[entry.provider]}</span>
+            <span className="tabular-nums text-foreground">
+              {Math.round((entry.tokens / grandTotal) * 100)}%
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ModelUsageChart({ rows }: { rows: ReadonlyArray<ProviderModelTokenActivityDay> }) {
+  const estimate = useMemo(() => estimateApiEquivalentCost(rows), [rows]);
+  const top = estimate.models.slice(0, 6);
+  const maxTokens = top[0]?.totalTokens ?? 0;
+  if (top.length === 0 || maxTokens <= 0) return null;
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {top.map((entry) => (
+        <div
+          key={`${entry.provider}-${entry.model}`}
+          className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1"
+        >
+          <div className="flex min-w-0 items-center gap-1.5 text-[11px]">
+            <ProviderIcon
+              provider={entry.provider}
+              className="size-3 shrink-0 text-muted-foreground"
+            />
+            <span className="truncate text-foreground">{entry.model}</span>
+          </div>
+          <span className="text-[10px] tabular-nums text-muted-foreground">
+            {formatTokens(entry.totalTokens)}
+          </span>
+          <div className="col-span-2 h-1 overflow-hidden rounded-full bg-muted/50">
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${(entry.totalTokens / maxTokens) * 100}%`,
+                backgroundColor: PROVIDER_HUE[entry.provider],
+              }}
+            />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -841,7 +1535,7 @@ function RecentActivityTable({ byDay }: { byDay: ReadonlyMap<string, ReadonlyArr
             <tr className="text-muted-foreground/60">
               <th className="py-1 pr-3 font-medium">Day</th>
               <th className="py-1 pr-3 font-medium">Subscription</th>
-              <th className="py-1 pr-3 font-medium">Tokens</th>
+              <th className="py-1 pr-3 font-medium">Usage</th>
               <th className="py-1 pr-3 font-medium">Peak session</th>
               <th className="py-1 font-medium">Peak weekly</th>
             </tr>
@@ -852,7 +1546,20 @@ function RecentActivityTable({ byDay }: { byDay: ReadonlyMap<string, ReadonlyArr
                 <td className="py-1 pr-3">{formatDayLabel(row.day)}</td>
                 <td className="py-1 pr-3">{PROVIDER_LABEL[row.provider]}</td>
                 <td className="py-1 pr-3 tabular-nums">
-                  {row.usage.tokens > 0 ? formatTokens(row.usage.tokens) : "—"}
+                  {row.usage.tokens > 0
+                    ? `${formatTokens(row.usage.tokens)} tokens`
+                    : (row.usage.billingRequests ?? 0) > 0 || (row.usage.billingAiCredits ?? 0) > 0
+                      ? [
+                          (row.usage.billingRequests ?? 0) > 0
+                            ? `${formatBillingQuantity(row.usage.billingRequests ?? 0)} requests`
+                            : null,
+                          (row.usage.billingAiCredits ?? 0) > 0
+                            ? `${formatBillingQuantity(row.usage.billingAiCredits ?? 0)} credits`
+                            : null,
+                        ]
+                          .filter((value): value is string => value !== null)
+                          .join(", ")
+                      : "—"}
                 </td>
                 <td className="py-1 pr-3 tabular-nums">
                   {row.usage.peakSessionPercent !== null
@@ -880,13 +1587,18 @@ function csvField(value: string): string {
 }
 
 function exportUsageCsv(byDay: ReadonlyMap<string, ReadonlyArray<DayUsage>>, todayKey: string) {
-  const lines = ["day,provider,tokens,peak_session_percent,peak_weekly_percent"];
+  const lines = [
+    "day,provider,tokens,has_activity,billing_premium_requests,billing_ai_credits,peak_session_percent,peak_weekly_percent",
+  ];
   for (const row of activityRows(byDay)) {
     lines.push(
       [
         csvField(row.day),
         csvField(row.provider),
         `${row.usage.tokens}`,
+        isActiveUsage(row.usage) ? "true" : "false",
+        `${row.usage.billingRequests ?? 0}`,
+        `${row.usage.billingAiCredits ?? 0}`,
         row.usage.peakSessionPercent !== null ? `${row.usage.peakSessionPercent}` : "",
         row.usage.peakWeeklyPercent !== null ? `${row.usage.peakWeeklyPercent}` : "",
       ].join(","),
@@ -914,6 +1626,9 @@ interface MutableDayUsage {
   tokens: number;
   peakSessionPercent: number | null;
   peakWeeklyPercent: number | null;
+  activityLevel: number;
+  billingRequests: number;
+  billingAiCredits: number;
 }
 
 /**
@@ -936,6 +1651,7 @@ export function UsageSettingsPanel() {
   const environmentId = primaryEnvironment?.environmentId ?? null;
   const [weeksCount, setWeeksCount] = useState<number>(53);
   const [tokenMode, setTokenMode] = useState<"daily" | "cumulative">("daily");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [rescanRequested, setRescanRequested] = useState(false);
   const rescanBaselineRef = useRef<number | null>(null);
 
@@ -955,6 +1671,9 @@ export function UsageSettingsPanel() {
         }),
   );
   const isBackfilling = historyData?.isBackfilling ?? false;
+  const isBillingRefreshing =
+    historyData?.githubCopilotBilling?.message?.startsWith("Loading GitHub billing history") ??
+    false;
   const lastScanAt = historyData?.lastScanAt ?? null;
 
   // A requested rescan is "delivered" as soon as any response for it arrives
@@ -987,6 +1706,13 @@ export function UsageSettingsPanel() {
     }, 3_000);
     return () => clearInterval(id);
   }, [isBackfilling, refreshHistory]);
+  useEffect(() => {
+    if (!isBillingRefreshing) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") refreshHistory();
+    }, 2_000);
+    return () => clearInterval(id);
+  }, [isBillingRefreshing, refreshHistory]);
 
   // Anchor the calendar to the server's current day; fall back to the
   // browser clock (kept fresh across midnight) until data arrives.
@@ -1014,6 +1740,9 @@ export function UsageSettingsPanel() {
           tokens: 0,
           peakSessionPercent: null,
           peakWeeklyPercent: null,
+          activityLevel: 0,
+          billingRequests: 0,
+          billingAiCredits: 0,
         } satisfies MutableDayUsage);
       providers.set(provider, usage);
       return usage;
@@ -1025,6 +1754,28 @@ export function UsageSettingsPanel() {
       const usage = upsert(sample.day, sample.provider);
       usage.peakSessionPercent = sample.peakSessionPercent;
       usage.peakWeeklyPercent = sample.peakWeeklyPercent;
+    }
+    const billingDays = historyData?.githubCopilotBilling?.days ?? [];
+    const billingByDay = new Map<string, { requests: number; aiCredits: number }>();
+    for (const entry of billingDays) {
+      const current = billingByDay.get(entry.day) ?? { requests: 0, aiCredits: 0 };
+      current[entry.unit] += entry.quantity;
+      billingByDay.set(entry.day, current);
+    }
+    const requestScale = makeTokenLevelScale(
+      [...billingByDay.values()].map((entry) => entry.requests),
+    );
+    const creditScale = makeTokenLevelScale(
+      [...billingByDay.values()].map((entry) => entry.aiCredits),
+    );
+    for (const [day, billing] of billingByDay) {
+      const usage = upsert(day, "githubCopilot");
+      usage.billingRequests = billing.requests;
+      usage.billingAiCredits = billing.aiCredits;
+      usage.activityLevel = Math.max(
+        requestScale(billing.requests),
+        creditScale(billing.aiCredits),
+      );
     }
     const result = new Map<string, ReadonlyArray<DayUsage>>();
     for (const [day, providers] of map) {
@@ -1059,6 +1810,27 @@ export function UsageSettingsPanel() {
     () => [...visibleByDay.values()].some((usages) => usages.some(isActiveUsage)),
     [visibleByDay],
   );
+
+  const visibleModelActivity = useMemo(
+    () =>
+      (historyData?.modelActivity ?? []).filter(
+        (entry) => entry.day >= calendar.startKey && entry.day <= todayKey,
+      ),
+    [historyData?.modelActivity, calendar.startKey, todayKey],
+  );
+  const apiCostEstimate = useMemo(
+    () => estimateApiEquivalentCost(visibleModelActivity),
+    [visibleModelActivity],
+  );
+  const modelActivityByProvider = useMemo(() => {
+    const rows = new Map<ProviderTokenActivityKind, Array<ProviderModelTokenActivityDay>>();
+    for (const entry of visibleModelActivity) {
+      const providerRows = rows.get(entry.provider) ?? [];
+      providerRows.push(entry);
+      rows.set(entry.provider, providerRows);
+    }
+    return rows;
+  }, [visibleModelActivity]);
 
   // Enabled Cursor/Devin subscriptions — shown with a dashboard link
   // since they expose no local usage to chart.
@@ -1122,28 +1894,52 @@ export function UsageSettingsPanel() {
   // as a rich 12-month calendar regardless of what's on screen.
   const shareData = useMemo<ShareProfileData>(() => {
     const fullStats = computeStats(byDayAll, today);
-    const providerTotalMap = new Map<ProviderTokenActivityKind, number>();
-    const heatmap: Array<{ day: string; total: number; colorVar: string | null }> = [];
+    const providerTotals = new Map<
+      ProviderTokenActivityKind,
+      { tokens: number; billingRequests: number; billingAiCredits: number; active: boolean }
+    >();
+    const heatmap: Array<{
+      day: string;
+      total: number;
+      activityLevel: number;
+      colorVar: string | null;
+    }> = [];
     for (const [day, usages] of byDayAll) {
       let total = 0;
-      let topProvider: ProviderTokenActivityKind | null = null;
+      let activityLevel = 0;
+      let topUsage: DayUsage | null = null;
       for (const usage of usages) {
         total += usage.tokens;
-        if (usage.tokens > 0) {
-          providerTotalMap.set(
-            usage.provider,
-            (providerTotalMap.get(usage.provider) ?? 0) + usage.tokens,
+        const provider = providerTotals.get(usage.provider) ?? {
+          tokens: 0,
+          billingRequests: 0,
+          billingAiCredits: 0,
+          active: false,
+        };
+        provider.tokens += usage.tokens;
+        provider.billingRequests += usage.billingRequests ?? 0;
+        provider.billingAiCredits += usage.billingAiCredits ?? 0;
+        provider.active ||= isActiveUsage(usage);
+        providerTotals.set(usage.provider, provider);
+
+        // Token intensity is ranked from the daily total by the canvas
+        // renderer. Carry only the non-token signal here so Copilot billing
+        // and allowance-only days are not silently dropped from the image.
+        if (usage.tokens <= 0) {
+          activityLevel = Math.max(
+            activityLevel,
+            usageLevel(usage, () => 0),
           );
-          const topValue = topProvider
-            ? (usages.find((u) => u.provider === topProvider)?.tokens ?? 0)
-            : 0;
-          if (usage.tokens > topValue) topProvider = usage.provider;
+        }
+        if (isActiveUsage(usage) && (topUsage === null || usageRank(usage) > usageRank(topUsage))) {
+          topUsage = usage;
         }
       }
       heatmap.push({
         day,
         total,
-        colorVar: topProvider ? PROVIDER_SHARE_HEX[topProvider] : null,
+        activityLevel,
+        colorVar: topUsage ? PROVIDER_SHARE_HEX[topUsage.provider] : null,
       });
     }
     return {
@@ -1154,16 +1950,18 @@ export function UsageSettingsPanel() {
         { label: "Longest streak", value: `${fullStats.longestStreak}d` },
         {
           label: "Peak day",
-          value: fullStats.peakDay ? formatTokens(fullStats.peakDay.tokens) : "—",
+          value: peakDayValue(fullStats),
         },
       ],
       providerTotals: HISTORY_PROVIDERS.flatMap((provider) => {
-        const total = providerTotalMap.get(provider) ?? 0;
-        return total > 0
+        const total = providerTotals.get(provider);
+        return total?.active
           ? [
               {
                 label: PROVIDER_LABEL[provider],
-                tokens: total,
+                tokens: total.tokens,
+                billingRequests: total.billingRequests,
+                billingAiCredits: total.billingAiCredits,
                 colorVar: PROVIDER_SHARE_HEX[provider],
               },
             ]
@@ -1180,7 +1978,7 @@ export function UsageSettingsPanel() {
    * of inside the render map — the page re-renders for cheap reasons (chart
    * hover state, poll ticks) and must not rebuild series each time.
    */
-  const providerSections = useMemo(
+  const providerSections = useMemo<ReadonlyArray<ProviderUsageSection>>(
     () =>
       HISTORY_PROVIDERS.map((provider) => {
         const providerByDay = new Map<string, ReadonlyArray<DayUsage>>();
@@ -1191,6 +1989,7 @@ export function UsageSettingsPanel() {
           }
         }
         const stats = computeStats(providerByDay, today);
+        const providerCalendar = buildCalendar({ byDay: providerByDay, weeksCount, today });
         const providerTokenScale = makeTokenLevelScale(
           [...providerByDay.values()].flat().map((usage) => usage.tokens),
         );
@@ -1224,6 +2023,8 @@ export function UsageSettingsPanel() {
           }
         }
         const sampledDayCount = sampleByDay.size;
+        const peakAllowancePercent =
+          sampledDayCount === 0 ? null : Math.max(...sampleByDay.values());
         const pressureDayLabels = providerDaily.map((point) => formatDayLabel(point.day));
         const pressureSeries: ReadonlyArray<ChartSeries> = [
           {
@@ -1233,18 +2034,42 @@ export function UsageSettingsPanel() {
             values: providerDaily.map((point) => sampleByDay.get(point.day) ?? 0),
           },
         ];
+        const topModel = apiCostEstimate.models.find((entry) => entry.provider === provider);
         return {
           provider,
           stats,
-          providerTokenScale,
+          calendar: providerCalendar,
+          tokenScale: providerTokenScale,
           providerDayLabels,
           providerTokenChart,
           pressureDayLabels,
           pressureSeries,
           sampledDayCount,
+          peakAllowancePercent,
+          topModel: topModel ?? null,
+          estimatedCostUsd: apiCostEstimate.providerCosts.get(provider) ?? null,
+          copilotBilling:
+            provider === "githubCopilot" && historyData?.githubCopilotBilling
+              ? {
+                  ...historyData.githubCopilotBilling,
+                  days: historyData.githubCopilotBilling.days.filter(
+                    (entry) => entry.day >= calendar.startKey && entry.day <= todayKey,
+                  ),
+                }
+              : null,
         };
       }),
-    [visibleByDay, today, calendar.startKey, todayKey, tokenMode, historyData?.days],
+    [
+      visibleByDay,
+      today,
+      weeksCount,
+      calendar.startKey,
+      todayKey,
+      tokenMode,
+      historyData?.days,
+      historyData?.githubCopilotBilling,
+      apiCostEstimate,
+    ],
   );
 
   const requestRescan = () => {
@@ -1276,7 +2101,7 @@ export function UsageSettingsPanel() {
   return (
     <SettingsPageContainer>
       <SettingsSection
-        title="Subscription usage"
+        title="Usage overview"
         icon={<ActivityIcon className="size-3" />}
         headerAction={
           <div className="flex items-center gap-2">
@@ -1295,6 +2120,39 @@ export function UsageSettingsPanel() {
         }
       >
         <div className="flex flex-col gap-4 px-4 py-4 sm:px-5">
+          {historyData !== null ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <LastScanLabel lastScanAt={lastScanAt} />
+              <div className="flex flex-wrap items-center gap-1">
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  className="h-7 rounded-lg px-2.5 text-[11px] text-muted-foreground hover:bg-background/70 hover:text-foreground"
+                  disabled={isBackfilling || rescanRequested}
+                  onClick={requestRescan}
+                >
+                  <RefreshCwIcon className="size-3" />
+                  Rescan logs
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  className="h-7 rounded-lg px-2.5 text-[11px] text-muted-foreground hover:bg-background/70 hover:text-foreground"
+                  disabled={!hasAnyActivity}
+                  onClick={() => exportUsageCsv(visibleByDay, todayKey)}
+                >
+                  <DownloadIcon className="size-3" />
+                  Export CSV
+                </Button>
+                {hasAnyActivity ? (
+                  <ShareProfileButton
+                    data={shareData}
+                    className="h-7 rounded-lg px-2.5 hover:bg-background/70"
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <p className="text-xs text-muted-foreground/80">
             Daily token activity of your subscriptions, read from each provider's local session
             logs, with the rate-limit peaks Zrode samples layered in. Each day wears the color of
@@ -1326,241 +2184,224 @@ export function UsageSettingsPanel() {
                   Scanning local session logs — the calendar fills in as the scan progresses…
                 </p>
               ) : null}
-              {combinedChartSeries.length > 0 ? (
-                <div className="flex flex-col gap-3 border-t border-border/40 pt-4">
-                  <div className="flex items-end justify-between gap-3">
-                    <div className="flex flex-col">
-                      <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
-                        Tokens
-                      </span>
-                      <span className="text-xl font-semibold tracking-[-0.01em] text-foreground">
-                        {formatTokens(combinedStats.totalTokens)}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground/60">
-                        {tokenMode === "cumulative" ? "Cumulative over range" : "Per day"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-0.5 rounded-md bg-muted/40 p-0.5">
-                      {(["daily", "cumulative"] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          aria-pressed={tokenMode === mode}
-                          className={cn(
-                            "cursor-pointer rounded-[5px] px-2 py-0.5 text-[10px] capitalize transition-colors",
-                            tokenMode === mode
-                              ? "bg-background font-medium text-foreground shadow-xs"
-                              : "text-muted-foreground/70 hover:text-foreground",
-                          )}
-                          onClick={() => setTokenMode(mode)}
-                        >
-                          {mode}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <UsageAreaChart
-                    dayLabels={dayLabels}
-                    series={combinedChartSeries}
-                    formatValue={formatTokens}
-                    ariaLabel="Tokens processed per day by subscription"
-                  />
-                </div>
-              ) : null}
-              {combinedChartSeries.length > 0 ? (
-                <div className="flex flex-col gap-3 border-t border-border/40 pt-4">
-                  <div className="flex flex-col">
-                    <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
-                      Activity by weekday
-                    </span>
-                    <span className="text-[11px] text-muted-foreground/70">
-                      Average tokens per day of week across this range.
-                    </span>
-                  </div>
-                  <WeekdayBarChart
-                    data={weekdayData}
-                    series={activeChartProviders.map((provider) => ({
-                      key: provider,
-                      label: PROVIDER_LABEL[provider],
-                      colorVar: PROVIDER_HUE[provider],
-                    }))}
-                    formatValue={formatTokens}
-                    ariaLabel="Average tokens by weekday"
-                  />
-                </div>
-              ) : null}
               {!hasAnyActivity && !isBackfilling ? (
                 <p className="text-xs text-muted-foreground/70">
                   No usage activity found in this range. Zrode reads past activity from your local
                   Claude Code and Codex session logs and samples live usage from the footer meter.
                 </p>
-              ) : (
-                <RecentActivityTable byDay={visibleByDay} />
-              )}
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/40 pt-3">
-                <LastScanLabel lastScanAt={lastScanAt} />
-                <div className="flex items-center gap-1.5">
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                    disabled={isBackfilling || rescanRequested}
-                    onClick={requestRescan}
-                  >
-                    <RefreshCwIcon className="size-3" />
-                    Rescan logs
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                    disabled={!hasAnyActivity}
-                    onClick={() => exportUsageCsv(visibleByDay, todayKey)}
-                  >
-                    <DownloadIcon className="size-3" />
-                    Export CSV
-                  </Button>
-                  {hasAnyActivity ? <ShareProfileButton data={shareData} /> : null}
-                </div>
+              ) : null}
+              <div className="-mx-4 mt-2 border-t border-border/50 bg-muted/[0.08] sm:-mx-5">
+                <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                  <div className="px-4 py-4 sm:px-5">
+                    <CollapsibleTrigger className="group flex w-full items-center justify-between text-left">
+                      <span className="flex flex-col">
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70">
+                          Overall insights
+                        </span>
+                        <span className="mt-0.5 text-xs font-medium text-foreground">
+                          Cost estimate, provider mix, trends, and cross-provider comparisons
+                        </span>
+                      </span>
+                      <ChevronDownIcon
+                        className="size-4 text-muted-foreground transition-transform group-data-panel-open:rotate-180"
+                        aria-hidden
+                      />
+                    </CollapsibleTrigger>
+                    <CollapsiblePanel>
+                      <div className="flex flex-col gap-6 pt-5">
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <div className="flex flex-col gap-2 rounded-xl border border-border/50 bg-background/50 p-4">
+                            <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                              API-equivalent estimate
+                            </span>
+                            <span className="text-2xl font-semibold tracking-[-0.02em] text-foreground">
+                              {apiCostEstimate.hasPricedUsage
+                                ? formatUsd(apiCostEstimate.totalUsd)
+                                : "Not available yet"}
+                            </span>
+                            <span className="text-[10px] leading-relaxed text-muted-foreground/70">
+                              What this recorded usage would cost at standard API list prices, not
+                              an amount Zrode or your subscriptions charged. Covers{" "}
+                              {apiCostEstimate.totalTokens > 0
+                                ? `${Math.round((apiCostEstimate.pricedTokens / apiCostEstimate.totalTokens) * 100)}% of model-attributed tokens`
+                                : apiCostEstimate.hasPricedUsage
+                                  ? "provider-recorded charges without token detail"
+                                  : "model-attributed usage after the next log scan"}
+                              . Pricing reviewed {API_PRICING_AS_OF}; measured 5-minute/1-hour cache
+                              writes, fast/priority turns, and recorded long-context requests are
+                              priced separately. Provider-recorded costs are used when available.
+                            </span>
+                            <ProviderSpendBreakdown estimate={apiCostEstimate} />
+                          </div>
+                          <div className="flex flex-col gap-3 rounded-xl border border-border/50 bg-background/50 p-4">
+                            <div className="flex flex-col">
+                              <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                                Provider mix
+                              </span>
+                              <span className="text-[11px] text-muted-foreground/70">
+                                Share of processed tokens in this range.
+                              </span>
+                            </div>
+                            <ProviderMixChart byDay={visibleByDay} />
+                          </div>
+                        </div>
+
+                        {combinedChartSeries.length > 0 ? (
+                          <div className="flex min-w-0 flex-col gap-3 border-t border-border/40 pt-5">
+                            <div className="flex items-end justify-between gap-3">
+                              <div className="flex flex-col">
+                                <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                                  Token trend
+                                </span>
+                                <span className="text-xl font-semibold tracking-[-0.01em] text-foreground">
+                                  {formatTokens(combinedStats.totalTokens)}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-0.5 rounded-md bg-muted/40 p-0.5">
+                                {(["daily", "cumulative"] as const).map((mode) => (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    aria-pressed={tokenMode === mode}
+                                    className={cn(
+                                      "cursor-pointer rounded-[5px] px-2 py-0.5 text-[10px] capitalize transition-colors",
+                                      tokenMode === mode
+                                        ? "bg-background font-medium text-foreground shadow-xs"
+                                        : "text-muted-foreground/70 hover:text-foreground",
+                                    )}
+                                    onClick={() => setTokenMode(mode)}
+                                  >
+                                    {mode}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                            <UsageAreaChart
+                              dayLabels={dayLabels}
+                              series={combinedChartSeries}
+                              formatValue={formatTokens}
+                              ariaLabel="Tokens processed per day by subscription"
+                            />
+                          </div>
+                        ) : null}
+
+                        {combinedChartSeries.length > 0 ? (
+                          <div className="grid gap-5 border-t border-border/40 pt-5 lg:grid-cols-2">
+                            <div className="flex min-w-0 flex-col gap-3">
+                              <div className="flex flex-col">
+                                <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                                  Activity by weekday
+                                </span>
+                                <span className="text-[11px] text-muted-foreground/70">
+                                  Average tokens across the selected range.
+                                </span>
+                              </div>
+                              <WeekdayBarChart
+                                data={weekdayData}
+                                series={activeChartProviders.map((provider) => ({
+                                  key: provider,
+                                  label: PROVIDER_LABEL[provider],
+                                  colorVar: PROVIDER_HUE[provider],
+                                }))}
+                                formatValue={formatTokens}
+                                ariaLabel="Average tokens by weekday"
+                              />
+                            </div>
+                            <div className="flex min-w-0 flex-col gap-3">
+                              <div className="flex flex-col">
+                                <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                                  Most-used models
+                                </span>
+                                <span className="text-[11px] text-muted-foreground/70">
+                                  Ranked by processed tokens, across providers.
+                                </span>
+                              </div>
+                              <ModelUsageChart rows={visibleModelActivity} />
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {hasAnyActivity ? <RecentActivityTable byDay={visibleByDay} /> : null}
+                      </div>
+                    </CollapsiblePanel>
+                  </div>
+                </Collapsible>
               </div>
+              <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/50">
+                <FlameIcon className="size-3" aria-hidden />
+                Local logs provide token activity; provider APIs provide sampled rate-limit peaks.
+                Data is retained for {historyData.retentionDays} days.
+              </p>
             </>
           )}
         </div>
       </SettingsSection>
 
-      {providerSections.map((section) => {
-        const {
-          provider,
-          stats,
-          providerTokenScale,
-          providerDayLabels,
-          providerTokenChart,
-          pressureDayLabels,
-          pressureSeries,
-          sampledDayCount,
-        } = section;
-        return (
-          <SettingsSection
-            key={provider}
-            title={PROVIDER_LABEL[provider]}
-            icon={<ProviderIcon provider={provider} className="size-3" />}
-          >
-            <div className="flex flex-col gap-4 px-4 py-4 sm:px-5">
-              {historyData === null ? (
-                <Skeleton className="h-24 w-full" />
-              ) : stats.activeDays === 0 ? (
-                <p className="text-xs text-muted-foreground/70">
-                  No recorded usage for {PROVIDER_LABEL[provider]} in this range.
-                </p>
-              ) : (
-                <>
-                  <div className="flex flex-wrap gap-x-6 gap-y-3">
-                    <StatTile label="Total tokens" value={formatTokens(stats.totalTokens)} />
-                    <StatTile label="Active days" value={`${stats.activeDays}`} />
-                    <StatTile
-                      label="Longest streak"
-                      value={`${stats.longestStreak} day${stats.longestStreak === 1 ? "" : "s"}`}
-                    />
-                    <StatTile
-                      label="Peak day"
-                      value={peakDayValue(stats)}
-                      hint={stats.peakDay ? formatDayLabel(stats.peakDay.key) : undefined}
-                    />
-                  </div>
-                  <UsageHeatmap
-                    calendar={calendar}
-                    provider={provider}
-                    tokenScale={providerTokenScale}
-                    label={`${PROVIDER_LABEL[provider]} usage calendar`}
-                  />
-                  <HeatmapLegend provider={provider} />
-                  {providerTokenChart.length > 0 ? (
-                    <div className="flex flex-col gap-2 border-t border-border/40 pt-4">
-                      <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
-                        Tokens {tokenMode === "cumulative" ? "(cumulative)" : "per day"}
-                      </span>
-                      <UsageAreaChart
-                        dayLabels={providerDayLabels}
-                        series={providerTokenChart}
-                        formatValue={formatTokens}
-                        ariaLabel={`${PROVIDER_LABEL[provider]} tokens over time`}
-                      />
-                    </div>
-                  ) : null}
-                  {sampledDayCount >= 2 ? (
-                    <div className="flex flex-col gap-2 border-t border-border/40 pt-4">
-                      <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
-                        Rate-limit pressure
-                      </span>
-                      <span className="text-[11px] text-muted-foreground/70">
-                        Peak allowance utilization sampled while Zrode was running.
-                      </span>
-                      <UsageAreaChart
-                        dayLabels={pressureDayLabels}
-                        series={pressureSeries}
-                        formatValue={formatPercent}
-                        maxValueOverride={100}
-                        ariaLabel={`${PROVIDER_LABEL[provider]} peak allowance utilization over time`}
-                      />
-                    </div>
-                  ) : null}
-                </>
-              )}
+      {historyData !== null ? (
+        <>
+          <section className="flex flex-col gap-3" aria-labelledby="provider-usage-heading">
+            <div className="px-1">
+              <h2
+                id="provider-usage-heading"
+                className="text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground/50"
+              >
+                Provider usage
+              </h2>
+              <p className="mt-1 text-[10px] text-muted-foreground/60">
+                Each provider has its own summary and expandable detailed view.
+              </p>
             </div>
-          </SettingsSection>
-        );
-      })}
 
-      {unmeteredSubs.length > 0 ? (
-        <SettingsSection title="Other subscriptions" icon={<ExternalLinkIcon className="size-3" />}>
-          <div className="flex flex-col gap-3 px-4 py-4 sm:px-5">
-            <p className="text-xs text-muted-foreground/80">
-              These subscriptions don't record token usage locally, so there's no history to chart.
-              Check their usage on the provider's own dashboard.
-            </p>
+            {providerSections.map((section) => (
+              <ProviderUsageCard
+                key={section.provider}
+                section={section}
+                tokenMode={tokenMode}
+                modelRows={modelActivityByProvider.get(section.provider) ?? []}
+                totalTokens={combinedStats.totalTokens}
+              />
+            ))}
+
             {unmeteredSubs.map((sub) => {
               const Icon = UNMETERED_META[sub.kind].icon;
               return (
-                <div
+                <section
                   key={sub.kind}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-border/50 px-3 py-2"
+                  className="flex min-w-0 flex-col justify-between gap-3 rounded-2xl border bg-card px-4 py-4 text-card-foreground shadow-sm/4 sm:px-5 dark:shadow-none"
                 >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Icon className="size-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <div className="text-[13px] font-medium text-foreground">
-                        {sub.displayName}
-                      </div>
-                      {sub.authLabel ? (
-                        <div className="truncate text-[10px] text-muted-foreground/60">
-                          {sub.authLabel}
-                        </div>
-                      ) : null}
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/50 text-muted-foreground">
+                        <Icon className="size-4" />
+                      </span>
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate text-xs font-medium text-foreground">
+                          {sub.displayName}
+                        </span>
+                        <span className="truncate text-[10px] text-muted-foreground/60">
+                          {sub.authLabel ?? "Provider-managed subscription"}
+                        </span>
+                      </span>
                     </div>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="h-6 shrink-0 px-2 text-[11px]"
+                      onClick={() => openDashboard(UNMETERED_META[sub.kind].dashboardUrl)}
+                    >
+                      <ExternalLinkIcon className="size-3" />
+                      Dashboard
+                    </Button>
                   </div>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    className="h-6 shrink-0 px-2 text-[11px]"
-                    onClick={() => openDashboard(UNMETERED_META[sub.kind].dashboardUrl)}
-                  >
-                    <ExternalLinkIcon className="size-3" />
-                    Dashboard
-                  </Button>
-                </div>
+                  <p className="text-[10px] leading-relaxed text-muted-foreground/60">
+                    This provider does not expose a usable local token ledger. Its dashboard is the
+                    authoritative detailed usage view.
+                  </p>
+                </section>
               );
             })}
-          </div>
-        </SettingsSection>
-      ) : null}
-
-      {historyData !== null ? (
-        <p className="flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground/50">
-          <FlameIcon className="size-3" aria-hidden />
-          Token activity comes from each provider's local session logs on this machine; rate-limit
-          peaks are sampled from the subscriptions' own APIs while Zrode runs. Data is kept for{" "}
-          {historyData.retentionDays} days.
-        </p>
+          </section>
+        </>
       ) : null}
     </SettingsPageContainer>
   );

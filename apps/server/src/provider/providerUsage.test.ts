@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -28,15 +29,20 @@ import {
   fetchGrokUsage,
   fetchKiloUsage,
   getProviderUsage,
+  githubCredentialFingerprint,
   invalidateProviderUsageCache,
   mapCodexExtraLimits,
   normalizeResetsAt,
+  orderGitHubBillingTokens,
   parseClaudeLimits,
   parseClaudeOAuthCredentials,
   parseCodexBackendAuth,
   parseCodexResetCredits,
   parseGrokAuthCredentials,
   parseGrokBilling,
+  parseGitHubCopilotBillingModels,
+  parseGitHubCopilotBillingDays,
+  parseGitHubCopilotUsage,
   parseKiloAuthCredentials,
   parseKiloBalance,
   parseKiloPassWindow,
@@ -49,10 +55,309 @@ import {
   WEEKLY_WINDOW_MINUTES,
 } from "./providerUsage.ts";
 
+describe("parseGitHubCopilotUsage", () => {
+  it("maps premium requests and suppresses unlimited buckets", () => {
+    const reset = "2026-08-01T00:00:00Z";
+    const parsed = parseGitHubCopilotUsage(
+      {
+        copilot_plan: "individual_pro",
+        quota_reset_date: reset,
+        quota_snapshots: {
+          premium_interactions: { entitlement: 300, remaining: 90, percent_remaining: 30 },
+          chat: { entitlement: -1, remaining: -1, unlimited: true },
+          completions: { entitlement: 0, remaining: 0 },
+        },
+      },
+      123,
+    );
+    expect(parsed?.weekly).toMatchObject({
+      label: "Premium requests",
+      usedPercent: 70,
+      resetsAt: Date.parse(reset),
+    });
+    expect(parsed?.extraLimits).toEqual([]);
+    expect(parsed?.planLabel).toBe("Individual Pro");
+  });
+});
+
+describe("GitHub Copilot billing history", () => {
+  it("prefers gh billing auth, dedupes candidates, and hashes cache identities", () => {
+    expect(
+      orderGitHubBillingTokens({
+        ghToken: " gh-token ",
+        ghEnvToken: "gh-token",
+        githubEnvToken: "api-token",
+        copilotToken: "copilot-token",
+      }),
+    ).toEqual(["gh-token", "api-token", "copilot-token"]);
+    expect(githubCredentialFingerprint("secret-token")).toHaveLength(64);
+    expect(githubCredentialFingerprint("secret-token")).not.toContain("secret-token");
+    expect(githubCredentialFingerprint("other-token")).not.toBe(
+      githubCredentialFingerprint("secret-token"),
+    );
+  });
+
+  it("retains periods that a partial refresh could not reload", () => {
+    const previous = {
+      status: "ok" as const,
+      message: null,
+      days: [
+        {
+          day: "2025-08-01",
+          unit: "requests" as const,
+          quantity: 10,
+          grossAmountUsd: 1,
+          discountAmountUsd: 1,
+          netAmountUsd: 0,
+          sku: "request",
+        },
+        {
+          day: "2025-09-01",
+          unit: "requests" as const,
+          quantity: 20,
+          grossAmountUsd: 2,
+          discountAmountUsd: 2,
+          netAmountUsd: 0,
+          sku: "request",
+        },
+      ],
+      models: [
+        {
+          year: 2025,
+          unit: "requests" as const,
+          model: "old-model",
+          quantity: 30,
+          grossAmountUsd: 3,
+          discountAmountUsd: 3,
+          netAmountUsd: 0,
+        },
+      ],
+      updatedAt: 1,
+    };
+    const merged = __testing.mergeGitHubBillingRefresh(previous, {
+      credentialKey: "account-a",
+      loadedDayPeriods: new Set(["2025-09"]),
+      loadedModelPeriods: new Set<string>(),
+      history: {
+        status: "error",
+        message: "partial",
+        days: [{ ...previous.days[1]!, quantity: 25 }],
+        models: [],
+        updatedAt: 2,
+      },
+    });
+    expect(merged.days.map(({ day, quantity }) => [day, quantity])).toEqual([
+      ["2025-08-01", 10],
+      ["2025-09-01", 25],
+    ]);
+    expect(merged.models).toEqual(previous.models);
+    expect(merged.status).toBe("error");
+  });
+
+  it("keeps dated requests and AI credits separate from tokens", () => {
+    expect(
+      parseGitHubCopilotBillingDays({
+        usageItems: [
+          {
+            date: "2025-08-01T00:00:00Z",
+            product: "copilot",
+            sku: "Copilot Premium Request",
+            unitType: "Requests",
+            quantity: 299.58,
+            grossAmount: 11.9832,
+            discountAmount: 11.9832,
+            netAmount: 0,
+          },
+          {
+            date: "2026-06-01T00:00:00Z",
+            product: "copilot",
+            sku: "Copilot AI Credits",
+            unitType: "AICredits",
+            quantity: 155.02431,
+            grossAmount: 1.5502431,
+            discountAmount: 1.5502431,
+            netAmount: 0,
+          },
+          { date: "2026-06-01T00:00:00Z", product: "actions", quantity: 999 },
+        ],
+      }),
+    ).toEqual([
+      expect.objectContaining({ day: "2025-08-01", unit: "requests", quantity: 299.58 }),
+      expect.objectContaining({ day: "2026-06-01", unit: "aiCredits", quantity: 155.02431 }),
+    ]);
+  });
+
+  it("parses annual model quantities from GitHub's billing report", () => {
+    expect(
+      parseGitHubCopilotBillingModels(
+        {
+          usageItems: [
+            {
+              model: "Claude Sonnet 4",
+              sku: "Copilot Premium Request",
+              unitType: "requests",
+              grossQuantity: 373,
+              grossAmount: 14.92,
+              discountAmount: 14.92,
+              netAmount: 0,
+            },
+          ],
+        },
+        2025,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        year: 2025,
+        unit: "requests",
+        model: "Claude Sonnet 4",
+        quantity: 373,
+      }),
+    ]);
+  });
+});
+
 const TestLayer = Layer.mergeAll(ProcessRunner.layer, FetchHttpClient.layer).pipe(
   Layer.provideMerge(NodeServicesLayer),
 );
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
+describe("GitHub Copilot billing refresh concurrency", () => {
+  effectIt.live("coalesces concurrent cold-cache ledger sweeps", () => {
+    let identityRequests = 0;
+    const httpLayer = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        const response = request.url.endsWith("/user")
+          ? (() => {
+              identityRequests += 1;
+              return Response.json({ login: "octocat" });
+            })()
+          : Response.json({ usageItems: [] });
+        return Effect.sleep("20 millis").pipe(
+          Effect.as(HttpClientResponse.fromWeb(request, response)),
+        );
+      }),
+    );
+    const processRunnerLayer = Layer.succeed(
+      ProcessRunner.ProcessRunner,
+      ProcessRunner.ProcessRunner.of({
+        run: () =>
+          Effect.succeed({
+            stdout: "",
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }),
+      }),
+    );
+    const settings: ServerSettings = {
+      ...DISABLED_SETTINGS,
+      providers: {
+        ...DISABLED_SETTINGS.providers,
+        githubCopilot: { ...DISABLED_SETTINGS.providers.githubCopilot, enabled: true },
+      },
+    };
+    const previousToken = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = "billing-token";
+
+    return Effect.all(
+      [
+        __testing.getGitHubCopilotBillingHistory(settings),
+        __testing.getGitHubCopilotBillingHistory(settings),
+      ],
+      { concurrency: "unbounded" },
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousToken === undefined) delete process.env.GH_TOKEN;
+          else process.env.GH_TOKEN = previousToken;
+        }),
+      ),
+      Effect.map(([left, right]) => {
+        expect(identityRequests).toBe(1);
+        expect(left?.status).toBe("ok");
+        expect(right).toEqual(left);
+      }),
+      Effect.provide(Layer.mergeAll(NodeServicesLayer, processRunnerLayer, httpLayer)),
+    );
+  });
+
+  effectIt.live("does not let an invalidated refresh overwrite the replacement", () =>
+    Effect.gen(function* () {
+      const firstIdentityStarted = yield* Deferred.make<void>();
+      const releaseFirstIdentity = yield* Deferred.make<void>();
+      let identityRequests = 0;
+      const httpLayer = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          if (!request.url.endsWith("/user")) {
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(request, Response.json({ usageItems: [] })),
+            );
+          }
+          identityRequests += 1;
+          const response = HttpClientResponse.fromWeb(
+            request,
+            Response.json({ login: identityRequests === 1 ? "old-account" : "new-account" }),
+          );
+          return identityRequests === 1
+            ? Deferred.succeed(firstIdentityStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseFirstIdentity)),
+                Effect.as(response),
+              )
+            : Effect.succeed(response);
+        }),
+      );
+      const processRunnerLayer = Layer.succeed(
+        ProcessRunner.ProcessRunner,
+        ProcessRunner.ProcessRunner.of({
+          run: () =>
+            Effect.succeed({
+              stdout: "",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(1),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            }),
+        }),
+      );
+      const settings: ServerSettings = {
+        ...DISABLED_SETTINGS,
+        providers: {
+          ...DISABLED_SETTINGS.providers,
+          githubCopilot: { ...DISABLED_SETTINGS.providers.githubCopilot, enabled: true },
+        },
+      };
+      const result = yield* Effect.gen(function* () {
+        const staleDeferred = yield* __testing.startGitHubCopilotBillingRefresh(
+          settings,
+          "same-account",
+          ["billing-token"],
+          null,
+        );
+        yield* Deferred.await(firstIdentityStarted);
+        invalidateProviderUsageCache("githubCopilot");
+        const replacementDeferred = yield* __testing.startGitHubCopilotBillingRefresh(
+          settings,
+          "same-account",
+          ["billing-token"],
+          null,
+        );
+        const replacement = yield* Deferred.await(replacementDeferred);
+        yield* Deferred.succeed(releaseFirstIdentity, undefined);
+        const stale = yield* Deferred.await(staleDeferred);
+        return { stale, replacement };
+      }).pipe(Effect.provide(Layer.mergeAll(NodeServicesLayer, processRunnerLayer, httpLayer)));
+
+      expect(identityRequests).toBe(2);
+      expect(result.stale).toBeNull();
+      expect(result.replacement?.status).toBe("ok");
+    }),
+  );
+});
 
 /** Both providers disabled: usage resolves instantly with no external calls. */
 const DISABLED_SETTINGS: ServerSettings = {
@@ -63,6 +368,7 @@ const DISABLED_SETTINGS: ServerSettings = {
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
     grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
     kilocode: { ...DEFAULT_SERVER_SETTINGS.providers.kilocode, enabled: false },
+    githubCopilot: { ...DEFAULT_SERVER_SETTINGS.providers.githubCopilot, enabled: false },
   },
 };
 
@@ -952,6 +1258,7 @@ describe("getProviderUsage caching", () => {
     Effect.gen(function* () {
       const result = yield* getProviderUsage(DISABLED_SETTINGS);
       expect(result.usage.map((snapshot) => snapshot.status)).toEqual([
+        "unavailable",
         "unavailable",
         "unavailable",
         "unavailable",

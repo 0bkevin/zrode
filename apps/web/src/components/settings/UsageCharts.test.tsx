@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildAreaBands,
   buildTokenSeries,
   toCumulativeSeries,
   UsageAreaChart,
@@ -32,7 +33,14 @@ describe("buildTokenSeries", () => {
     ]);
     expect(series[0]).toEqual({
       day: "2026-06-01",
-      values: { claude: 100, codex: 40, grok: 0, kilocode: 0, opencode: 0 },
+      values: {
+        claude: 100,
+        codex: 40,
+        grok: 0,
+        kilocode: 0,
+        opencode: 0,
+        githubCopilot: 0,
+      },
       total: 140,
     });
     expect(series[1]!.total).toBe(0); // gap day filled
@@ -48,6 +56,16 @@ describe("buildTokenSeries", () => {
       "2026-02-02",
     ]);
     expect(buildTokenSeries(new Map(), "2026-02-02", "2026-01-30")).toEqual([]);
+  });
+
+  it("includes GitHub Copilot in combined daily totals", () => {
+    const [point] = buildTokenSeries(
+      new Map([["2026-04-06", day(["githubCopilot", 83_420_000])]]),
+      "2026-04-06",
+      "2026-04-06",
+    );
+    expect(point?.values.githubCopilot).toBe(83_420_000);
+    expect(point?.total).toBe(83_420_000);
   });
 });
 
@@ -100,6 +118,19 @@ describe("chart rendering", () => {
       values: [10, 5, 0],
     },
   ];
+
+  it("plots every provider from zero instead of stacking providers together", () => {
+    const bands = buildAreaBands(series);
+
+    expect(bands.find((entry) => entry.layer.key === "claude")!.band[0]).toEqual({
+      base: 0,
+      top: 100,
+    });
+    expect(bands.find((entry) => entry.layer.key === "opencode")!.band[0]).toEqual({
+      base: 0,
+      top: 10,
+    });
+  });
 
   it("renders an accessible area chart with all series hues", () => {
     const markup = renderToStaticMarkup(

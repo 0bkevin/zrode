@@ -49,6 +49,12 @@ import Migration0033 from "./Migrations/033_ProjectionThreadsHandoffSource.ts";
 import Migration0034 from "./Migrations/034_ProviderUsageHistory.ts";
 import Migration0035 from "./Migrations/035_ProviderTokenActivity.ts";
 import Migration0037 from "./Migrations/037_ProjectionThreadTurnQueue.ts";
+import Migration0038 from "./Migrations/038_ProviderTokenModelActivity.ts";
+import Migration0039 from "./Migrations/039_ProviderTokenAccounting.ts";
+import Migration0040 from "./Migrations/040_ProviderTokenAccountingCorrections.ts";
+import Migration0041 from "./Migrations/041_ProviderGrokTokenIdentity.ts";
+import Migration0042 from "./Migrations/042_OpenCodeRecordedCloudCosts.ts";
+import Migration0043 from "./Migrations/043_GitHubCopilotTokenHistory.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -97,6 +103,12 @@ export const migrationEntries = [
   [34, "ProviderUsageHistory", Migration0034],
   [35, "ProviderTokenActivity", Migration0035],
   [37, "ProjectionThreadTurnQueue", Migration0037],
+  [38, "ProviderTokenModelActivity", Migration0038],
+  [39, "ProviderTokenAccounting", Migration0039],
+  [40, "ProviderTokenAccountingCorrections", Migration0040],
+  [41, "ProviderGrokTokenIdentity", Migration0041],
+  [42, "OpenCodeRecordedCloudCosts", Migration0042],
+  [43, "GitHubCopilotTokenHistory", Migration0043],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

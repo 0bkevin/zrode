@@ -625,6 +625,8 @@ const buildAppUnderTest = (options?: {
               Effect.succeed({
                 days: [],
                 tokenActivity: [],
+                modelActivity: [],
+                githubCopilotBilling: null,
                 isBackfilling: false,
                 today: "2026-01-01",
                 lastScanAt: null,

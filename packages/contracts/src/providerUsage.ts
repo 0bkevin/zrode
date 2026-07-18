@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
 
 // ── Provider subscription usage (rate-limit windows) ────────────────
 //
@@ -8,7 +9,13 @@ import * as Schema from "effect/Schema";
 // surfaced in the client status UI as "session" (~5h) and "weekly" (~7d)
 // meters.
 
-export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex", "grok", "kilocode"]);
+export const ProviderUsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "grok",
+  "kilocode",
+  "githubCopilot",
+]);
 export type ProviderUsageProviderKind = typeof ProviderUsageProviderKind.Type;
 
 export const ProviderUsageStatus = Schema.Literals([
@@ -94,8 +101,41 @@ export const ProviderUsageSnapshot = Schema.Struct({
 });
 export type ProviderUsageSnapshot = typeof ProviderUsageSnapshot.Type;
 
+export const GitHubCopilotBillingHistory = Schema.Struct({
+  status: ProviderUsageStatus,
+  message: Schema.NullOr(Schema.String),
+  days: Schema.Array(
+    Schema.Struct({
+      /** Calendar day reported by GitHub's detailed billing ledger, formatted YYYY-MM-DD. */
+      day: Schema.String,
+      unit: Schema.Literals(["requests", "aiCredits"]),
+      quantity: Schema.Number,
+      grossAmountUsd: Schema.Number,
+      discountAmountUsd: Schema.Number,
+      netAmountUsd: Schema.Number,
+      sku: Schema.String,
+    }),
+  ),
+  models: Schema.Array(
+    Schema.Struct({
+      year: Schema.Number,
+      unit: Schema.Literals(["requests", "aiCredits"]),
+      model: Schema.String,
+      quantity: Schema.Number,
+      grossAmountUsd: Schema.Number,
+      discountAmountUsd: Schema.Number,
+      netAmountUsd: Schema.Number,
+    }),
+  ),
+  updatedAt: Schema.Number,
+});
+export type GitHubCopilotBillingHistory = typeof GitHubCopilotBillingHistory.Type;
+
 export const ServerProviderUsageResult = Schema.Struct({
   usage: Schema.Array(ProviderUsageSnapshot),
+  githubCopilotBilling: Schema.NullOr(GitHubCopilotBillingHistory).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type ServerProviderUsageResult = typeof ServerProviderUsageResult.Type;
 
@@ -127,9 +167,9 @@ export type ProviderUsageHistoryDay = typeof ProviderUsageHistoryDay.Type;
 
 /**
  * Providers that can appear in the usage-history UI. Claude Code, Codex, and
- * OpenCode have backfillable token activity; Grok and Kilo contribute live
- * allowance samples because their local sessions do not provide a backfillable
- * per-message token source here.
+ * OpenCode and Grok have backfillable token activity. Kilo contributes live
+ * allowance samples because its current local integration does not provide a
+ * reliable per-message token source.
  */
 export const ProviderTokenActivityKind = Schema.Literals([
   "claude",
@@ -137,6 +177,7 @@ export const ProviderTokenActivityKind = Schema.Literals([
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ]);
 export type ProviderTokenActivityKind = typeof ProviderTokenActivityKind.Type;
 
@@ -154,6 +195,39 @@ export const ProviderTokenActivityDay = Schema.Struct({
 });
 export type ProviderTokenActivityDay = typeof ProviderTokenActivityDay.Type;
 
+/**
+ * Model-scoped token activity read from provider logs. The token categories
+ * intentionally mirror API billing meters so clients can calculate a
+ * transparent API-equivalent estimate without pretending subscription usage
+ * was actually invoiced at API rates.
+ */
+export const ProviderModelTokenActivityDay = Schema.Struct({
+  /** Local calendar day, formatted YYYY-MM-DD. */
+  day: Schema.String,
+  provider: ProviderTokenActivityKind,
+  /** Provider-qualified when the log exposes both values (for example OpenCode). */
+  model: Schema.String,
+  /** Non-cached input tokens billed at the model's base input rate. */
+  inputTokens: Schema.Number,
+  /** Input tokens served from a prompt cache. */
+  cachedInputTokens: Schema.Number,
+  /** Input tokens written to a prompt cache. */
+  cacheWriteTokens: Schema.Number,
+  /** Input tokens written to a one-hour prompt cache, priced separately by Anthropic. */
+  cacheWrite1hTokens: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  /** Generated output, including reasoning tokens when the provider reports them separately. */
+  outputTokens: Schema.Number,
+  /** All processed tokens, used for model ranking. */
+  totalTokens: Schema.Number,
+  /** Provider-recorded request cost when available (Claude, xAI, and hosted OpenCode requests). */
+  recordedCostUsd: Schema.NullOr(Schema.Number),
+  /** The provider log says these requests used a fast/priority service tier. */
+  isFast: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** At least one request in this row crossed the provider's long-context pricing threshold. */
+  usesLongContext: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type ProviderModelTokenActivityDay = typeof ProviderModelTokenActivityDay.Type;
+
 export const ServerProviderUsageHistoryInput = Schema.Struct({
   /** How many days back from today to include (1–400, clamped server-side). */
   days: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 400 })),
@@ -166,6 +240,14 @@ export const ServerProviderUsageHistoryResult = Schema.Struct({
   days: Schema.Array(ProviderUsageHistoryDay),
   /** Daily token totals derived from local provider session logs. */
   tokenActivity: Schema.Array(ProviderTokenActivityDay),
+  /** Daily model/category totals used for model rankings and API-equivalent cost estimates. */
+  modelActivity: Schema.Array(ProviderModelTokenActivityDay).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** GitHub's account-level monthly request/AI-credit ledger (not token activity). */
+  githubCopilotBilling: Schema.NullOr(GitHubCopilotBillingHistory).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** True while a background scan of the local session logs is running. */
   isBackfilling: Schema.Boolean,
   /**

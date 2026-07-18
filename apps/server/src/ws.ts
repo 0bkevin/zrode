@@ -86,7 +86,9 @@ import { listProviderProcesses } from "./provider/ProviderProcessRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import {
   consumeCodexResetCredit,
+  getGitHubCopilotBillingHistoryNonBlocking,
   getProviderUsage,
+  getProviderUsageSnapshots,
   providerUsageUnavailable,
 } from "./provider/providerUsage.ts";
 import * as ProviderUsageHistory from "./provider/ProviderUsageHistory.ts";
@@ -1308,7 +1310,31 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverGetProviderUsageHistory,
             serverSettings.getSettings.pipe(
-              Effect.flatMap((settings) => providerUsageHistory.readHistory(input, settings)),
+              Effect.flatMap((settings) =>
+                Effect.all(
+                  [
+                    providerUsageHistory.readHistory(input, settings),
+                    getGitHubCopilotBillingHistoryNonBlocking(settings),
+                  ],
+                  { concurrency: "unbounded" },
+                ).pipe(
+                  Effect.map(([history, githubCopilotBilling]) => ({
+                    ...history,
+                    githubCopilotBilling,
+                  })),
+                  Effect.tap(() =>
+                    getProviderUsageSnapshots(settings).pipe(
+                      Effect.tap((usage) =>
+                        providerUsageHistory.record({ usage, githubCopilotBilling: null }),
+                      ),
+                      Effect.catchCause((cause) =>
+                        Effect.logWarning("Background provider usage refresh failed", { cause }),
+                      ),
+                      Effect.forkDetach({ startImmediately: true }),
+                    ),
+                  ),
+                ),
+              ),
               Effect.catch((error) =>
                 Effect.gen(function* () {
                   yield* Effect.logWarning("Failed to read settings for provider usage history", {
@@ -1318,6 +1344,8 @@ const makeWsRpcLayer = (
                   return {
                     days: [],
                     tokenActivity: [],
+                    modelActivity: [],
+                    githubCopilotBilling: null,
                     isBackfilling: false,
                     today: ProviderUsageHistory.localDayKey(nowMs),
                     lastScanAt: null,

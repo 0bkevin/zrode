@@ -1,5 +1,5 @@
 import { useColorScheme } from "react-native";
-import { Path, Svg } from "react-native-svg";
+import { Path, Polygon, Rect, Svg } from "react-native-svg";
 
 type ProviderIconProps = {
   readonly provider: string | null | undefined;
@@ -24,14 +24,14 @@ export function ProviderIcon(props: ProviderIconProps) {
   if (props.provider === "kilocode") {
     const color = isDarkMode ? "#e5e5e5" : "#171717";
     return (
-      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-        <Path
-          d="M5 3.5v17M18.5 4 9 12l9.5 8"
-          stroke={color}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={3}
-        />
+      <Svg width={size} height={size} viewBox="0 0 32 32" fill={color}>
+        <Path d="M23,26v-2h3v-5l-2-2h-4v2h-3v5l2,2h4ZM20,20h3v3h-3v-3Z" />
+        <Rect x={12} y={17} width={3} height={3} />
+        <Polygon points="26 12 23 12 23 9 20 6 17 6 17 9 20 9 20 12 17 12 17 15 26 15 26 12" />
+        <Path d="M0,0v32h32V0H0ZM29,29H3V3h26v26Z" />
+        <Polygon points="15 26 15 23 9 23 9 17 6 17 6 23.1875 8.8125 26 15 26" />
+        <Rect x={12} y={6} width={3} height={3} />
+        <Polygon points="9 12 12 12 12 15 15 15 15 12 12 9 9 9 9 6 6 6 6 15 9 15 9 12" />
       </Svg>
     );
   }

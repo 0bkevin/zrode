@@ -19,7 +19,7 @@ layer("037_ProjectionThreadTurnQueue", (it) => {
         VALUES (36, 'QuickChat')
       `;
 
-      const executed = yield* runMigrations();
+      const executed = yield* runMigrations({ toMigrationInclusive: 37 });
       assert.deepStrictEqual(executed, [[37, "ProjectionThreadTurnQueue"]]);
 
       const migrationRows = yield* sql<{

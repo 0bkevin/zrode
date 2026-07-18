@@ -9,9 +9,17 @@ import { GitHubCopilotSettings } from "@t3tools/contracts";
 import {
   buildInitialGitHubCopilotProviderSnapshot,
   checkGitHubCopilotProviderStatus,
+  isAwsCopilotCliVersionOutput,
 } from "./GitHubCopilotProvider.ts";
 
 const decodeGitHubCopilotSettings = Schema.decodeSync(GitHubCopilotSettings);
+
+describe("isAwsCopilotCliVersionOutput", () => {
+  it("distinguishes the conflicting AWS executable", () => {
+    expect(isAwsCopilotCliVersionOutput("copilot version: v1.34.1")).toBe(true);
+    expect(isAwsCopilotCliVersionOutput("GitHub Copilot CLI 0.0.369")).toBe(false);
+  });
+});
 
 describe("buildInitialGitHubCopilotProviderSnapshot", () => {
   it.effect("returns a disabled snapshot by default", () =>

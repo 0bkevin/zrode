@@ -25,12 +25,13 @@ export const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ];
 
 type TokenValues = Record<ProviderTokenActivityKind, number>;
 
 function emptyTokenValues(): TokenValues {
-  return { claude: 0, codex: 0, grok: 0, kilocode: 0, opencode: 0 };
+  return { claude: 0, codex: 0, grok: 0, kilocode: 0, opencode: 0, githubCopilot: 0 };
 }
 
 function sumValues(values: TokenValues): number {
@@ -184,10 +185,18 @@ interface AreaTooltipState {
 const AREA_HEIGHT = 168;
 const AREA_PAD = { top: 10, right: 6, bottom: 2, left: 6 } as const;
 
+export function buildAreaBands(series: ReadonlyArray<ChartSeries>) {
+  return series.map((layer) => ({
+    layer,
+    band: layer.values.map((value) => ({ base: 0, top: value ?? 0 })),
+  }));
+}
+
 /**
- * Stacked area+line chart over an evenly-spaced day axis. One series renders
- * as a single filled area; two stack (Claude under Codex). Hovering shows a
- * crosshair and one tooltip listing every series plus the total.
+ * Area+line chart over an evenly-spaced day axis. Every provider is plotted
+ * from the same zero baseline so a provider's line always represents its own
+ * usage. Hovering shows a crosshair and one tooltip listing every series plus
+ * the combined total.
  */
 export function UsageAreaChart({
   dayLabels,
@@ -217,9 +226,9 @@ export function UsageAreaChart({
     if (maxValueOverride !== undefined) return maxValueOverride;
     let max = 0;
     for (let i = 0; i < pointCount; i += 1) {
-      let stacked = 0;
-      for (const layer of series) stacked += layer.values[i] ?? 0;
-      max = Math.max(max, stacked);
+      for (const layer of series) {
+        max = Math.max(max, layer.values[i] ?? 0);
+      }
     }
     return niceCeil(max);
   }, [series, pointCount, maxValueOverride]);
@@ -230,19 +239,9 @@ export function UsageAreaChart({
       : AREA_PAD.left + (index / (pointCount - 1)) * innerW;
   const yAt = (value: number) => AREA_PAD.top + innerH - (value / maxValue) * innerH;
 
-  // Precompute stacked bands: layer s spans [lower, lower + value] per point.
-  const bands = useMemo(() => {
-    const lower = Array.from({ length: pointCount }, () => 0);
-    return series.map((layer) => {
-      const band = layer.values.map((value, index) => {
-        const base = lower[index]!;
-        const top = base + (value ?? 0);
-        lower[index] = top;
-        return { base, top };
-      });
-      return { layer, band };
-    });
-  }, [series, pointCount]);
+  // Every band starts at zero. Stacking made the top provider's line look
+  // like its own usage included every provider rendered below it.
+  const bands = useMemo(() => buildAreaBands(series), [series]);
 
   // Path strings are memoized so hover re-renders (tooltip/crosshair state)
   // don't rebuild ~371-point strings per series at pointer-move rate.
@@ -269,7 +268,7 @@ export function UsageAreaChart({
     setTooltip((previous) => (previous?.index === index ? previous : { index, left: xAt(index) }));
   };
 
-  const stackedTotalAt = (index: number) =>
+  const totalAt = (index: number) =>
     series.reduce((sum, layer) => sum + (layer.values[index] ?? 0), 0);
 
   const gridValues = [0.25, 0.5, 0.75, 1].map((fraction) => fraction * maxValue);
@@ -299,7 +298,12 @@ export function UsageAreaChart({
               />
             ))}
             {paths.map(({ layer, area }) => (
-              <path key={`area-${layer.key}`} d={area} fill={layer.colorVar} opacity={0.14} />
+              <path
+                key={`area-${layer.key}`}
+                d={area}
+                fill={layer.colorVar}
+                opacity={series.length > 1 ? 0.08 : 0.14}
+              />
             ))}
             {paths.map(({ layer, line }) => (
               <path
@@ -366,7 +370,7 @@ export function UsageAreaChart({
             {series.length > 1 ? (
               <div className="mt-0.5 border-t border-border/50 pt-0.5 text-muted-foreground">
                 <span className="tabular-nums text-foreground">
-                  {formatValue(stackedTotalAt(tooltip.index))}
+                  {formatValue(totalAt(tooltip.index))}
                 </span>{" "}
                 total
               </div>
