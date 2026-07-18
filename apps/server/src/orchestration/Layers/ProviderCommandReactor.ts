@@ -273,6 +273,44 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
   const threadInteractionModes = new Map<string, "default" | "plan">();
+  // Turn starts run in scoped background fibers so the intent worker remains
+  // responsive. Track a per-thread cancellation generation to fence the race
+  // where Stop arrives while startSession/sendTurn is still awaiting the
+  // provider and therefore has no active turn id to interrupt yet.
+  const turnCancellationGenerations = new Map<string, number>();
+  const currentTurnCancellationGeneration = (threadId: ThreadId) =>
+    turnCancellationGenerations.get(threadId) ?? 0;
+  const advanceTurnCancellationGeneration = (threadId: ThreadId) => {
+    const next = currentTurnCancellationGeneration(threadId) + 1;
+    turnCancellationGenerations.set(threadId, next);
+    return next;
+  };
+
+  const interruptTurnStartedAfterCancellation = Effect.fn("interruptTurnStartedAfterCancellation")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly startGeneration: number;
+    }) {
+      if (currentTurnCancellationGeneration(input.threadId) === input.startGeneration) {
+        return;
+      }
+      yield* providerService
+        .interruptTurn({
+          threadId: input.threadId,
+          turnId: input.turnId,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to interrupt turn that started after cancellation", {
+              threadId: input.threadId,
+              turnId: input.turnId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+    },
+  );
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -961,9 +999,18 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    const startGeneration = currentTurnCancellationGeneration(event.payload.threadId);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((turn) =>
+        interruptTurnStartedAfterCancellation({
+          threadId: event.payload.threadId,
+          turnId: turn.turnId,
+          startGeneration,
+        }),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
@@ -1019,7 +1066,15 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const startGeneration = currentTurnCancellationGeneration(event.payload.threadId);
     yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((turn) =>
+        interruptTurnStartedAfterCancellation({
+          threadId: event.payload.threadId,
+          turnId: turn.turnId,
+          startGeneration,
+        }),
+      ),
       Effect.catchCause((cause) => appendSteerFailure(formatFailureDetail(cause))),
       Effect.forkScoped,
     );
@@ -1032,6 +1087,22 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+
+    // An interrupt can wait behind provider/session events. If its target turn
+    // has already quiesced and queued work has started, treating it as a
+    // session-wide interrupt would stop the newer turn instead.
+    if (
+      event.payload.turnId !== undefined &&
+      (thread.session?.status !== "running" || thread.session.activeTurnId !== event.payload.turnId)
+    ) {
+      return;
+    }
+
+    // Advance the fence even when session startup has not projected yet. Any
+    // sendTurn already in flight will observe this after it obtains its turn
+    // id and immediately interrupt that late-started run.
+    advanceTurnCancellationGeneration(event.payload.threadId);
+
     const hasSession = thread.session && thread.session.status !== "stopped";
     if (!hasSession) {
       return yield* appendProviderFailureActivity({
@@ -1042,16 +1113,6 @@ const make = Effect.gen(function* () {
         turnId: event.payload.turnId ?? null,
         createdAt: event.payload.createdAt,
       });
-    }
-
-    // An interrupt can wait behind provider/session events. If its target turn
-    // has already quiesced and queued work has started, treating it as a
-    // session-wide interrupt would stop the newer turn instead.
-    if (
-      event.payload.turnId !== undefined &&
-      (thread.session?.status !== "running" || thread.session.activeTurnId !== event.payload.turnId)
-    ) {
-      return;
     }
 
     yield* providerService.interruptTurn({
@@ -1155,6 +1216,11 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+
+    // Session shutdown is also a cancellation boundary. Without advancing the
+    // same fence used by turn Stop, a sendTurn already awaiting its provider
+    // could return after teardown and continue as an untracked late turn.
+    advanceTurnCancellationGeneration(event.payload.threadId);
 
     const now = event.payload.createdAt;
     if (thread.session && thread.session.status !== "stopped") {

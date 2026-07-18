@@ -25,12 +25,14 @@ import {
   TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -70,6 +72,7 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+const CODEX_INTERRUPT_HANDSHAKE_TIMEOUT = "2 seconds";
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -782,9 +785,10 @@ function mapToRuntimeEvents(
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
-        type: "turn.aborted",
+        type: "turn.completed",
         payload: {
-          reason: event.message ?? "Turn aborted",
+          state: "interrupted",
+          stopReason: event.message ?? "Turn aborted",
         },
       },
     ];
@@ -1576,15 +1580,57 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
-  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
-      Effect.mapError((cause) =>
-        cause._tag === "ProviderAdapterSessionNotFoundError"
-          ? cause
-          : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
-      ),
+  const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
+    session: CodexAdapterSessionContext,
+  ) {
+    if (session.stopped) {
+      return;
+    }
+    session.stopped = true;
+    sessions.delete(session.threadId);
+    yield* session.runtime.close.pipe(Effect.ignore);
+    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
+    // close() shuts down the runtime event queue after publishing terminal
+    // turn/session events. Let the adapter pump drain those queued events
+    // before interrupting it, otherwise a hard cancellation fallback can lose
+    // the very completion event that makes the UI leave the running state.
+    yield* Effect.exit(Fiber.join(session.eventFiber)).pipe(
+      Effect.timeoutOption("500 millis"),
+      Effect.ignore,
     );
+    yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
+  });
+
+  const interruptTurn: CodexAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
+    function* (threadId, turnId) {
+      const session = yield* requireSession(threadId);
+      const runtimeSession = yield* session.runtime.getSession;
+      const activeTurnId = runtimeSession.activeTurnId;
+      if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+        return;
+      }
+      const effectiveTurnId = turnId ?? activeTurnId;
+      if (effectiveTurnId === undefined) {
+        return;
+      }
+
+      const interruptOutcome = yield* session.runtime
+        .interruptTurn(effectiveTurnId)
+        .pipe(Effect.exit, Effect.timeoutOption(CODEX_INTERRUPT_HANDSHAKE_TIMEOUT));
+      if (Option.isSome(interruptOutcome) && Exit.isSuccess(interruptOutcome.value)) {
+        return;
+      }
+
+      yield* Effect.logWarning("Codex interrupt handshake failed; closing the session", {
+        threadId,
+        turnId: effectiveTurnId,
+        ...(Option.isSome(interruptOutcome) && Exit.isFailure(interruptOutcome.value)
+          ? { cause: Cause.pretty(interruptOutcome.value.cause) }
+          : { reason: "timeout" }),
+      });
+      yield* stopSessionInternal(session);
+    },
+  );
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
@@ -1654,19 +1700,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     yield* nativeEventLogger.write(event, event.threadId);
-  });
-
-  const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
-    session: CodexAdapterSessionContext,
-  ) {
-    if (session.stopped) {
-      return;
-    }
-    session.stopped = true;
-    sessions.delete(session.threadId);
-    yield* session.runtime.close.pipe(Effect.ignore);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
-    yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>

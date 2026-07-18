@@ -2135,8 +2135,13 @@ function ChatViewContent(props: ChatViewProps) {
     [activeLatestTurn, activeThread?.id, latestTurnSettled, threadPlanCatalog],
   );
   const activePlan = useMemo(
-    () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
-    [activeLatestTurn?.turnId, threadActivities],
+    () =>
+      deriveActivePlanState(
+        threadActivities,
+        activeLatestTurn?.turnId ?? undefined,
+        latestTurnSettled,
+      ),
+    [activeLatestTurn?.turnId, latestTurnSettled, threadActivities],
   );
   const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
   const showPlanFollowUpPrompt =

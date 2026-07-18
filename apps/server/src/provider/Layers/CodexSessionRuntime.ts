@@ -1261,8 +1261,28 @@ export const makeCodexSessionRuntime = (
       if (alreadyClosed) {
         return;
       }
+      const activeSession = yield* Ref.get(sessionRef);
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      if (activeSession.activeTurnId !== undefined) {
+        // A hard session close is the final cancellation fallback when the
+        // turn/interrupt control request cannot be trusted. Publish a terminal
+        // turn event before shutting down the queues so orchestration never
+        // leaves that turn projected as running.
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          turnId: activeSession.activeTurnId,
+          method: "turn/aborted",
+          message: "Session stopped.",
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logError("Failed to emit Codex turn cancellation event during close.", {
+              cause,
+            }),
+          ),
+        );
+      }
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
