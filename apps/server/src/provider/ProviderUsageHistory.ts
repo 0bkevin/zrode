@@ -104,10 +104,26 @@ export interface ParsedTokenEntry {
   readonly recordedCostUsd: number | null;
   readonly isFast: boolean;
   readonly usesLongContext: boolean;
-  /** Legacy key prefix to remove after this semantic event is safely parsed. */
-  readonly legacyEntryPrefix?: string;
+  /** Claude replay identity. Exact requests coexist; sidechain copies do not. */
+  readonly claudeDedup?: {
+    readonly groupKey: string;
+    readonly requestId: string;
+    readonly isSidechain: boolean;
+  };
   /** Higher wins when the same semantic provider event is replayed. */
   readonly dedupPriority: number;
+}
+
+function claudeRequestEntryKey(groupKey: string, requestId: string): string {
+  return JSON.stringify(["request", groupKey, requestId]);
+}
+
+function claudeRequestEntryPrefix(groupKey: string): string {
+  return `${JSON.stringify(["request", groupKey]).slice(0, -1)},`;
+}
+
+function claudeSidechainEntryKey(groupKey: string): string {
+  return JSON.stringify(["sidechain", groupKey]);
 }
 
 function asFiniteNumber(value: unknown): number {
@@ -222,6 +238,7 @@ export function parseClaudeTranscriptEntries(line: string): ReadonlyArray<Parsed
   const parsed = parseClaudeTokenBreakdown(usage);
   if (parsed === null) return [];
   const isSidechain = record.isSidechain === true;
+  const requestId = typeof record.requestId === "string" ? record.requestId : "";
   const model =
     typeof record.message?.model === "string" && record.message.model.length > 0
       ? record.message.model === "<synthetic>"
@@ -233,9 +250,11 @@ export function parseClaudeTranscriptEntries(line: string): ReadonlyArray<Parsed
       ? record.costUSD
       : null;
   const parent: ParsedTokenEntry = {
-    // Claude message ids are stable across resumed/sidechain copies. Using the
-    // semantic id (rather than file/line) prevents replay inflation.
-    entryKey: messageId,
+    // Exact requests are message+request pairs. Sidechain replays instead use
+    // a message-level key so they cannot inflate the originating request.
+    entryKey: isSidechain
+      ? claudeSidechainEntryKey(messageId)
+      : claudeRequestEntryKey(messageId, requestId),
     epochMs,
     tokens: parsed.tokens,
     model,
@@ -252,9 +271,8 @@ export function parseClaudeTranscriptEntries(line: string): ReadonlyArray<Parsed
         parsed.cacheWriteTokens +
         parsed.cacheWrite1hTokens >
       200_000,
-    dedupPriority:
-      (isSidechain ? 0 : 1_000_000_000_000_000) + parsed.tokens * 2 + (parsed.hasSpeed ? 1 : 0),
-    legacyEntryPrefix: messageId,
+    dedupPriority: parsed.tokens * 4 + (carriedCost !== null ? 2 : 0) + (parsed.hasSpeed ? 1 : 0),
+    claudeDedup: { groupKey: messageId, requestId, isSidechain },
   };
   const entries: ParsedTokenEntry[] = [parent];
   let advisorIndex = 0;
@@ -264,8 +282,11 @@ export function parseClaudeTranscriptEntries(line: string): ReadonlyArray<Parsed
       typeof iteration.model === "string" && iteration.model.length > 0 ? iteration.model : null;
     const advisor = parseClaudeTokenBreakdown(iteration as ClaudeUsageShape);
     if (advisorModel === null || advisor === null) continue;
+    const advisorGroupKey = `${messageId}:advisor:${advisorIndex}`;
     entries.push({
-      entryKey: `${messageId}:advisor:${advisorIndex}`,
+      entryKey: isSidechain
+        ? claudeSidechainEntryKey(advisorGroupKey)
+        : claudeRequestEntryKey(advisorGroupKey, requestId),
       epochMs,
       tokens: advisor.tokens,
       model: advisorModel,
@@ -282,8 +303,8 @@ export function parseClaudeTranscriptEntries(line: string): ReadonlyArray<Parsed
           advisor.cacheWriteTokens +
           advisor.cacheWrite1hTokens >
         200_000,
-      dedupPriority:
-        (isSidechain ? 0 : 1_000_000_000_000_000) + advisor.tokens * 2 + (advisor.hasSpeed ? 1 : 0),
+      dedupPriority: advisor.tokens * 4 + (advisor.hasSpeed ? 1 : 0),
+      claudeDedup: { groupKey: advisorGroupKey, requestId, isSidechain },
     });
     advisorIndex += 1;
   }
@@ -311,6 +332,7 @@ export function parseCodexRolloutLine(
 interface RawCodexUsage {
   readonly input: number;
   readonly cached: number;
+  readonly cacheWrite: number;
   readonly output: number;
   readonly reasoning: number;
   readonly total: number;
@@ -351,13 +373,18 @@ function asCodexUsage(value: unknown): RawCodexUsage | null {
   };
   const input = read("input_tokens", "prompt_tokens", "input");
   const cached = read("cached_input_tokens", "cache_read_input_tokens", "cached_tokens");
+  const cacheWrite = read("cache_write_input_tokens", "cache_write_tokens");
   const output = read("output_tokens", "completion_tokens", "output");
   const reasoning = read("reasoning_output_tokens", "reasoning_tokens");
   const reportedTotal = read("total_tokens");
-  const recomputed = input + output + reasoning;
+  // Responses API reasoning tokens are a detail bucket inside output_tokens,
+  // not an additional output category. Codex preserves both values in its
+  // rollout protocol, so adding them would double count reasoning.
+  const recomputed = input + output;
   return {
     input,
     cached,
+    cacheWrite,
     output,
     reasoning,
     total: reportedTotal > 0 || recomputed === 0 ? reportedTotal : recomputed,
@@ -368,6 +395,7 @@ function codexUsageEquals(left: RawCodexUsage, right: RawCodexUsage): boolean {
   return (
     left.input === right.input &&
     left.cached === right.cached &&
+    left.cacheWrite === right.cacheWrite &&
     left.output === right.output &&
     left.reasoning === right.reasoning &&
     left.total === right.total
@@ -378,6 +406,7 @@ function subtractCodexUsage(totals: RawCodexUsage, previous: RawCodexUsage | nul
   return {
     input: Math.max(0, totals.input - (previous?.input ?? 0)),
     cached: Math.max(0, totals.cached - (previous?.cached ?? 0)),
+    cacheWrite: Math.max(0, totals.cacheWrite - (previous?.cacheWrite ?? 0)),
     output: Math.max(0, totals.output - (previous?.output ?? 0)),
     reasoning: Math.max(0, totals.reasoning - (previous?.reasoning ?? 0)),
     total: Math.max(0, totals.total - (previous?.total ?? 0)),
@@ -479,7 +508,9 @@ function parseCodexRolloutLineWithState(
         ? (payload.thread_settings as Record<string, unknown>)
         : null;
     const tier = nonEmptyString(settings?.service_tier) ?? nonEmptyString(payload.service_tier);
-    if (tier !== null) state.isFast = tier === "fast" || tier === "priority";
+    // This event is a complete settings snapshot. An omitted/null tier means
+    // the preference was cleared and must not inherit an earlier fast turn.
+    state.isFast = tier === "fast" || tier === "priority";
     return null;
   }
   if (payload.type === "task_started") {
@@ -518,7 +549,11 @@ function parseCodexRolloutLineWithState(
   if (totals !== null) state.previousTotals = totals;
   if (
     usage === null ||
-    (usage.input <= 0 && usage.cached <= 0 && usage.output <= 0 && usage.reasoning <= 0)
+    (usage.input <= 0 &&
+      usage.cached <= 0 &&
+      usage.cacheWrite <= 0 &&
+      usage.output <= 0 &&
+      usage.reasoning <= 0)
   ) {
     return null;
   }
@@ -526,8 +561,9 @@ function parseCodexRolloutLineWithState(
   const model = resolveCodexModel(state.currentModel, timestamp!);
   state.currentModel = model;
   const cachedInputTokens = Math.min(usage.cached, usage.input);
-  const inputTokens = Math.max(0, usage.input - cachedInputTokens);
-  const outputTokens = usage.output + usage.reasoning;
+  const cacheWriteTokens = Math.min(usage.cacheWrite, usage.input - cachedInputTokens);
+  const inputTokens = Math.max(0, usage.input - cachedInputTokens - cacheWriteTokens);
+  const outputTokens = usage.output;
   const tokens = usage.total > 0 ? usage.total : usage.input + outputTokens;
   if (tokens <= 0) return null;
   return {
@@ -537,6 +573,7 @@ function parseCodexRolloutLineWithState(
       model,
       usage.input,
       cachedInputTokens,
+      cacheWriteTokens,
       usage.output,
       usage.reasoning,
       tokens,
@@ -546,7 +583,7 @@ function parseCodexRolloutLineWithState(
     model,
     inputTokens,
     cachedInputTokens,
-    cacheWriteTokens: 0,
+    cacheWriteTokens,
     cacheWrite1hTokens: 0,
     outputTokens,
     recordedCostUsd: null,
@@ -583,6 +620,13 @@ export function parseCodexTurnContextModel(line: string): string | null {
   } catch {
     return null;
   }
+}
+
+function usesKnownLongContextTier(model: string, promptTokens: number): boolean {
+  const slug = model.split("/").at(-1)?.toLowerCase() ?? model.toLowerCase();
+  if (/^gpt-5[.-](?:4|5|6)(?:-|$)/.test(slug)) return promptTokens > 272_000;
+  if (slug.startsWith("claude-") || slug.startsWith("grok-")) return promptTokens > 200_000;
+  return false;
 }
 
 /**
@@ -638,6 +682,8 @@ export function parseOpenCodeMessageFile(
   if (tokens <= 0) return null;
   const modelId = typeof record.modelID === "string" ? record.modelID : "";
   const providerId = typeof record.providerID === "string" ? record.providerID : "";
+  const qualifiedModel =
+    modelId.length > 0 ? (providerId.length > 0 ? `${providerId}/${modelId}` : modelId) : null;
   const isHostedGateway = providerId === "opencode" || providerId === "opencode-go";
   const recordedCost =
     isHostedGateway &&
@@ -650,8 +696,7 @@ export function parseOpenCodeMessageFile(
     entryKey: id,
     epochMs,
     tokens,
-    model:
-      modelId.length > 0 ? (providerId.length > 0 ? `${providerId}/${modelId}` : modelId) : null,
+    model: qualifiedModel,
     inputTokens,
     cachedInputTokens,
     cacheWriteTokens,
@@ -659,7 +704,9 @@ export function parseOpenCodeMessageFile(
     outputTokens,
     recordedCostUsd: recordedCost,
     isFast: false,
-    usesLongContext: false,
+    usesLongContext:
+      qualifiedModel !== null &&
+      usesKnownLongContextTier(qualifiedModel, inputTokens + cachedInputTokens + cacheWriteTokens),
     dedupPriority: 0,
   };
 }
@@ -692,11 +739,7 @@ function grokModelFromEvent(message: string, context: Record<string, unknown>): 
 }
 
 /** Parse one Grok unified-log line while tracking the active model per CLI process. */
-function parseGrokLogLine(
-  line: string,
-  lineNumber: number,
-  state: GrokParseState,
-): ParsedTokenEntry | null {
+function parseGrokLogLine(line: string, state: GrokParseState): ParsedTokenEntry | null {
   if (!line.includes("inference_done") && !line.includes("model")) return null;
   let record: Record<string, unknown>;
   try {
@@ -717,13 +760,14 @@ function parseGrokLogLine(
     return null;
   }
   if (message !== "shell.turn.inference_done") return null;
-  const promptTokens = Math.max(0, asFiniteNumber(context.prompt_tokens));
-  if (promptTokens <= 0) return null;
+  if (typeof context.prompt_tokens !== "number" || !Number.isFinite(context.prompt_tokens)) {
+    return null;
+  }
+  const promptTokens = Math.max(0, context.prompt_tokens);
   const timestamp = nonEmptyString(record.ts);
   const epochMs = timestamp === null ? Number.NaN : Date.parse(timestamp);
   if (!Number.isFinite(epochMs)) return null;
   const model = pid === null ? null : (state.modelByPid.get(pid) ?? null);
-  if (model === null) return null;
   const cachedInputTokens = Math.min(
     promptTokens,
     Math.max(0, asFiniteNumber(context.cached_prompt_tokens)),
@@ -733,8 +777,37 @@ function parseGrokLogLine(
     Math.max(0, asFiniteNumber(context.completion_tokens)) +
     Math.max(0, asFiniteNumber(context.reasoning_tokens));
   const tokens = promptTokens + outputTokens;
+  const usage =
+    typeof context.usage === "object" && context.usage !== null
+      ? (context.usage as Record<string, unknown>)
+      : null;
+  const rawCostTicks = context.cost_in_usd_ticks ?? usage?.cost_in_usd_ticks;
+  const costTicks =
+    typeof rawCostTicks === "number"
+      ? rawCostTicks
+      : typeof rawCostTicks === "string" && rawCostTicks.trim().length > 0
+        ? Number(rawCostTicks)
+        : Number.NaN;
+  // New xAI responses carry the authoritative per-request charge. Prefer it
+  // whenever the CLI persists it; one US dollar is exactly 10^10 ticks.
+  const recordedCostUsd =
+    Number.isFinite(costTicks) && costTicks >= 0 ? costTicks / 10_000_000_000 : null;
+  // The provider-recorded charge remains authoritative even if log rotation
+  // removed the earlier PID-to-model event, or if a charged event has no
+  // token categories. Surface it as Unattributed instead of losing spend.
+  if (model === null && recordedCostUsd === null) return null;
+  if (tokens <= 0 && recordedCostUsd === null) return null;
   return {
-    entryKey: `unified:${lineNumber}`,
+    entryKey: JSON.stringify([
+      "inference",
+      epochMs,
+      pid,
+      model,
+      promptTokens,
+      cachedInputTokens,
+      outputTokens,
+      recordedCostUsd,
+    ]),
     epochMs,
     tokens,
     model,
@@ -743,7 +816,7 @@ function parseGrokLogLine(
     cacheWriteTokens: 0,
     cacheWrite1hTokens: 0,
     outputTokens,
-    recordedCostUsd: null,
+    recordedCostUsd,
     isFast: false,
     usesLongContext: promptTokens > 200_000,
     dedupPriority: 0,
@@ -754,10 +827,8 @@ function parseGrokLogLine(
 export function parseGrokUnifiedLog(content: string): ReadonlyArray<ParsedTokenEntry> {
   const state = makeGrokParseState();
   const entries: ParsedTokenEntry[] = [];
-  let lineNumber = 0;
   for (const line of content.split("\n")) {
-    lineNumber += 1;
-    const entry = parseGrokLogLine(line, lineNumber, state);
+    const entry = parseGrokLogLine(line, state);
     if (entry !== null) entries.push(entry);
   }
   return entries;
@@ -912,7 +983,10 @@ export const make = Effect.gen(function* () {
       sql`
         SELECT
           provider,
-          model,
+          CASE
+            WHEN model IS NOT NULL AND model <> '' THEN model
+            ELSE 'Unattributed'
+          END AS model,
           date(sampled_epoch_ms / 1000, 'unixepoch', 'localtime') AS day,
           SUM(input_tokens) AS "inputTokens",
           SUM(cached_input_tokens) AS "cachedInputTokens",
@@ -927,9 +1001,25 @@ export const make = Effect.gen(function* () {
           is_fast <> 0 AS "isFast",
           uses_long_context <> 0 AS "usesLongContext"
         FROM provider_token_entries
-        WHERE sampled_epoch_ms >= ${cutoffMs} AND model IS NOT NULL AND model <> ''
-        GROUP BY provider, model, is_fast, uses_long_context, day
-        ORDER BY day ASC, provider ASC, model ASC, is_fast ASC, uses_long_context ASC
+        WHERE sampled_epoch_ms >= ${cutoffMs}
+          AND ((model IS NOT NULL AND model <> '') OR recorded_cost_usd IS NOT NULL)
+        GROUP BY
+          provider,
+          CASE
+            WHEN model IS NOT NULL AND model <> '' THEN model
+            ELSE 'Unattributed'
+          END,
+          is_fast,
+          uses_long_context,
+          recorded_cost_usd IS NOT NULL,
+          day
+        ORDER BY
+          day ASC,
+          provider ASC,
+          model ASC,
+          is_fast ASC,
+          uses_long_context ASC,
+          recorded_cost_usd IS NOT NULL ASC
       `,
   });
 
@@ -1074,7 +1164,6 @@ export const make = Effect.gen(function* () {
         }
         return entries;
       }
-      let lineNumber = 0;
       const codexState = source.provider === "codex" ? makeCodexParseState() : null;
       const grokState = source.provider === "grok" ? makeGrokParseState() : null;
       // Stream line-by-line so multi-megabyte transcripts never sit in
@@ -1084,14 +1173,13 @@ export const make = Effect.gen(function* () {
         Stream.splitLines,
         Stream.runForEach((line) =>
           Effect.sync(() => {
-            lineNumber += 1;
             if (source.provider === "claude") {
               entries.push(...parseClaudeTranscriptEntries(line));
             } else if (source.provider === "codex" && codexState !== null) {
               const parsed = parseCodexRolloutLineWithState(line, codexState);
               if (parsed !== null) entries.push(parsed);
             } else if (source.provider === "grok" && grokState !== null) {
-              const parsed = parseGrokLogLine(line, lineNumber, grokState);
+              const parsed = parseGrokLogLine(line, grokState);
               if (parsed !== null) entries.push(parsed);
             }
           }),
@@ -1126,14 +1214,29 @@ export const make = Effect.gen(function* () {
             `;
           }
           for (const entry of entries) {
-            if (source.provider === "claude" && entry.legacyEntryPrefix !== undefined) {
-              const legacyPrefix = `${entry.legacyEntryPrefix}:`;
-              const suffixStart = legacyPrefix.length + 1;
+            const claudeDedup = source.provider === "claude" ? entry.claudeDedup : undefined;
+            if (claudeDedup?.isSidechain === true) {
+              const requestPrefix = claudeRequestEntryPrefix(claudeDedup.groupKey);
+              const legacyRequestKey = `${claudeDedup.groupKey}:${claudeDedup.requestId}`;
+              const parents = yield* sql<{ readonly present: number }>`
+                SELECT 1 AS present
+                FROM provider_token_entries
+                WHERE provider = 'claude'
+                  AND (
+                    substr(entry_key, 1, ${requestPrefix.length}) = ${requestPrefix}
+                    OR entry_key = ${claudeDedup.groupKey}
+                    OR entry_key = ${legacyRequestKey}
+                  )
+                LIMIT 1
+              `;
+              if (parents.length > 0) continue;
+            } else if (claudeDedup !== undefined) {
+              // A real parent always supersedes any sidechain replay for the
+              // same logical message/advisor request, regardless of scan order.
               yield* sql`
                 DELETE FROM provider_token_entries
                 WHERE provider = 'claude'
-                  AND substr(entry_key, 1, ${legacyPrefix.length}) = ${legacyPrefix}
-                  AND instr(substr(entry_key, ${suffixStart}), ':') = 0
+                  AND entry_key = ${claudeSidechainEntryKey(claudeDedup.groupKey)}
               `;
             }
             yield* sql`
@@ -1178,12 +1281,26 @@ export const make = Effect.gen(function* () {
                 cache_write_tokens = excluded.cache_write_tokens,
                 cache_write_1h_tokens = excluded.cache_write_1h_tokens,
                 output_tokens = excluded.output_tokens,
-                recorded_cost_usd = excluded.recorded_cost_usd,
+                recorded_cost_usd = COALESCE(
+                  excluded.recorded_cost_usd,
+                  provider_token_entries.recorded_cost_usd
+                ),
                 is_fast = excluded.is_fast,
                 dedup_priority = excluded.dedup_priority,
                 uses_long_context = excluded.uses_long_context
               WHERE excluded.dedup_priority >= provider_token_entries.dedup_priority
             `;
+            if (claudeDedup !== undefined && !claudeDedup.isSidechain) {
+              const legacyRequestKey = `${claudeDedup.groupKey}:${claudeDedup.requestId}`;
+              yield* sql`
+                DELETE FROM provider_token_entries
+                WHERE provider = 'claude'
+                  AND (
+                    entry_key = ${claudeDedup.groupKey}
+                    OR entry_key = ${legacyRequestKey}
+                  )
+              `;
+            }
           }
           yield* sql`
             INSERT INTO provider_token_files (path, mtime_ms, size_bytes)
@@ -1194,7 +1311,7 @@ export const make = Effect.gen(function* () {
       );
     });
 
-  const syncOnce = (settings: ServerSettings) =>
+  const syncOnce = (settings: ServerSettings, force: boolean) =>
     Effect.gen(function* () {
       const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
       const retentionCutoffMs = nowMs - USAGE_HISTORY_RETENTION_DAYS * DAY_MS;
@@ -1214,21 +1331,30 @@ export const make = Effect.gen(function* () {
         const changed: string[] = [];
         for (const filePath of files) {
           seenPaths.add(filePath);
-          // Message-json files are immutable once written: if we've already
-          // recorded this path, it can never change, so skip it without even
-          // stat-ing — this keeps OpenCode's thousands of files cheap to scan.
           const known = knownByPath.get(filePath);
-          if (source.format === "message-json" && known) continue;
           const info = yield* fs.stat(filePath).pipe(Effect.option);
           if (Option.isNone(info)) continue;
           const mtimeMs = Option.match(info.value.mtime, {
             onNone: () => 0,
             onSome: (mtime) => mtime.getTime(),
           });
-          // A file whose newest write predates the retention window cannot
-          // contain in-window entries it hasn't already contributed.
+          // OpenCode writes current messages through SQLite WAL. The main DB
+          // fingerprint can remain unchanged until checkpoint, so query the
+          // small set of DBs on every sync. A user-forced rescan likewise
+          // bypasses fingerprints for every source.
+          if (source.format === "opencode-sqlite") {
+            changed.push(filePath);
+            continue;
+          }
+          // A non-database file whose newest write predates the retention
+          // window cannot contain in-window entries it has not contributed.
           if (mtimeMs < retentionCutoffMs) continue;
-          if (known && known.mtime_ms === mtimeMs && known.size_bytes === Number(info.value.size)) {
+          if (
+            !force &&
+            known &&
+            known.mtime_ms === mtimeMs &&
+            known.size_bytes === Number(info.value.size)
+          ) {
             continue;
           }
           changed.push(filePath);
@@ -1279,7 +1405,7 @@ export const make = Effect.gen(function* () {
       if (!claimed) {
         return;
       }
-      yield* syncOnce(settings).pipe(
+      yield* syncOnce(settings, force).pipe(
         Effect.catchCause((cause) =>
           Effect.logWarning("Provider token activity scan failed", { cause }),
         ),

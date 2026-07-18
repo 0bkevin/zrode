@@ -219,8 +219,20 @@ describe("ProviderSpendBreakdown", () => {
           totalTokens: 150,
           providerCosts: new Map([["claude", 12.5]]),
           models: [
-            { provider: "claude", model: "claude-sonnet-5", totalTokens: 100, costUsd: 12.5 },
-            { provider: "codex", model: "unknown", totalTokens: 50, costUsd: null },
+            {
+              provider: "claude",
+              model: "claude-sonnet-5",
+              totalTokens: 100,
+              pricedTokens: 100,
+              costUsd: 12.5,
+            },
+            {
+              provider: "codex",
+              model: "unknown",
+              totalTokens: 50,
+              pricedTokens: 0,
+              costUsd: null,
+            },
           ],
         }}
       />,

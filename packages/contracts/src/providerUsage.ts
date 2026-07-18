@@ -179,7 +179,7 @@ export const ProviderModelTokenActivityDay = Schema.Struct({
   outputTokens: Schema.Number,
   /** All processed tokens, used for model ranking. */
   totalTokens: Schema.Number,
-  /** Provider-recorded request cost when available (Claude and hosted OpenCode requests). */
+  /** Provider-recorded request cost when available (Claude, xAI, and hosted OpenCode requests). */
   recordedCostUsd: Schema.NullOr(Schema.Number),
   /** The provider log says these requests used a fast/priority service tier. */
   isFast: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),

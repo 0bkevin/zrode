@@ -996,10 +996,7 @@ export function ProviderSpendBreakdown({ estimate }: { estimate: ApiCostEstimate
   const rows = HISTORY_PROVIDERS.map((provider) => {
     const models = estimate.models.filter((entry) => entry.provider === provider);
     const totalTokens = models.reduce((sum, entry) => sum + entry.totalTokens, 0);
-    const pricedTokens = models.reduce(
-      (sum, entry) => sum + (entry.costUsd !== null ? entry.totalTokens : 0),
-      0,
-    );
+    const pricedTokens = models.reduce((sum, entry) => sum + entry.pricedTokens, 0);
     return {
       provider,
       totalTokens,

@@ -86,7 +86,7 @@ describe("token log parsing", () => {
     });
     const parsed = parseClaudeTranscriptLine(line);
     assert.deepStrictEqual(parsed, {
-      entryKey: "msg_1",
+      entryKey: '["request","msg_1","req_1"]',
       epochMs: Date.parse("2026-07-04T20:53:16.209Z"),
       tokens: 200,
       model: "claude-sonnet-5",
@@ -98,8 +98,8 @@ describe("token log parsing", () => {
       recordedCostUsd: null,
       isFast: false,
       usesLongContext: false,
-      dedupPriority: 1_000_000_000_000_400,
-      legacyEntryPrefix: "msg_1",
+      dedupPriority: 800,
+      claudeDedup: { groupKey: "msg_1", requestId: "req_1", isSidechain: false },
     });
   });
 
@@ -156,7 +156,7 @@ describe("token log parsing", () => {
       isFast: true,
     });
     assert.include(entries[1], {
-      entryKey: "msg_rich:advisor:0",
+      entryKey: '["request","msg_rich:advisor:0",""]',
       tokens: 5,
       model: "claude-haiku-4-5",
       recordedCostUsd: null,
@@ -198,6 +198,38 @@ describe("token log parsing", () => {
     });
   });
 
+  it("does not double-count Codex reasoning and separates cache writes", () => {
+    const parsed = parseCodexRolloutLine(
+      JSON.stringify({
+        timestamp: "2026-07-01T18:26:25.971Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: {
+              input_tokens: 100,
+              cached_input_tokens: 25,
+              cache_write_input_tokens: 15,
+              output_tokens: 50,
+              reasoning_output_tokens: 30,
+              total_tokens: 150,
+            },
+          },
+        },
+      }),
+      "rollout-a.jsonl",
+      8,
+      "gpt-5.6-sol",
+    );
+    assert.include(parsed, {
+      tokens: 150,
+      inputTokens: 60,
+      cachedInputTokens: 25,
+      cacheWriteTokens: 15,
+      outputTokens: 50,
+    });
+  });
+
   it("reads the active model from a Codex turn context", () => {
     assert.strictEqual(
       parseCodexTurnContextModel(
@@ -226,24 +258,78 @@ describe("token log parsing", () => {
           },
         }),
         token("2026-07-01T18:26:25.000Z", {
-          total_token_usage: { input_tokens: 100, total_tokens: 100 },
-          last_token_usage: { input_tokens: 100, total_tokens: 100 },
+          total_token_usage: {
+            input_tokens: 100,
+            cache_write_input_tokens: 10,
+            total_tokens: 100,
+          },
+          last_token_usage: {
+            input_tokens: 100,
+            cache_write_input_tokens: 10,
+            total_tokens: 100,
+          },
         }),
         token("2026-07-01T18:26:26.000Z", {
-          total_token_usage: { input_tokens: 100, total_tokens: 100 },
-          last_token_usage: { input_tokens: 100, total_tokens: 100 },
+          total_token_usage: {
+            input_tokens: 100,
+            cache_write_input_tokens: 10,
+            total_tokens: 100,
+          },
+          last_token_usage: {
+            input_tokens: 100,
+            cache_write_input_tokens: 10,
+            total_tokens: 100,
+          },
         }),
         token("2026-07-01T18:26:27.000Z", {
-          total_token_usage: { input_tokens: 160, total_tokens: 160 },
+          total_token_usage: {
+            input_tokens: 160,
+            cache_write_input_tokens: 25,
+            total_tokens: 160,
+          },
         }),
       ].join("\n"),
     );
     assert.deepStrictEqual(
-      entries.map((entry) => [entry.tokens, entry.isFast]),
+      entries.map((entry) => [entry.tokens, entry.cacheWriteTokens, entry.isFast]),
       [
-        [100, true],
-        [60, true],
+        [100, 10, true],
+        [60, 15, true],
       ],
+    );
+  });
+
+  it("resets Codex priority when a complete settings snapshot clears the tier", () => {
+    const token = (timestamp: string, input: number) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: input, total_tokens: input },
+            total_token_usage: { input_tokens: input, total_tokens: input },
+          },
+        },
+      });
+    const entries = parseCodexRolloutFile(
+      [
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.4" } }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", service_tier: "priority" },
+        }),
+        token("2026-07-01T18:26:25.000Z", 10),
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_settings: {} },
+        }),
+        token("2026-07-01T18:26:26.000Z", 20),
+      ].join("\n"),
+    );
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.isFast),
+      [true, false],
     );
   });
 
@@ -356,6 +442,42 @@ describe("token log parsing", () => {
     assert.isNull(parsed?.recordedCostUsd);
   });
 
+  it("marks BYO OpenCode requests with provider-specific long-context tiers", () => {
+    const claude = parseOpenCodeMessageFile(
+      JSON.stringify({
+        id: "msg_claude_long",
+        role: "assistant",
+        providerID: "anthropic",
+        modelID: "claude-sonnet-4-5",
+        time: { created: 100 },
+        tokens: { input: 200_001, output: 1 },
+      }),
+    );
+    const openAiBoundary = parseOpenCodeMessageFile(
+      JSON.stringify({
+        id: "msg_openai_boundary",
+        role: "assistant",
+        providerID: "openai",
+        modelID: "gpt-5.6-sol",
+        time: { created: 100 },
+        tokens: { input: 272_000, output: 1 },
+      }),
+    );
+    const openAiLong = parseOpenCodeMessageFile(
+      JSON.stringify({
+        id: "msg_openai_long",
+        role: "assistant",
+        providerID: "openai",
+        modelID: "gpt-5.6-sol",
+        time: { created: 100 },
+        tokens: { input: 272_001, output: 1 },
+      }),
+    );
+    assert.isTrue(claude?.usesLongContext);
+    assert.isFalse(openAiBoundary?.usesLongContext);
+    assert.isTrue(openAiLong?.usesLongContext);
+  });
+
   it("attributes Grok token rows to the active model for each process", () => {
     const entries = parseGrokUnifiedLog(
       [
@@ -369,6 +491,7 @@ describe("token log parsing", () => {
             cached_prompt_tokens: 20,
             completion_tokens: 10,
             reasoning_tokens: 5,
+            cost_in_usd_ticks: "250000000",
           },
         }),
       ].join("\n"),
@@ -379,7 +502,60 @@ describe("token log parsing", () => {
       inputTokens: 80,
       cachedInputTokens: 20,
       outputTokens: 15,
+      recordedCostUsd: 0.025,
     });
+  });
+
+  it("retains Grok output-only events and gives them a semantic identity", () => {
+    const entries = parseGrokUnifiedLog(
+      [
+        JSON.stringify({ pid: 9, msg: "model changed", ctx: { model: "grok-4.3" } }),
+        JSON.stringify({
+          pid: 9,
+          ts: "2026-07-01T18:26:25.000Z",
+          msg: "shell.turn.inference_done",
+          ctx: { prompt_tokens: 0, completion_tokens: 10, reasoning_tokens: 5 },
+        }),
+      ].join("\n"),
+    );
+
+    assert.strictEqual(entries.length, 1);
+    assert.include(entries[0], {
+      tokens: 15,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 15,
+    });
+    assert.strictEqual(
+      entries[0]?.entryKey,
+      JSON.stringify([
+        "inference",
+        Date.parse("2026-07-01T18:26:25.000Z"),
+        9,
+        "grok-4.3",
+        0,
+        0,
+        15,
+        null,
+      ]),
+    );
+  });
+
+  it("retains an exact Grok charge when model attribution is unavailable", () => {
+    const entries = parseGrokUnifiedLog(
+      JSON.stringify({
+        pid: 11,
+        ts: "2026-07-01T18:26:25.000Z",
+        msg: "shell.turn.inference_done",
+        ctx: {
+          prompt_tokens: 0,
+          usage: { cost_in_usd_ticks: 1_000_000_000 },
+        },
+      }),
+    );
+
+    assert.strictEqual(entries.length, 1);
+    assert.include(entries[0], { model: null, tokens: 0, recordedCostUsd: 0.1 });
   });
 });
 
@@ -390,14 +566,19 @@ function claudeLine(input: {
   readonly requestId: string;
   readonly timestamp: string;
   readonly tokens: number;
+  readonly isSidechain?: boolean;
+  readonly model?: string;
+  readonly costUsd?: number;
 }): string {
   return JSON.stringify({
     type: "assistant",
     timestamp: input.timestamp,
     requestId: input.requestId,
+    isSidechain: input.isSidechain,
+    costUSD: input.costUsd,
     message: {
       id: input.messageId,
-      model: "claude-sonnet-5",
+      model: input.model ?? "claude-sonnet-5",
       usage: { input_tokens: input.tokens, output_tokens: 0 },
     },
   });
@@ -431,6 +612,20 @@ function openCodeHostedDatabaseMessage(): string {
   });
 }
 
+function openCodeIncompleteMessage(id: string, createdAt: number): string {
+  return JSON.stringify({ id, role: "assistant", time: { created: createdAt } });
+}
+
+function openCodeWalDatabaseMessage(): string {
+  return JSON.stringify({
+    role: "assistant",
+    providerID: "opencode-go",
+    modelID: "gpt-5.4",
+    cost: 0.01,
+    tokens: { total: 100, input: 100, output: 0 },
+  });
+}
+
 describe("token log scanning (integration)", () => {
   it.live(
     "scans temp homes, rescans appended files, and dedupes replays",
@@ -439,6 +634,7 @@ describe("token log scanning (integration)", () => {
       // an assertion inside the generator throws.
       const previousXdg = process.env.XDG_DATA_HOME;
       const previousGrokHome = process.env.GROK_HOME;
+      let opencodeDatabase: NodeSqlite.DatabaseSync | null = null;
       return Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -492,10 +688,42 @@ describe("token log scanning (integration)", () => {
         yield* fs.writeFileString(
           claudeFile,
           [
-            claudeLine({ messageId: "msg_1", requestId: "req_1", timestamp: t1, tokens: 100 }),
+            claudeLine({
+              messageId: "msg_1",
+              requestId: "req_1",
+              timestamp: t1,
+              tokens: 100,
+              costUsd: 0.2,
+            }),
             '{"type":"user","message":{"content":"hi"}}',
             "corrupt {not json",
             claudeLine({ messageId: "msg_2", requestId: "req_2", timestamp: t2, tokens: 200 }),
+            // Same message id, distinct real request ids: both are billable.
+            claudeLine({ messageId: "msg_shared", requestId: "req_a", timestamp: t2, tokens: 30 }),
+            claudeLine({ messageId: "msg_shared", requestId: "req_b", timestamp: t2, tokens: 40 }),
+            // A sidechain can arrive first, but the real parent must replace it.
+            claudeLine({
+              messageId: "msg_side",
+              requestId: "req_side",
+              timestamp: t2,
+              tokens: 70,
+              isSidechain: true,
+            }),
+            claudeLine({
+              messageId: "msg_side",
+              requestId: "req_parent",
+              timestamp: t2,
+              tokens: 60,
+            }),
+            // Exact carried spend must survive even without a model attribution.
+            claudeLine({
+              messageId: "msg_synthetic",
+              requestId: "req_synthetic",
+              timestamp: t2,
+              tokens: 15,
+              model: "<synthetic>",
+              costUsd: 0.1,
+            }),
             "",
           ].join("\n"),
         );
@@ -507,18 +735,21 @@ describe("token log scanning (integration)", () => {
           path.join(opencodeMessages, "msg_o1.json"),
           opencodeMessage("msg_o1", 700),
         );
+        const pendingMessagePath = path.join(opencodeMessages, "msg_pending.json");
+        yield* fs.writeFileString(
+          pendingMessagePath,
+          openCodeIncompleteMessage("msg_pending", nowMs - 70 * 60_000),
+        );
         yield* Effect.sync(() => {
           const database = new NodeSqlite.DatabaseSync(opencodeDbPath);
-          try {
-            database.exec(
-              "CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
-            );
-            database
-              .prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
-              .run("msg_db", nowMs - 80 * 60_000, openCodeHostedDatabaseMessage());
-          } finally {
-            database.close();
-          }
+          database.exec("PRAGMA journal_mode = WAL");
+          database.exec(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+          );
+          database
+            .prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
+            .run("msg_db", nowMs - 80 * 60_000, openCodeHostedDatabaseMessage());
+          opencodeDatabase = database;
         });
 
         let seedLegacyRows = true;
@@ -554,7 +785,7 @@ describe("token log scanning (integration)", () => {
             .reduce((sum, entry) => sum + entry.tokens, 0);
 
         const first = yield* runScan;
-        assert.strictEqual(total("claude", first), 300);
+        assert.strictEqual(total("claude", first), 445);
         assert.strictEqual(total("codex", first), 500);
         assert.strictEqual(total("opencode", first), 1_000);
         assert.deepStrictEqual(
@@ -567,11 +798,18 @@ describe("token log scanning (integration)", () => {
             ).values(),
           ],
           [
+            ["claude", "Unattributed"],
             ["claude", "claude-sonnet-5"],
             ["codex", "gpt-5.4"],
             ["opencode", "opencode-go/gpt-5.4"],
             ["opencode", "opencode/glm-5"],
           ],
+        );
+        assert.strictEqual(
+          first.modelActivity.find(
+            (entry) => entry.provider === "claude" && entry.model === "Unattributed",
+          )?.recordedCostUsd,
+          0.1,
         );
         assert.strictEqual(first.today, localDayKey(nowMs));
 
@@ -582,7 +820,9 @@ describe("token log scanning (integration)", () => {
           claudeFile,
           existing +
             [
-              claudeLine({ messageId: "msg_1", requestId: "req_1", timestamp: t1, tokens: 100 }),
+              // A richer replay can correct token counts without erasing the
+              // authoritative cost carried by the earlier duplicate.
+              claudeLine({ messageId: "msg_1", requestId: "req_1", timestamp: t1, tokens: 101 }),
               claudeLine({ messageId: "msg_3", requestId: "req_3", timestamp: t2, tokens: 50 }),
               "",
             ].join("\n"),
@@ -591,17 +831,35 @@ describe("token log scanning (integration)", () => {
           path.join(opencodeMessages, "msg_o2.json"),
           opencodeMessage("msg_o2", 200),
         );
+        yield* fs.writeFileString(pendingMessagePath, opencodeMessage("msg_pending", 50));
+        yield* Effect.sync(() => {
+          opencodeDatabase
+            ?.prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
+            .run("msg_db_wal", nowMs - 40 * 60_000, openCodeWalDatabaseMessage());
+        });
 
         const second = yield* runScan;
-        assert.strictEqual(total("claude", second), 350);
+        assert.strictEqual(total("claude", second), 496);
         assert.strictEqual(total("codex", second), 500);
-        // 700 (already parsed, immutable) + 200 (new file) — no double count.
-        assert.strictEqual(total("opencode", second), 1_200);
+        // Includes a completed legacy message and a WAL-only database insert.
+        assert.strictEqual(total("opencode", second), 1_350);
+        assert.strictEqual(
+          second.modelActivity.find(
+            (entry) =>
+              entry.provider === "claude" &&
+              entry.model === "claude-sonnet-5" &&
+              entry.recordedCostUsd !== null,
+          )?.recordedCostUsd,
+          0.2,
+        );
 
+        opencodeDatabase?.close();
+        opencodeDatabase = null;
         yield* fs.remove(root, { recursive: true });
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
+            opencodeDatabase?.close();
             if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
             else process.env.XDG_DATA_HOME = previousXdg;
             if (previousGrokHome === undefined) delete process.env.GROK_HOME;
