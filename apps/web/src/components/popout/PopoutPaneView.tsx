@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { nextTerminalId } from "@t3tools/shared/terminalLabels";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
@@ -159,7 +158,6 @@ export function PopoutPaneView({
       <PopoutTerminalPane
         threadRef={threadRef}
         project={project}
-        worktreePath={worktreePath}
         initialTerminalIds={terminalIds}
         initialActiveTerminalId={search.activeTerminalId ?? null}
         keybindings={keybindings}
@@ -226,19 +224,16 @@ function PopoutErrorFrame({ title, message }: { title: string; message: string }
 function PopoutTerminalPane({
   threadRef,
   project,
-  worktreePath,
   initialTerminalIds,
   initialActiveTerminalId,
   keybindings,
 }: {
   threadRef: ScopedThreadRef;
   project: Project;
-  worktreePath: string | null;
   initialTerminalIds: string[];
   initialActiveTerminalId: string | null;
   keybindings: ResolvedKeybindingsConfig;
 }) {
-  const openTerminal = useAtomCommand(terminalEnvironment.open, "terminal open");
   const closeTerminal = useAtomCommand(terminalEnvironment.close, "terminal close");
   const knownTerminalSessions = useKnownTerminalSessions({
     environmentId: threadRef.environmentId,
@@ -248,8 +243,6 @@ function PopoutTerminalPane({
     () => knownTerminalSessions.map((session) => session.target.terminalId),
     [knownTerminalSessions],
   );
-  const cwd = projectScriptCwd({ project: { cwd: project.workspaceRoot }, worktreePath });
-
   const [surface, setSurface] = useState<TerminalPanelSurface>(() => {
     const primaryId = initialTerminalIds[0]!;
     return {
@@ -271,30 +264,10 @@ function PopoutTerminalPane({
   );
   usePaneClaimPublisher(threadRef, claimResources);
 
-  const launchTerminal = useCallback(
-    (terminalId: string) => {
-      void openTerminal({
-        environmentId: threadRef.environmentId,
-        input: {
-          threadId: threadRef.threadId,
-          terminalId,
-          cwd,
-          ...(worktreePath != null ? { worktreePath } : {}),
-          env: projectScriptRuntimeEnv({
-            project: { cwd: project.workspaceRoot },
-            worktreePath,
-          }),
-        },
-      });
-    },
-    [cwd, openTerminal, project.workspaceRoot, threadRef, worktreePath],
-  );
-
   const addTerminal = useCallback(
     (direction?: "horizontal" | "vertical") => {
       if (surface.terminalIds.length >= MAX_TERMINALS_PER_GROUP) return;
       const terminalId = nextTerminalId([...knownTerminalIds, ...surface.terminalIds]);
-      launchTerminal(terminalId);
       setSurface((current) => ({
         ...current,
         terminalIds: [...current.terminalIds, terminalId],
@@ -303,7 +276,7 @@ function PopoutTerminalPane({
       }));
       setFocusRequestId((value) => value + 1);
     },
-    [knownTerminalIds, launchTerminal, surface.terminalIds],
+    [knownTerminalIds, surface.terminalIds],
   );
 
   const handleNewTerminal = useCallback(() => addTerminal(), [addTerminal]);

@@ -15,6 +15,8 @@ export interface TerminalSessionState {
   readonly hasRunningSubprocess: boolean;
   readonly updatedAt: string | null;
   readonly version: number;
+  /** Increments whenever attach supplies a fresh authoritative PTY snapshot. */
+  readonly snapshotVersion: number;
 }
 
 export interface TerminalBufferState {
@@ -23,6 +25,8 @@ export interface TerminalBufferState {
   readonly error: string | null;
   readonly updatedAt: string | null;
   readonly version: number;
+  /** Increments whenever attach supplies a fresh authoritative PTY snapshot. */
+  readonly snapshotVersion: number;
 }
 
 export interface KnownTerminalSessionTarget {
@@ -50,6 +54,7 @@ export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   error: null,
   updatedAt: null,
   version: 0,
+  snapshotVersion: 0,
 });
 
 export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>({
@@ -60,6 +65,7 @@ export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>(
   hasRunningSubprocess: false,
   updatedAt: null,
   version: 0,
+  snapshotVersion: 0,
 });
 
 export const DEFAULT_MAX_TERMINAL_BUFFER_BYTES = 512 * 1024;
@@ -91,13 +97,16 @@ function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
 export function terminalBufferStateFromSnapshot(
   snapshot: TerminalSessionSnapshot,
   maxBufferBytes: number,
+  snapshotVersion = 1,
+  version = 1,
 ): TerminalBufferState {
   return {
     buffer: trimBufferToBytes(snapshot.history, maxBufferBytes),
     status: snapshot.status,
     error: null,
     updatedAt: snapshot.updatedAt,
-    version: 1,
+    version,
+    snapshotVersion,
   };
 }
 
@@ -119,6 +128,7 @@ export function combineTerminalSessionState(
     hasRunningSubprocess: summary?.hasRunningSubprocess ?? false,
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
     version: buffer.version,
+    snapshotVersion: buffer.snapshotVersion,
   };
 }
 
@@ -130,7 +140,12 @@ export function applyTerminalAttachStreamEvent(
   switch (event.type) {
     case "snapshot":
     case "restarted":
-      return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes);
+      return terminalBufferStateFromSnapshot(
+        event.snapshot,
+        maxBufferBytes,
+        current.snapshotVersion + 1,
+        current.version + 1,
+      );
     case "output":
       return {
         ...current,
