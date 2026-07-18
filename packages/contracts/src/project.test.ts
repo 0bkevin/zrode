@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   PROJECT_SEARCH_TEXT_MAX_PATTERNS_PER_LIST,
+  ProjectCopyFileInput,
+  ProjectCopyFileResult,
   ProjectCreateDirectoryInput,
   ProjectCreateDirectoryResult,
   ProjectDeleteEntryInput,
@@ -155,6 +157,34 @@ describe("project file events", () => {
 });
 
 describe("project workspace editing contracts", () => {
+  it("decodes binary-safe file copy inputs and results", () => {
+    const decodeInput = Schema.decodeUnknownSync(ProjectCopyFileInput);
+    const decodeResult = Schema.decodeUnknownSync(ProjectCopyFileResult);
+
+    expect(
+      decodeInput({
+        cwd: "/workspace",
+        sourceRelativePath: "assets/logo.png",
+        destinationDirectoryRelativePath: "public/images",
+      }),
+    ).toEqual({
+      cwd: "/workspace",
+      sourceRelativePath: "assets/logo.png",
+      destinationDirectoryRelativePath: "public/images",
+    });
+    expect(
+      decodeResult({
+        sourceRelativePath: "assets/logo.png",
+        destinationRelativePath: "public/images/logo.png",
+        byteLength: 42,
+      }),
+    ).toEqual({
+      sourceRelativePath: "assets/logo.png",
+      destinationRelativePath: "public/images/logo.png",
+      byteLength: 42,
+    });
+  });
+
   it("requires explicit permanent and recursive deletion semantics", () => {
     const decodeInput = Schema.decodeUnknownSync(ProjectDeleteEntryInput);
     const decodeResult = Schema.decodeUnknownSync(ProjectDeleteEntryResult);

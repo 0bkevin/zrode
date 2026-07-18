@@ -4495,7 +4495,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
-  it.effect("routes websocket rpc project creation, deletion, and text search", () =>
+  it.effect("routes websocket rpc project creation, copy, deletion, and text search", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -4528,6 +4528,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               excludes: [],
               limit: 100,
             }).pipe(Stream.runCollect);
+            const copied = yield* client[WS_METHODS.projectsCopyFile]({
+              cwd: workspaceDir,
+              sourceRelativePath: "src/index.ts",
+              destinationDirectoryRelativePath: "src",
+            });
             const preparedDelete = yield* client[WS_METHODS.projectsPrepareDeleteEntry]({
               cwd: workspaceDir,
               relativePath: "src/features",
@@ -4545,6 +4550,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             return {
               directory,
               directoryCollision,
+              copied,
               deleted,
               searchEvents: Array.from(searchEvents),
             };
@@ -4555,6 +4561,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(response.directory, {
         relativePath: "src/features",
       });
+      assert.deepEqual(response.copied, {
+        sourceRelativePath: "src/index.ts",
+        destinationRelativePath: "src/index copy.ts",
+        byteLength: 14,
+      });
+      assert.equal(
+        yield* fs.readFileString(path.join(workspaceDir, "src/index copy.ts")),
+        "😀é needle\n",
+      );
       assert.deepEqual(response.deleted, {
         relativePath: "src/features",
         deletedKind: "directory",

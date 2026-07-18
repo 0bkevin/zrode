@@ -346,6 +346,29 @@ export const ProjectCreateDirectoryResult = Schema.Struct({
 });
 export type ProjectCreateDirectoryResult = typeof ProjectCreateDirectoryResult.Type;
 
+export const ProjectCopyFileInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  sourceRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS),
+  ),
+  /** Workspace-relative destination directory. Use "." for the workspace root. */
+  destinationDirectoryRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS),
+  ),
+});
+export type ProjectCopyFileInput = typeof ProjectCopyFileInput.Type;
+
+export const ProjectCopyFileResult = Schema.Struct({
+  sourceRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS),
+  ),
+  destinationRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS),
+  ),
+  byteLength: NonNegativeInt,
+});
+export type ProjectCopyFileResult = typeof ProjectCopyFileResult.Type;
+
 /**
  * Permanently remove one workspace entry. Deletion is deliberately explicit:
  * directories require `recursive`, and every caller must acknowledge that the
@@ -456,6 +479,7 @@ export const ProjectFileOperation = Schema.Literals([
   "close",
   "make-directory",
   "write-file",
+  "copy-file",
   "delete-entry",
   "move-entry",
 ]);
@@ -550,6 +574,38 @@ export class ProjectCreateDirectoryError extends Schema.TaggedErrorClass<Project
       message:
         decodedProjectErrorMessage(props) ??
         `Failed to create workspace directory '${props.relativePath}' in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+export class ProjectCopyFileError extends Schema.TaggedErrorClass<ProjectCopyFileError>()(
+  "ProjectCopyFileError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    sourceRelativePath: Schema.optional(TrimmedNonEmptyString),
+    destinationDirectoryRelativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(
+    props: Omit<ProjectFileFailureContext, "relativePath"> & {
+      readonly cwd: string;
+      readonly sourceRelativePath: string;
+      readonly destinationDirectoryRelativePath: string;
+    },
+  ) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to copy workspace file '${props.sourceRelativePath}' in '${props.cwd}'.`,
     } as any);
   }
 }

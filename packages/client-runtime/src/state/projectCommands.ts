@@ -125,6 +125,16 @@ export function createProjectEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.cwd, input.relativePath]),
       },
     }),
+    copyFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:copy-file",
+      tag: WS_METHODS.projectsCopyFile,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.destinationDirectoryRelativePath]),
+      },
+    }),
     deleteEntry: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:projects:delete-entry",
       tag: WS_METHODS.projectsDeleteEntry,
