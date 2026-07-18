@@ -58,6 +58,8 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public interruptError: unknown | undefined;
+  public interruptGate: Promise<void> | undefined;
   public closeCalls = 0;
 
   emit(message: SDKMessage): void {
@@ -96,6 +98,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly interrupt = async (): Promise<void> => {
     this.interruptCalls.push(undefined);
+    await this.interruptGate;
+    if (this.interruptError !== undefined) {
+      throw this.interruptError;
+    }
   };
 
   readonly setModel = async (model?: string): Promise<void> => {
@@ -1398,6 +1404,114 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(turnCompleted.payload.errorMessage, "Error: Request was aborted.");
         assert.equal(turnCompleted.payload.stopReason, "tool_use");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("interrupts the active turn and closes the Claude query", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "run a background task",
+        attachments: [],
+      });
+
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(String(completed.turnId), String(turn.turnId));
+        assert.equal(completed.payload.state, "interrupted");
+      }
+      assert.equal(runtimeEvents.at(-1)?.type, "session.exited");
+      assert.equal(harness.query.interruptCalls.length, 1);
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("still closes the Claude query when the interrupt handshake fails", () => {
+    const harness = makeHarness();
+    harness.query.interruptError = new Error("control request disconnected");
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "keep running despite a broken control channel",
+        attachments: [],
+      });
+
+      yield* adapter.interruptTurn(THREAD_ID, turn.turnId);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "turn.completed"),
+        true,
+      );
+      assert.equal(runtimeEvents.at(-1)?.type, "session.exited");
+      assert.equal(harness.query.interruptCalls.length, 1);
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("closes the Claude query when the interrupt handshake hangs", () => {
+    const harness = makeHarness();
+    harness.query.interruptGate = new Promise(() => undefined);
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hang the control request",
+        attachments: [],
+      });
+
+      const interruptFiber = yield* adapter
+        .interruptTurn(THREAD_ID, turn.turnId)
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("3 seconds");
+      yield* Fiber.join(interruptFiber);
+
+      assert.equal(harness.query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

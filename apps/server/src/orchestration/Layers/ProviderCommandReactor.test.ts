@@ -275,6 +275,7 @@ describe("ProviderCommandReactor", () => {
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
+    readonly sendTurn?: ProviderServiceShape["sendTurn"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -345,11 +346,13 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions.push(session);
       return Effect.succeed(session);
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn((sendInput: Parameters<ProviderServiceShape["sendTurn"]>[0]) =>
+      input?.sendTurn
+        ? input.sendTurn(sendInput)
+        : Effect.succeed({
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-1"),
+          }),
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -1967,6 +1970,121 @@ describe("ProviderCommandReactor", () => {
       turnId: "turn-1",
     });
   });
+
+  effectIt.effect("interrupts a turn that finishes starting after Stop was requested", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      let releaseTurnStart: (() => void) | undefined;
+      const turnStartGate = new Promise<void>((resolve) => {
+        releaseTurnStart = resolve;
+      });
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurn: () =>
+            Effect.promise(async () => {
+              await turnStartGate;
+              return {
+                threadId: ThreadId.make("thread-1"),
+                turnId: asTurnId("turn-started-late"),
+              };
+            }),
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-late"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-late"),
+          role: "user",
+          text: "start slowly",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-turn-interrupt-before-started"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      });
+      yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 1));
+
+      releaseTurnStart?.();
+      yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 2));
+      expect(harness.interruptTurn.mock.calls).toEqual([
+        [{ threadId: ThreadId.make("thread-1") }],
+        [
+          {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-started-late"),
+          },
+        ],
+      ]);
+    }),
+  );
+
+  effectIt.effect("interrupts a turn that finishes starting after its session was stopped", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      let releaseTurnStart: (() => void) | undefined;
+      const turnStartGate = new Promise<void>((resolve) => {
+        releaseTurnStart = resolve;
+      });
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurn: () =>
+            Effect.promise(async () => {
+              await turnStartGate;
+              return {
+                threadId: ThreadId.make("thread-1"),
+                turnId: asTurnId("turn-after-session-stop"),
+              };
+            }),
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-session-stop"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-session-stop"),
+          role: "user",
+          text: "start slowly",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-session-stop-during-turn-start"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      });
+      yield* Effect.promise(() => waitFor(() => harness.stopSession.mock.calls.length === 1));
+
+      releaseTurnStart?.();
+      yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 1));
+      expect(harness.interruptTurn.mock.calls).toEqual([
+        [
+          {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-after-session-stop"),
+          },
+        ],
+      ]);
+    }),
+  );
 
   it("ignores an interrupt whose target has been replaced by a newer active turn", async () => {
     const harness = await createHarness();

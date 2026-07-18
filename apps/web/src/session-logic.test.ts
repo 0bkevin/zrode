@@ -369,6 +369,32 @@ describe("deriveActivePlanState", () => {
       steps: [{ step: "Write tests", status: "completed" }],
     });
   });
+
+  it("does not leave an in-progress task spinning after the turn settles", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "plan-interrupted",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-interrupted",
+        payload: {
+          plan: [
+            { step: "Inspect provider", status: "completed" },
+            { step: "Finish cancellation", status: "inProgress" },
+          ],
+        },
+      }),
+    ];
+
+    expect(deriveActivePlanState(activities, TurnId.make("turn-interrupted"), true)?.steps).toEqual(
+      [
+        { step: "Inspect provider", status: "completed" },
+        { step: "Finish cancellation", status: "pending" },
+      ],
+    );
+  });
 });
 
 describe("findLatestProposedPlan", () => {

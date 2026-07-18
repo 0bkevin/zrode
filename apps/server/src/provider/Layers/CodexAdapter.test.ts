@@ -33,6 +33,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
@@ -154,7 +155,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl());
+  close = Effect.promise(() => this.closeImpl()).pipe(
+    Effect.andThen(Queue.shutdown(this.eventQueue)),
+  );
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -480,6 +483,65 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("closes the Codex session when its interrupt request fails", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      runtime.interruptTurnImpl.mockImplementationOnce(() =>
+        Promise.reject(new Error("interrupt transport disconnected")),
+      );
+
+      yield* adapter.interruptTurn(asThreadId("thread-1"), asTurnId("turn-1"));
+
+      NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+    }),
+  );
+
+  it.effect("closes the Codex session when its interrupt request hangs", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      runtime.interruptTurnImpl.mockImplementationOnce(() => new Promise(() => undefined));
+
+      const interruptFiber = yield* adapter
+        .interruptTurn(asThreadId("thread-1"), asTurnId("turn-1"))
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("3 seconds");
+      yield* Fiber.join(interruptFiber);
+
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(asThreadId("thread-1")), false);
+    }),
+  );
+
+  it.effect("normalizes legacy aborted turns to terminal interrupted events", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-aborted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/aborted",
+        message: "Interrupted by user",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") return;
+      NodeAssert.equal(firstEvent.value.type, "turn.completed");
+      if (firstEvent.value.type !== "turn.completed") return;
+      NodeAssert.equal(firstEvent.value.turnId, "turn-1");
+      NodeAssert.equal(firstEvent.value.payload.state, "interrupted");
+      NodeAssert.equal(firstEvent.value.payload.stopReason, "Interrupted by user");
+    }),
+  );
+
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

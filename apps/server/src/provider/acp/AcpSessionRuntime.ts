@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -880,6 +881,14 @@ export const make = (
       cancel: getStartedState.pipe(
         Effect.flatMap((started) =>
           Effect.gen(function* () {
+            // Deliver session/cancel before releasing the local prompt. Sending
+            // this notification in a detached fiber used to let cancel return
+            // before the provider saw it. A follow-up prompt could then start
+            // first and be cancelled by the late notification instead, while
+            // the original provider work kept running in the background.
+            const notificationExit = yield* Effect.exit(
+              acp.agent.cancel({ sessionId: started.sessionId }),
+            );
             const activePromptFiber = yield* Ref.get(activePromptFiberRef);
             const activePromptCancel = yield* Ref.get(activePromptCancelRef);
             if (Option.isSome(activePromptCancel)) {
@@ -888,9 +897,9 @@ export const make = (
             if (Option.isSome(activePromptFiber)) {
               yield* Fiber.interrupt(activePromptFiber.value).pipe(Effect.ignore);
             }
-            yield* acp.agent
-              .cancel({ sessionId: started.sessionId })
-              .pipe(Effect.ignore, Effect.forkIn(runtimeScope));
+            if (Exit.isFailure(notificationExit)) {
+              return yield* Effect.failCause(notificationExit.cause);
+            }
           }),
         ),
       ),

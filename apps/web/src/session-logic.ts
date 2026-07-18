@@ -528,6 +528,7 @@ export function derivePendingUserInputs(
 export function deriveActivePlanState(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
+  latestTurnSettled = false,
 ): ActivePlanState | null {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const allPlanActivities = ordered.filter((activity) => activity.kind === "turn.plan.updated");
@@ -563,7 +564,11 @@ export function deriveActivePlanState(
       continue;
     }
     const status =
-      record.status === "completed" || record.status === "inProgress" ? record.status : "pending";
+      record.status === "completed"
+        ? "completed"
+        : record.status === "inProgress" && !latestTurnSettled
+          ? "inProgress"
+          : "pending";
     steps.push({
       step: record.step,
       status,

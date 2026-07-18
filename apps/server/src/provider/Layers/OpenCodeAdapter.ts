@@ -54,6 +54,7 @@ import {
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+const OPENCODE_ABORT_TIMEOUT = "2 seconds";
 
 interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
@@ -81,6 +82,7 @@ interface OpenCodeSessionContext {
   readonly completedAssistantPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
   activeTurnId: TurnId | undefined;
+  interruptingTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
   /**
@@ -406,6 +408,7 @@ function updateProviderSession(
 
 const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   context: OpenCodeSessionContext,
+  options?: { readonly skipRemoteAbort?: boolean },
 ) {
   // Race-safe one-shot: first caller flips the flag, everyone else no-ops.
   if (yield* Ref.getAndSet(context.stopped, true)) {
@@ -415,9 +418,23 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   // Best-effort remote abort. The scope close below tears down the local
   // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
   // but we still want to tell OpenCode that this session is done.
-  yield* runOpenCodeSdk("session.abort", () =>
-    context.client.session.abort({ sessionID: context.openCodeSessionId }),
-  ).pipe(Effect.ignore({ log: true }));
+  if (options?.skipRemoteAbort !== true) {
+    const abortOutcome = yield* runOpenCodeSdk("session.abort", () =>
+      context.client.session.abort({ sessionID: context.openCodeSessionId }),
+    ).pipe(Effect.exit, Effect.timeoutOption(OPENCODE_ABORT_TIMEOUT));
+    if (Option.isNone(abortOutcome)) {
+      yield* Effect.logWarning("OpenCode session abort timed out during teardown", {
+        threadId: context.session.threadId,
+        openCodeSessionId: context.openCodeSessionId,
+      });
+    } else if (Exit.isFailure(abortOutcome.value)) {
+      yield* Effect.logWarning("OpenCode session abort failed during teardown", {
+        threadId: context.session.threadId,
+        openCodeSessionId: context.openCodeSessionId,
+        cause: Cause.pretty(abortOutcome.value.cause),
+      });
+    }
+  }
 
   // Closing the session scope interrupts every fiber forked into it and
   // runs each finalizer we registered — the `AbortController.abort()` call,
@@ -899,7 +916,11 @@ export function makeOpenCodeAdapter(
             break;
           }
 
-          if (event.properties.status.type === "idle" && turnId) {
+          if (
+            event.properties.status.type === "idle" &&
+            turnId &&
+            context.interruptingTurnId !== turnId
+          ) {
             context.activeTurnId = undefined;
             yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
             yield* emit({
@@ -921,6 +942,7 @@ export function makeOpenCodeAdapter(
           const message = sessionErrorMessage(event.properties.error);
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
+          context.interruptingTurnId = undefined;
           yield* updateProviderSession(
             context,
             {
@@ -1156,6 +1178,7 @@ export function makeOpenCodeAdapter(
           completedAssistantPartIds: new Set(),
           turns: [],
           activeTurnId: undefined,
+          interruptingTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
           stopped: yield* Ref.make(false),
@@ -1297,9 +1320,10 @@ export function makeOpenCodeAdapter(
                     threadId: input.threadId,
                     turnId,
                   })),
-                  type: "turn.aborted",
+                  type: "turn.completed",
                   payload: {
-                    reason: requestError.detail,
+                    state: "failed",
+                    errorMessage: requestError.detail,
                   },
                 });
               }),
@@ -1315,18 +1339,135 @@ export function makeOpenCodeAdapter(
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
-        yield* runOpenCodeSdk("session.abort", () =>
+        const interruptedTurnId = turnId ?? context.activeTurnId;
+        if (
+          turnId !== undefined &&
+          context.activeTurnId !== undefined &&
+          context.activeTurnId !== turnId
+        ) {
+          return;
+        }
+        context.interruptingTurnId = interruptedTurnId;
+        const abortOutcome = yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
-        ).pipe(Effect.mapError(toRequestError));
-        if (turnId ?? context.activeTurnId) {
+        ).pipe(
+          Effect.mapError(toRequestError),
+          Effect.exit,
+          Effect.timeoutOption(OPENCODE_ABORT_TIMEOUT),
+        );
+        const abortFailed = Option.isNone(abortOutcome) || Exit.isFailure(abortOutcome.value);
+
+        // A concurrent full session stop owns terminal session publication.
+        // Do not race it with a second local completion/exit sequence.
+        if (yield* Ref.get(context.stopped)) {
+          return;
+        }
+
+        if (abortFailed) {
+          yield* Effect.logWarning("OpenCode interrupt abort failed; closing the session", {
+            threadId,
+            turnId: interruptedTurnId,
+            ...(Option.isSome(abortOutcome) && Exit.isFailure(abortOutcome.value)
+              ? { cause: Cause.pretty(abortOutcome.value.cause) }
+              : { reason: "timeout" }),
+          });
+        }
+
+        // session.abort is acknowledged by OpenCode, so settle our local
+        // lifecycle immediately instead of waiting indefinitely for a later
+        // session.status=idle event. Clearing activeTurnId also makes a late
+        // idle notification harmless and prevents duplicate completion.
+        if (!interruptedTurnId || context.activeTurnId !== interruptedTurnId) {
+          if (context.interruptingTurnId === interruptedTurnId) {
+            context.interruptingTurnId = undefined;
+          }
+          return;
+        }
+
+        for (const [requestId, request] of context.pendingPermissions) {
           yield* emit({
             ...(yield* buildEventBase({
               threadId,
-              turnId: turnId ?? context.activeTurnId,
+              turnId: interruptedTurnId,
+              requestId,
             })),
-            type: "turn.aborted",
+            type: "request.resolved",
             payload: {
-              reason: "Interrupted by user.",
+              requestType: mapPermissionToRequestType(request.permission),
+              decision: "cancel",
+            },
+          });
+        }
+        context.pendingPermissions.clear();
+
+        for (const requestId of context.pendingQuestions.keys()) {
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId,
+              turnId: interruptedTurnId,
+              requestId,
+            })),
+            type: "user-input.resolved",
+            payload: { answers: {} },
+          });
+        }
+        context.pendingQuestions.clear();
+
+        context.activeTurnId = undefined;
+        context.interruptingTurnId = undefined;
+        context.activeAgent = undefined;
+        context.activeVariant = undefined;
+        yield* updateProviderSession(
+          context,
+          { status: abortFailed ? "closed" : "ready" },
+          { clearActiveTurnId: true },
+        );
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId,
+            turnId: interruptedTurnId,
+          })),
+          type: "turn.completed",
+          payload: {
+            state: "interrupted",
+            stopReason: "cancelled",
+          },
+        });
+
+        if (abortFailed) {
+          // If the control request cannot be acknowledged, keeping the event
+          // pump and owned child process alive would allow work to continue
+          // invisibly. A configured external server is not owned by this
+          // adapter, so also make a bounded attempt to delete its session; the
+          // server treats deletion as the strongest available teardown.
+          const deleteOutcome = yield* runOpenCodeSdk("session.delete", () =>
+            context.client.session.delete({ sessionID: context.openCodeSessionId }),
+          ).pipe(Effect.exit, Effect.timeoutOption(OPENCODE_ABORT_TIMEOUT));
+          if (Option.isNone(deleteOutcome)) {
+            yield* Effect.logWarning("OpenCode session delete timed out after interrupt failure", {
+              threadId,
+              openCodeSessionId: context.openCodeSessionId,
+            });
+          } else if (Exit.isFailure(deleteOutcome.value)) {
+            yield* Effect.logWarning("OpenCode session delete failed after interrupt failure", {
+              threadId,
+              openCodeSessionId: context.openCodeSessionId,
+              cause: Cause.pretty(deleteOutcome.value.cause),
+            });
+          }
+
+          // Tear down the local session after publishing the turn's terminal
+          // event. skipRemoteAbort avoids immediately repeating the same
+          // failed/hung request.
+          yield* stopOpenCodeContext(context, { skipRemoteAbort: true });
+          sessions.delete(threadId);
+          yield* emit({
+            ...(yield* buildEventBase({ threadId })),
+            type: "session.exited",
+            payload: {
+              reason: "OpenCode interrupt failed; session was closed.",
+              recoverable: true,
+              exitKind: "graceful",
             },
           });
         }

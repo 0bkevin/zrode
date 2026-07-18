@@ -65,6 +65,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -99,6 +100,7 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+const CLAUDE_INTERRUPT_HANDSHAKE_TIMEOUT = "2 seconds";
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -1851,7 +1853,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const emitClaudeTaskPlanUpdated = Effect.fn("emitClaudeTaskPlanUpdated")(function* (
     context: ClaudeSessionContext,
     input: {
-      readonly toolUseId: string;
+      readonly toolUseId?: string;
       readonly rawMethod: string;
       readonly rawPayload: unknown;
     },
@@ -1873,9 +1875,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         explanation: "Claude Tasks",
         plan,
       },
-      providerRefs: nativeProviderRefs(context, {
-        providerItemId: input.toolUseId,
-      }),
+      providerRefs: nativeProviderRefs(
+        context,
+        input.toolUseId ? { providerItemId: input.toolUseId } : undefined,
+      ),
       raw: {
         source: "claude.sdk.message",
         method: input.rawMethod,
@@ -1901,10 +1904,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.lastKnownTotalProcessedTokens = accumulatedTotalProcessedTokens;
     }
 
-    const contextUsageSnapshot = yield* queryCurrentContextUsage(
-      context,
-      accumulatedTotalProcessedTokens ?? context.lastKnownTotalProcessedTokens,
-    );
+    // Control-plane shutdown must not depend on another SDK request. In
+    // particular, getContextUsage can remain pending when the query process is
+    // already unhealthy, which previously prevented interrupt/stop from ever
+    // reaching query.close(). Result payloads and the last streamed snapshot
+    // still provide the best available usage for non-successful turns.
+    const contextUsageSnapshot =
+      status === "completed" && !context.stopped
+        ? yield* queryCurrentContextUsage(
+            context,
+            accumulatedTotalProcessedTokens ?? context.lastKnownTotalProcessedTokens,
+          )
+        : undefined;
     const resultUsageRecord =
       result?.usage && typeof result.usage === "object" && !Array.isArray(result.usage)
         ? (result.usage as Record<string, unknown>)
@@ -1987,6 +1998,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         providerRefs: {},
       });
       return;
+    }
+
+    // Claude's task list persists across turns. If a turn is stopped or
+    // fails, an in-progress task cannot still be considered actively running;
+    // move it back to pending and publish the reconciled plan so the task
+    // panel does not keep showing an endless spinner after Stop.
+    if (status !== "completed") {
+      let taskPlanChanged = false;
+      for (const task of context.claudeTasks.values()) {
+        if (task.status === "inProgress") {
+          task.status = "pending";
+          taskPlanChanged = true;
+        }
+      }
+      if (taskPlanChanged) {
+        yield* emitClaudeTaskPlanUpdated(context, {
+          rawMethod: "claude/turn-settled",
+          rawPayload: result ?? { status },
+        });
+      }
     }
 
     for (const [index, tool] of context.inFlightTools.entries()) {
@@ -2983,6 +3014,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     context.pendingApprovals.clear();
 
+    // AskUserQuestion callbacks are independent from approval callbacks and
+    // must also be released during interruption/session teardown.
+    for (const pending of context.pendingUserInputs.values()) {
+      yield* Deferred.succeed(pending.answers, {}).pipe(Effect.ignore);
+    }
+    context.pendingUserInputs.clear();
+
     if (context.turnState) {
       yield* completeTurn(context, "interrupted", "Session stopped.");
     }
@@ -3782,11 +3820,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
-      yield* Effect.tryPromise({
+      const activeTurnId = context.turnState?.turnId ?? context.session.activeTurnId;
+      if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+        return;
+      }
+      const interruptOutcome = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
+      }).pipe(Effect.exit, Effect.timeoutOption(CLAUDE_INTERRUPT_HANDSHAKE_TIMEOUT));
+
+      if (Option.isNone(interruptOutcome)) {
+        yield* Effect.logWarning("Claude interrupt handshake timed out; closing the query", {
+          threadId,
+          turnId: activeTurnId,
+        });
+      } else if (Exit.isFailure(interruptOutcome.value)) {
+        yield* Effect.logWarning("Claude interrupt handshake failed; closing the query", {
+          threadId,
+          turnId: activeTurnId,
+          cause: Cause.pretty(interruptOutcome.value.cause),
+        });
+      }
+
+      // The SDK interrupt control request can resolve before all background
+      // agents have quiesced. Close this query after the interrupt handshake
+      // so its process and stream cannot keep producing work or synthetic
+      // turns. The next user message transparently resumes in a fresh query
+      // from the persisted Claude resume cursor.
+      yield* stopSessionInternal(context, {
+        emitExitEvent: true,
       });
     },
   );
