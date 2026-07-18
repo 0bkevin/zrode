@@ -71,6 +71,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
         const cwd = yield* makeTempDir;
         yield* writeTextFile(cwd, ".ignored", "visible on demand\n");
+        yield* writeTextFile(cwd, ".git/HEAD", "ref: refs/heads/main\n");
         yield* writeTextFile(cwd, "node_modules/package/index.js", "export {};\n");
 
         const root = yield* workspaceFileSystem.listDirectory({ cwd, relativePath: "." });
@@ -85,6 +86,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
             { path: "node_modules", kind: "directory" },
           ]),
         );
+        expect(root.entries.some((entry) => entry.path === ".git")).toBe(false);
         expect(generated).toEqual({
           entries: [{ path: "node_modules/package", kind: "directory" }],
           truncated: false,

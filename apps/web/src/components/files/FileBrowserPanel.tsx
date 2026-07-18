@@ -51,6 +51,7 @@ interface FileBrowserPanelProps {
 }
 
 const OPTIMISTIC_ENTRY_TTL_MS = 10_000;
+const LAZY_DIRECTORY_QUERY_CONCURRENCY = 8;
 
 interface ProjectDirectoryLoaderProps {
   readonly environmentId: EnvironmentId;
@@ -227,6 +228,14 @@ function FileBrowserPanel({
     [lazyDirectoryResults],
   );
   const lazyListingError = lazyDirectoryErrors.values().next().value ?? null;
+  const mountedDirectoryLoaders = useMemo(() => {
+    let pendingCount = 0;
+    return [...requestedDirectories].filter((path) => {
+      if (loadedDirectories.has(path) || lazyDirectoryErrors.has(path)) return true;
+      pendingCount += 1;
+      return pendingCount <= LAZY_DIRECTORY_QUERY_CONCURRENCY;
+    });
+  }, [lazyDirectoryErrors, loadedDirectories, requestedDirectories]);
 
   const handleLazyDirectoryData = useCallback(
     (relativePath: string, result: ProjectListDirectoryResult) => {
@@ -531,11 +540,18 @@ function FileBrowserPanel({
   const toggleIgnoredFiles = useCallback(() => {
     const next = !showIgnoredFiles;
     setShowIgnoredFiles(next);
-    setRequestedDirectories(next ? new Set(["."]) : new Set());
+    setRequestedDirectories(() => {
+      if (!next) return new Set();
+      const expandedDirectories = directoryPaths.filter((path) => {
+        const item = model.getItem(path);
+        return isFileTreeDirectoryHandle(item) && item.isExpanded();
+      });
+      return new Set([".", ...expandedDirectories]);
+    });
     setLazyDirectoryResults(new Map());
     setLazyDirectoryErrors(new Map());
     setSelectedEntry(null);
-  }, [showIgnoredFiles]);
+  }, [directoryPaths, model, showIgnoredFiles]);
 
   const fileCount = useMemo(
     () => entries.reduce((count, entry) => count + (entry.kind === "file" ? 1 : 0), 0),
@@ -570,7 +586,7 @@ function FileBrowserPanel({
       data-file-browser-panel={`${environmentId}:${cwd}`}
     >
       {showIgnoredFiles
-        ? [...requestedDirectories].map((relativePath) => (
+        ? mountedDirectoryLoaders.map((relativePath) => (
             <ProjectDirectoryLoader
               key={relativePath}
               environmentId={environmentId}

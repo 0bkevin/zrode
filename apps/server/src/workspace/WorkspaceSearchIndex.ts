@@ -1,14 +1,12 @@
-// @effect-diagnostics nodeBuiltinImport:off
-import * as NodeFSP from "node:fs/promises";
-import * as NodePath from "node:path";
-
 import { FileFinder, type MixedItem, type MixedSearchResult } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as LayerMap from "effect/LayerMap";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import {
   PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
@@ -17,6 +15,7 @@ import {
   type ProjectListEntriesResult,
   type ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
@@ -24,8 +23,24 @@ const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
 const WORKSPACE_INDEX_IDLE_TTL = "15 minutes";
 const WORKSPACE_INDEX_SCAN_POLL_INTERVAL = "50 millis";
 const WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES = 1_000;
-const WORKSPACE_SUPPLEMENTAL_GLOB = "**/.env*";
-const WORKSPACE_SUPPLEMENTAL_GLOB_EXCLUDES = ["**/.git/**", "**/node_modules/**"];
+const WORKSPACE_SUPPLEMENTAL_MAX_OUTPUT_BYTES = 1024 * 1024;
+const WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS = 5_000;
+const WORKSPACE_SUPPLEMENTAL_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+  "ls-files",
+  "--others",
+  "--ignored",
+  "--exclude-standard",
+  "-z",
+  "--",
+  ".env*",
+  "**/.env*",
+  ":(exclude)node_modules/**",
+  ":(exclude)**/node_modules/**",
+] as const;
 
 interface WorkspaceSupplementalEntries {
   readonly entries: ReadonlyArray<ProjectEntry>;
@@ -217,31 +232,40 @@ function searchSupplementalEntries(
 }
 
 const scanSupplementalEntries = Effect.fn("WorkspaceSearchIndex.scanSupplementalEntries")(
-  function* (cwd: string) {
-    return yield* Effect.tryPromise({
-      try: async (): Promise<WorkspaceSupplementalEntries> => {
-        const entries: ProjectEntry[] = [];
-        let truncated = false;
-        for await (const dirent of NodeFSP.glob(WORKSPACE_SUPPLEMENTAL_GLOB, {
-          cwd,
-          exclude: WORKSPACE_SUPPLEMENTAL_GLOB_EXCLUDES,
-          withFileTypes: true,
-        })) {
-          if (!dirent.isFile() && !dirent.isSymbolicLink()) continue;
-          const relativePath = toPosixPath(
-            NodePath.relative(cwd, NodePath.join(dirent.parentPath, dirent.name)),
-          );
-          if (!isValidProjectEntryPath(relativePath)) continue;
-          if (entries.length >= WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES) {
-            truncated = true;
-            break;
-          }
-          entries.push({ path: relativePath, kind: "file" });
-        }
-        return { entries, truncated };
-      },
-      catch: (cause) => new WorkspaceSearchIndexSupplementalScanFailed({ cwd, cause }),
-    });
+  function* (cwd: string, vcsProcess: VcsProcess.VcsProcess["Service"]) {
+    const result = yield* vcsProcess
+      .run({
+        operation: "WorkspaceSearchIndex.scanSupplementalEntries",
+        command: "git",
+        cwd,
+        args: WORKSPACE_SUPPLEMENTAL_GIT_ARGS,
+        allowNonZeroExit: true,
+        timeoutMs: WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS,
+        maxOutputBytes: WORKSPACE_SUPPLEMENTAL_MAX_OUTPUT_BYTES,
+      })
+      .pipe(
+        Effect.mapError((cause) => new WorkspaceSearchIndexSupplementalScanFailed({ cwd, cause })),
+      );
+
+    // Non-Git workspaces are supported by FileFinder; they simply have no
+    // Git-ignored supplement to merge into its index.
+    if (result.exitCode !== 0) return EMPTY_SUPPLEMENTAL_ENTRIES;
+
+    const paths = result.stdout.split("\0");
+    if (result.stdoutTruncated) paths.pop();
+    const entries: ProjectEntry[] = [];
+    let truncated = result.stdoutTruncated;
+    for (const rawPath of paths) {
+      const relativePath = toPosixPath(rawPath);
+      if (!basenameOf(relativePath).startsWith(".env")) continue;
+      if (!isValidProjectEntryPath(relativePath)) continue;
+      if (entries.length >= WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      entries.push({ path: relativePath, kind: "file" });
+    }
+    return { entries, truncated };
   },
 );
 
@@ -335,25 +359,35 @@ const waitForScan = <E>(cwd: string, finder: FileFinder, onFailure: (cause: unkn
   );
 
 export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: string) {
+  const vcsProcess = Option.getOrUndefined(yield* Effect.serviceOption(VcsProcess.VcsProcess));
+  const refreshSemaphore = yield* Semaphore.make(1);
+  const scanSupplement = () =>
+    vcsProcess === undefined
+      ? Effect.succeed(EMPTY_SUPPLEMENTAL_ENTRIES)
+      : scanSupplementalEntries(cwd, vcsProcess).pipe(recoverSupplementalScan(cwd));
   const finder = yield* Effect.acquireRelease(createFinder(cwd), (finder) =>
     Effect.try({
       try: () => finder.destroy(),
       catch: (cause) => new WorkspaceSearchIndexDestroyFailed({ cwd, cause }),
     }).pipe(Effect.orDie),
   );
-  yield* waitForScan(
-    cwd,
-    finder,
-    (cause) =>
-      new WorkspaceSearchIndexCreateFailed({
+  const [, initialSupplementalEntries] = yield* Effect.all(
+    [
+      waitForScan(
         cwd,
-        reason: "FileFinder.isScanning threw while creating the index.",
-        cause,
-      }),
+        finder,
+        (cause) =>
+          new WorkspaceSearchIndexCreateFailed({
+            cwd,
+            reason: "FileFinder.isScanning threw while creating the index.",
+            cause,
+          }),
+      ),
+      scanSupplement(),
+    ],
+    { concurrency: "unbounded" },
   );
-  let supplementalEntries =
-    (yield* scanSupplementalEntries(cwd).pipe(recoverSupplementalScan(cwd))) ??
-    EMPTY_SUPPLEMENTAL_ENTRIES;
+  let supplementalEntries = initialSupplementalEntries ?? EMPTY_SUPPLEMENTAL_ENTRIES;
 
   const runMixedSearch = Effect.fn("WorkspaceSearchIndex.runMixedSearch")(function* (
     query: string,
@@ -381,9 +415,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
     return result.value;
   });
 
-  const refresh: WorkspaceSearchIndex["Service"]["refresh"] = Effect.fn(
-    "WorkspaceSearchIndex.refresh",
-  )(function* () {
+  const refreshUnlocked = Effect.fn("WorkspaceSearchIndex.refreshUnlocked")(function* () {
     const result = yield* Effect.try({
       try: () => finder.scanFiles(),
       catch: (cause) =>
@@ -399,23 +431,28 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
         reason: result.error,
       });
     }
-    yield* waitForScan(
-      cwd,
-      finder,
-      (cause) =>
-        new WorkspaceSearchIndexRefreshFailed({
+    const [, nextSupplementalEntries] = yield* Effect.all(
+      [
+        waitForScan(
           cwd,
-          reason: "FileFinder.isScanning threw while refreshing the index.",
-          cause,
-        }),
-    );
-    const nextSupplementalEntries = yield* scanSupplementalEntries(cwd).pipe(
-      recoverSupplementalScan(cwd),
+          finder,
+          (cause) =>
+            new WorkspaceSearchIndexRefreshFailed({
+              cwd,
+              reason: "FileFinder.isScanning threw while refreshing the index.",
+              cause,
+            }),
+        ),
+        scanSupplement(),
+      ],
+      { concurrency: "unbounded" },
     );
     if (nextSupplementalEntries !== null) {
       supplementalEntries = nextSupplementalEntries;
     }
   });
+  const refresh: WorkspaceSearchIndex["Service"]["refresh"] = () =>
+    refreshSemaphore.withPermits(1)(refreshUnlocked());
 
   const list: WorkspaceSearchIndex["Service"]["list"] = Effect.fn("WorkspaceSearchIndex.list")(
     function* () {
@@ -456,7 +493,8 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
  * workspace root. WorkspaceSearchIndexMap owns memoization and idle cleanup;
  * using a default cwd here would mix resources from different workspaces.
  */
-export const layer = (cwd: string) => Layer.effect(WorkspaceSearchIndex, make(cwd));
+export const layer = (cwd: string) =>
+  Layer.effect(WorkspaceSearchIndex, make(cwd)).pipe(Layer.provide(VcsProcess.layer));
 
 export class WorkspaceSearchIndexMap extends LayerMap.Service<WorkspaceSearchIndexMap>()(
   "t3/workspace/WorkspaceSearchIndexMap",

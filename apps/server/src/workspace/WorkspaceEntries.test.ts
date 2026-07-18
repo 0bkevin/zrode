@@ -123,6 +123,8 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         yield* writeTextFile(cwd, ".gitignore", ".env*\nignored.txt\n");
         yield* writeTextFile(cwd, ".env", "SECRET=value\n");
         yield* writeTextFile(cwd, "apps/web/.env.local", "LOCAL_SECRET=value\n");
+        yield* writeTextFile(cwd, ".hidden/.env.staging", "STAGING_SECRET=value\n");
+        yield* writeTextFile(cwd, "node_modules/pkg/.env", "DEPENDENCY_SECRET=value\n");
         yield* writeTextFile(cwd, "ignored.txt", "ignore me");
 
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -131,6 +133,8 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
 
         expect(paths).toContain(".env");
         expect(paths).toContain("apps/web/.env.local");
+        expect(paths).toContain(".hidden/.env.staging");
+        expect(paths).not.toContain("node_modules/pkg/.env");
         expect(paths).not.toContain("ignored.txt");
       }),
     );
@@ -245,6 +249,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         yield* writeTextFile(cwd, ".env", "SECRET=value\n");
         yield* writeTextFile(cwd, ".env.local", "LOCAL_SECRET=value\n");
         yield* writeTextFile(cwd, "apps/web/.env.test", "TEST_SECRET=value\n");
+        yield* writeTextFile(cwd, ".hidden/.env.staging", "STAGING_SECRET=value\n");
         yield* writeTextFile(cwd, "ignored.txt", "ignore me");
 
         const result = yield* searchWorkspaceEntries({ cwd, query: "@.env", limit: 10 });
@@ -253,6 +258,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(paths[0]).toBe(".env");
         expect(paths).toContain(".env.local");
         expect(paths).toContain("apps/web/.env.test");
+        expect(paths).toContain(".hidden/.env.staging");
         expect(paths).not.toContain("ignored.txt");
       }),
     );

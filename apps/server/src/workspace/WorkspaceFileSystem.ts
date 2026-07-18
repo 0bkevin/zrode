@@ -9,6 +9,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import {
+  PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES,
   PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS,
   ProjectFileDiskRevision,
   ProjectWriteFilePrecondition,
@@ -44,6 +45,7 @@ import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
 const PROJECT_LIST_DIRECTORY_MAX_ENTRIES = 5_000;
+const PROJECT_LIST_DIRECTORY_MAX_CONCURRENCY = 8;
 const PROJECT_LIST_DIRECTORY_SYMLINK_CONCURRENCY = 32;
 const REVISION_READ_BUFFER_BYTES = 64 * 1024;
 const CREATE_DIRECTORY_STDERR_MAX_BYTES = 4_096;
@@ -456,6 +458,7 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
         ),
       ),
     );
+    const listDirectorySemaphore = yield* Semaphore.make(PROJECT_LIST_DIRECTORY_MAX_CONCURRENCY);
     const writeTargetLocksRef = yield* Ref.make<ReadonlyMap<string, WriteTargetLock>>(new Map());
     const workspaceMutationLocksRef = yield* Ref.make<ReadonlyMap<string, WorkspaceMutationLock>>(
       new Map(),
@@ -1850,9 +1853,9 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
       );
     });
 
-    const listDirectory: WorkspaceFileSystem["Service"]["listDirectory"] = Effect.fn(
-      "WorkspaceFileSystem.listDirectory",
-    )(function* (input) {
+    const listDirectoryUnlocked = Effect.fn("WorkspaceFileSystem.listDirectoryUnlocked")(function* (
+      input: ProjectListDirectoryInput,
+    ) {
       const workspaceRoot = path.resolve(input.cwd);
       const target =
         input.relativePath === "."
@@ -1898,7 +1901,11 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
           }),
       });
       const candidates = directoryEntries
-        .filter((entry) => entry.isDirectory() || entry.isFile() || entry.isSymbolicLink())
+        .filter(
+          (entry) =>
+            entry.name !== ".git" &&
+            (entry.isDirectory() || entry.isFile() || entry.isSymbolicLink()),
+        )
         .toSorted((left, right) => left.name.localeCompare(right.name));
       const truncated = candidates.length > PROJECT_LIST_DIRECTORY_MAX_ENTRIES;
       const limitedCandidates = candidates.slice(0, PROJECT_LIST_DIRECTORY_MAX_ENTRIES);
@@ -1940,7 +1947,11 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
                 const relativePath = baseRelativePath
                   ? `${baseRelativePath}/${entry.name}`
                   : entry.name;
-                if (relativePath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS) {
+                if (
+                  relativePath.length > PROJECT_WORKSPACE_RELATIVE_PATH_MAX_CODE_UNITS ||
+                  Buffer.byteLength(relativePath, "utf8") >
+                    PROJECT_WORKSPACE_RELATIVE_PATH_MAX_BYTES
+                ) {
                   return null;
                 }
                 return {
@@ -1968,6 +1979,8 @@ export const makeWithOptions = (options: WorkspaceFileSystemMakeOptions = {}) =>
 
       return { entries, truncated };
     });
+    const listDirectory: WorkspaceFileSystem["Service"]["listDirectory"] = (input) =>
+      listDirectorySemaphore.withPermits(1)(listDirectoryUnlocked(input));
 
     const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
       "WorkspaceFileSystem.writeFile",
