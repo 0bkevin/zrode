@@ -71,8 +71,7 @@ import { MessageCopyButton } from "./MessageCopyButton";
 import { StreamingAssistantMarkdown } from "./StreamingAssistantMarkdown";
 import type { AssistantNerdStats } from "./messageNerdStats";
 import {
-  computeStableMessagesTimelineRows,
-  deriveMessagesTimelineRows,
+  computeIncrementalMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -80,7 +79,7 @@ import {
   resolveTimelineMinimapHeightStyle,
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapTopPercent,
-  type StableMessagesTimelineRowsState,
+  type IncrementalMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestTurn,
@@ -339,9 +338,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     });
   }, [latestTurn]);
 
-  const rawRows = useMemo(
-    () =>
-      deriveMessagesTimelineRows({
+  const incrementalRowsStateRef = useRef<IncrementalMessagesTimelineRowsState | null>(null);
+  const incrementalRowsState = useMemo(() => {
+    const next = computeIncrementalMessagesTimelineRows(
+      {
         timelineEntries,
         latestTurn,
         runningTurnId,
@@ -354,24 +354,30 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         revertTurnCountByUserMessageId,
         editableUserMessageId,
         canHandOff,
-      }),
-    [
-      timelineEntries,
-      latestTurn,
-      runningTurnId,
-      expandedTurnIds,
-      expandedWorkGroupIds,
-      isWorking,
-      activeTurnStartedAt,
-      assistantNerdStatsByMessageId,
-      turnDiffSummaryByAssistantMessageId,
-      revertTurnCountByUserMessageId,
-      editableUserMessageId,
-      canHandOff,
-    ],
+      },
+      incrementalRowsStateRef.current,
+    );
+    incrementalRowsStateRef.current = next;
+    return next;
+  }, [
+    timelineEntries,
+    latestTurn,
+    runningTurnId,
+    expandedTurnIds,
+    expandedWorkGroupIds,
+    isWorking,
+    activeTurnStartedAt,
+    assistantNerdStatsByMessageId,
+    turnDiffSummaryByAssistantMessageId,
+    revertTurnCountByUserMessageId,
+    editableUserMessageId,
+    canHandOff,
+  ]);
+  const rows = incrementalRowsState.result;
+  const minimapItems = useMemo(
+    () => deriveTimelineMinimapItems(incrementalRowsState.structuralResult),
+    [incrementalRowsState.structuralResult],
   );
-  const rows = useStableRows(rawRows);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
   );
@@ -528,6 +534,17 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ),
     [],
   );
+  const handleMinimapSelect = useCallback(
+    (item: TimelineMinimapItem) => {
+      onManualNavigation();
+      void listRef.current?.scrollToIndex({
+        index: item.rowIndex,
+        animated: true,
+        viewOffset: 24,
+      });
+    },
+    [listRef, onManualNavigation],
+  );
 
   if (rows.length === 0 && !isWorking) {
     return (
@@ -591,14 +608,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             bottomInset={contentInsetEndAdjustment}
             hasPersistentGutter={minimapHasPersistentGutter}
             stripMap={minimapStripMap}
-            onSelect={(item) => {
-              onManualNavigation();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
-            }}
+            onSelect={handleMinimapSelect}
           />
         </div>
       </TimelineRowActivityCtx>
@@ -662,7 +672,10 @@ function resolveFinalAssistantTextForTurn(
     if (row.message.role === "user") {
       break;
     }
-    if (row.message.role === "assistant") {
+    // A live tooltip preview is not worth rebuilding every minimap marker on
+    // each streamed text publication. The settled response is picked up as
+    // soon as the message completes.
+    if (row.message.role === "assistant" && !row.message.streaming) {
       finalAssistantText = row.message.text ?? null;
     }
   }
@@ -686,7 +699,7 @@ function resolveTimelineRowHeight(state: TimelinePositionState, rowIndex: number
   return typeof height === "number" && Number.isFinite(height) ? height : null;
 }
 
-function TimelineMinimap({
+const TimelineMinimap = memo(function TimelineMinimap({
   bottomInset,
   hasPersistentGutter,
   items,
@@ -869,7 +882,7 @@ function TimelineMinimap({
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // TimelineRowContent — the actual row component
@@ -1901,19 +1914,6 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
 
 /** Returns a structurally-shared copy of `rows`: for each row whose content
  *  hasn't changed since last call, the previous object reference is reused. */
-function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
-  const prevState = useRef<StableMessagesTimelineRowsState>({
-    byId: new Map<string, MessagesTimelineRow>(),
-    result: [],
-  });
-
-  return useMemo(() => {
-    const nextState = computeStableMessagesTimelineRows(rows, prevState.current);
-    prevState.current = nextState;
-    return nextState.result;
-  }, [rows]);
-}
-
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------

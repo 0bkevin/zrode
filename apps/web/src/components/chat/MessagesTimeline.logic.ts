@@ -462,7 +462,7 @@ function deriveTurnFolds(input: {
   return foldsByAnchorEntryId;
 }
 
-export function deriveMessagesTimelineRows(input: {
+export interface MessagesTimelineRowsInput {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
   runningTurnId?: TurnId | null;
@@ -475,7 +475,11 @@ export function deriveMessagesTimelineRows(input: {
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
   editableUserMessageId?: MessageId | null;
   canHandOff?: boolean;
-}): MessagesTimelineRow[] {
+}
+
+export function deriveMessagesTimelineRows(
+  input: MessagesTimelineRowsInput,
+): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const durationStartByMessageId = computeMessageDurationStart(
     input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
@@ -655,6 +659,167 @@ export function deriveMessagesTimelineRows(input: {
   }
 
   return nextRows;
+}
+
+export interface IncrementalMessagesTimelineRowsState {
+  readonly input: MessagesTimelineRowsInput;
+  readonly result: MessagesTimelineRow[];
+  /** Stable across suffix-only text updates; used by text-independent projections. */
+  readonly structuralResult: MessagesTimelineRow[];
+  readonly rowIndexById: ReadonlyMap<string, number>;
+  readonly stableRowsState: StableMessagesTimelineRowsState;
+}
+
+function timelineLatestTurnsEqual(
+  left: TimelineLatestTurn | null | undefined,
+  right: TimelineLatestTurn | null | undefined,
+): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      left !== undefined &&
+      right !== null &&
+      right !== undefined &&
+      left.turnId === right.turnId &&
+      left.state === right.state &&
+      left.startedAt === right.startedAt &&
+      left.completedAt === right.completedAt)
+  );
+}
+
+function rowsInputMetadataIsStable(
+  previous: MessagesTimelineRowsInput,
+  next: MessagesTimelineRowsInput,
+): boolean {
+  return (
+    timelineLatestTurnsEqual(previous.latestTurn, next.latestTurn) &&
+    previous.runningTurnId === next.runningTurnId &&
+    previous.expandedTurnIds === next.expandedTurnIds &&
+    previous.expandedWorkGroupIds === next.expandedWorkGroupIds &&
+    previous.isWorking === next.isWorking &&
+    previous.activeTurnStartedAt === next.activeTurnStartedAt &&
+    previous.assistantNerdStatsByMessageId === next.assistantNerdStatsByMessageId &&
+    previous.turnDiffSummaryByAssistantMessageId === next.turnDiffSummaryByAssistantMessageId &&
+    previous.revertTurnCountByUserMessageId === next.revertTurnCountByUserMessageId &&
+    previous.editableUserMessageId === next.editableUserMessageId &&
+    previous.canHandOff === next.canHandOff
+  );
+}
+
+function streamingTimelineEntryCanBePatched(previous: TimelineEntry, next: TimelineEntry): boolean {
+  return (
+    previous.kind === "message" &&
+    next.kind === "message" &&
+    previous.id === next.id &&
+    previous.createdAt === next.createdAt &&
+    previous.message.role === "assistant" &&
+    next.message.role === "assistant" &&
+    previous.message.turnId === next.message.turnId &&
+    previous.message.attachments === next.message.attachments &&
+    previous.message.streaming &&
+    next.message.streaming &&
+    next.message.text.startsWith(previous.message.text)
+  );
+}
+
+function indexTimelineRows(rows: ReadonlyArray<MessagesTimelineRow>): Map<string, number> {
+  const result = new Map<string, number>();
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (row) {
+      result.set(row.id, index);
+    }
+  }
+  return result;
+}
+
+/**
+ * Patch the one visible assistant row changed by a streamed text append.
+ * Turn folding and grouping are structural, so all other input changes use
+ * the full derivation. This keeps the common streaming path proportional to
+ * validation plus one row instead of allocating the complete row graph.
+ */
+export function computeIncrementalMessagesTimelineRows(
+  input: MessagesTimelineRowsInput,
+  previous: IncrementalMessagesTimelineRowsState | null,
+): IncrementalMessagesTimelineRowsState {
+  if (
+    previous !== null &&
+    input.timelineEntries.length === previous.input.timelineEntries.length &&
+    rowsInputMetadataIsStable(previous.input, input)
+  ) {
+    let changedEntryIndex = -1;
+    let patchable = true;
+    for (let index = 0; index < input.timelineEntries.length; index += 1) {
+      const nextEntry = input.timelineEntries[index];
+      const previousEntry = previous.input.timelineEntries[index];
+      if (nextEntry === previousEntry) {
+        continue;
+      }
+      if (
+        changedEntryIndex !== -1 ||
+        !nextEntry ||
+        !previousEntry ||
+        !streamingTimelineEntryCanBePatched(previousEntry, nextEntry)
+      ) {
+        patchable = false;
+        break;
+      }
+      changedEntryIndex = index;
+    }
+
+    if (patchable && changedEntryIndex === -1) {
+      return input.timelineEntries === previous.input.timelineEntries
+        ? previous
+        : { ...previous, input };
+    }
+
+    if (patchable) {
+      const changedEntry = input.timelineEntries[changedEntryIndex];
+      const previousChangedEntry = previous.input.timelineEntries[changedEntryIndex];
+      const rowIndex = changedEntry ? previous.rowIndexById.get(changedEntry.id) : undefined;
+      const previousRow = rowIndex === undefined ? undefined : previous.result[rowIndex];
+      if (
+        changedEntry?.kind === "message" &&
+        previousChangedEntry?.kind === "message" &&
+        rowIndex !== undefined &&
+        previousRow?.kind === "message" &&
+        previousRow.message === previousChangedEntry.message &&
+        !previousRow.showAssistantMeta &&
+        previousRow.assistantCopyStreaming
+      ) {
+        const result = [...previous.result];
+        result[rowIndex] = { ...previousRow, message: changedEntry.message };
+        return {
+          input,
+          result,
+          structuralResult: previous.structuralResult,
+          rowIndexById: previous.rowIndexById,
+          // The changed live row must be rebuilt when a future structural
+          // derive occurs anyway. Keeping the last full stable index here
+          // avoids cloning its complete Map for every streamed suffix.
+          stableRowsState: previous.stableRowsState,
+        };
+      }
+    }
+  }
+
+  const derived = deriveMessagesTimelineRows(input);
+  const stableRowsState = computeStableMessagesTimelineRows(
+    derived,
+    previous?.stableRowsState ?? {
+      byId: new Map(),
+      result: [],
+    },
+  );
+  const result = stableRowsState.result;
+  return {
+    input,
+    result,
+    structuralResult: result,
+    rowIndexById: indexTimelineRows(result),
+    stableRowsState,
+  };
 }
 
 export function computeStableMessagesTimelineRows(

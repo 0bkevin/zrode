@@ -13,6 +13,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  computeStableTimelineEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
   findSidebarProposedPlan,
@@ -1562,6 +1563,93 @@ describe("deriveTimelineEntries", () => {
         implementationThreadId: null,
       },
     });
+  });
+
+  it("patches one growing streaming message without rebuilding historical entries", () => {
+    const historicalMessage = {
+      id: MessageId.make("message-history"),
+      role: "user" as const,
+      text: "Start",
+      createdAt: "2026-02-23T00:00:00.000Z",
+      turnId: null,
+      updatedAt: "2026-02-23T00:00:00.000Z",
+      streaming: false,
+    };
+    const streamingMessage = {
+      id: MessageId.make("message-stream"),
+      role: "assistant" as const,
+      text: "Hello",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      turnId: TurnId.make("turn-stream"),
+      updatedAt: "2026-02-23T00:00:01.000Z",
+      streaming: true,
+    };
+    const proposedPlans: never[] = [];
+    const workEntries: never[] = [];
+    const initial = computeStableTimelineEntries(
+      { messages: [historicalMessage, streamingMessage], proposedPlans, workEntries },
+      null,
+    );
+    const next = computeStableTimelineEntries(
+      {
+        messages: [historicalMessage, { ...streamingMessage, text: "Hello world" }],
+        proposedPlans,
+        workEntries,
+      },
+      initial,
+    );
+
+    expect(next.result).not.toBe(initial.result);
+    expect(next.result[0]).toBe(initial.result[0]);
+    expect(next.result[1]).not.toBe(initial.result[1]);
+    expect(next.structuralMessages).toBe(initial.structuralMessages);
+    expect(next.structuralResult).toBe(initial.structuralResult);
+    expect(next.messageEntryIndexById).toBe(initial.messageEntryIndexById);
+    expect(next.result[1]).toMatchObject({
+      kind: "message",
+      message: { text: "Hello world" },
+    });
+  });
+
+  it("falls back to a full derive when a historical message changes", () => {
+    const historicalMessage = {
+      id: MessageId.make("message-history"),
+      role: "user" as const,
+      text: "Start",
+      createdAt: "2026-02-23T00:00:00.000Z",
+      turnId: null,
+      updatedAt: "2026-02-23T00:00:00.000Z",
+      streaming: false,
+    };
+    const streamingMessage = {
+      id: MessageId.make("message-stream"),
+      role: "assistant" as const,
+      text: "Hello",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      turnId: TurnId.make("turn-stream"),
+      updatedAt: "2026-02-23T00:00:01.000Z",
+      streaming: true,
+    };
+    const proposedPlans: never[] = [];
+    const workEntries: never[] = [];
+    const initial = computeStableTimelineEntries(
+      { messages: [historicalMessage, streamingMessage], proposedPlans, workEntries },
+      null,
+    );
+    const next = computeStableTimelineEntries(
+      {
+        messages: [{ ...historicalMessage, text: "Edited" }, streamingMessage],
+        proposedPlans,
+        workEntries,
+      },
+      initial,
+    );
+
+    expect(next.result[0]).not.toBe(initial.result[0]);
+    expect(next.result[1]).not.toBe(initial.result[1]);
+    expect(next.structuralMessages).not.toBe(initial.structuralMessages);
+    expect(next.structuralResult).not.toBe(initial.structuralResult);
+    expect(next.messageEntryIndexById).not.toBe(initial.messageEntryIndexById);
   });
 });
 
