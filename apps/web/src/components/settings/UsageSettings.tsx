@@ -79,8 +79,9 @@ const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
   claude: "var(--color-orange-600)",
   codex: "var(--color-sky-600)",
   grok: "var(--color-violet-600)",
-  kilocode: "var(--color-pink-600)",
-  opencode: "var(--color-emerald-600)",
+  kilocode: "var(--color-yellow-500)",
+  opencode: "var(--color-zinc-500)",
+  githubCopilot: "var(--color-zinc-600)",
 };
 
 /**
@@ -92,8 +93,9 @@ const PROVIDER_SHARE_HEX: Record<ProviderTokenActivityKind, string> = {
   claude: "#ea580c",
   codex: "#0284c7",
   grok: "#7c3aed",
-  kilocode: "#db2777",
-  opencode: "#059669",
+  kilocode: "#eab308",
+  opencode: "#71717a",
+  githubCopilot: "#52525b",
 };
 
 const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
@@ -102,6 +104,7 @@ const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
   grok: "Grok",
   kilocode: "Kilo Code",
   opencode: "OpenCode",
+  githubCopilot: "GitHub Copilot",
 };
 
 /** Providers with backfillable local token history, in a fixed display order. */
@@ -111,6 +114,7 @@ const HISTORY_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ];
 
 function ProviderIcon({
@@ -131,6 +135,8 @@ function ProviderIcon({
       return <KiloCodeIcon className={className} />;
     case "opencode":
       return <OpenCodeIcon className={className} />;
+    case "githubCopilot":
+      return <GithubCopilotIcon className={className} />;
   }
 }
 
@@ -200,12 +206,11 @@ function formatPercent(value: number): string {
 // dashboards. Grok is handled by the local unified-log scanner alongside the
 // other token-history providers.
 
-type UnmeteredKind = "cursor" | "devin" | "githubCopilot";
+type UnmeteredKind = "cursor" | "devin";
 
 const UNMETERED_DRIVER_TO_KIND: Readonly<Record<string, UnmeteredKind>> = {
   cursor: "cursor",
   devin: "devin",
-  githubCopilot: "githubCopilot",
 };
 
 const UNMETERED_META: Record<
@@ -214,11 +219,6 @@ const UNMETERED_META: Record<
 > = {
   cursor: { label: "Cursor", dashboardUrl: "https://cursor.com/dashboard", icon: CursorIcon },
   devin: { label: "Devin", dashboardUrl: "https://app.devin.ai", icon: DevinIcon },
-  githubCopilot: {
-    label: "GitHub Copilot",
-    dashboardUrl: "https://github.com/settings/billing",
-    icon: GithubCopilotIcon,
-  },
 };
 
 function openDashboard(url: string): void {
@@ -820,11 +820,14 @@ export function StatsRow({ stats }: { stats: UsageStats }) {
 interface ProviderUsageSection {
   readonly provider: ProviderTokenActivityKind;
   readonly stats: UsageStats;
+  readonly calendar: CalendarModel;
+  readonly tokenScale: (tokens: number) => number;
   readonly providerDayLabels: ReadonlyArray<string>;
   readonly providerTokenChart: ReadonlyArray<ChartSeries>;
   readonly pressureDayLabels: ReadonlyArray<string>;
   readonly pressureSeries: ReadonlyArray<ChartSeries>;
   readonly sampledDayCount: number;
+  readonly peakAllowancePercent?: number | null;
   readonly topModel: ReturnType<typeof estimateApiEquivalentCost>["models"][number] | null;
   readonly estimatedCostUsd: number | null;
 }
@@ -882,19 +885,35 @@ export function ProviderUsageCard({
             />
           </span>
         </CollapsibleTrigger>
-        <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
-          <StatTile label="Tokens" value={formatTokens(section.stats.totalTokens)} />
-          <StatTile label="Active days" value={`${section.stats.activeDays}`} />
-          <StatTile
-            label="Top model"
-            value={section.topModel?.model ?? "Not recorded"}
-            hint={section.topModel ? formatTokens(section.topModel.totalTokens) : undefined}
-          />
-          <StatTile
-            label="API estimate"
-            value={section.estimatedCostUsd !== null ? formatUsd(section.estimatedCostUsd) : "—"}
-          />
-        </div>
+        {section.provider === "githubCopilot" ? (
+          <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile
+              label="Premium quota used"
+              value={
+                section.peakAllowancePercent == null
+                  ? "Waiting for sample"
+                  : formatPercent(section.peakAllowancePercent)
+              }
+            />
+            <StatTile label="Sampled days" value={`${section.sampledDayCount}`} />
+            <StatTile label="Usage unit" value="Premium requests" />
+            <StatTile label="Token cost" value="Not reported" />
+          </div>
+        ) : (
+          <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Tokens" value={formatTokens(section.stats.totalTokens)} />
+            <StatTile label="Active days" value={`${section.stats.activeDays}`} />
+            <StatTile
+              label="Top model"
+              value={section.topModel?.model ?? "Not recorded"}
+              hint={section.topModel ? formatTokens(section.topModel.totalTokens) : undefined}
+            />
+            <StatTile
+              label="API estimate"
+              value={section.estimatedCostUsd !== null ? formatUsd(section.estimatedCostUsd) : "—"}
+            />
+          </div>
+        )}
         {hasTokens ? (
           <span className="h-1 w-full overflow-hidden rounded-full bg-muted/50" aria-hidden>
             <span
@@ -926,6 +945,21 @@ export function ProviderUsageCard({
             <StatTile label="Avg. active day" value={formatTokens(average)} />
           </div>
 
+          {hasTokens || hasSamples ? (
+            <div className="flex min-w-0 flex-col gap-2 border-t border-border/40 pt-3">
+              <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+                Activity calendar
+              </span>
+              <UsageHeatmap
+                calendar={section.calendar}
+                provider={section.provider}
+                tokenScale={section.tokenScale}
+                label={`${PROVIDER_LABEL[section.provider]} activity calendar`}
+              />
+              <HeatmapLegend provider={section.provider} />
+            </div>
+          ) : null}
+
           {modelRows.length > 0 ? (
             <div className="flex min-w-0 flex-col gap-2 border-t border-border/40 pt-3">
               <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
@@ -935,7 +969,7 @@ export function ProviderUsageCard({
             </div>
           ) : null}
 
-          {section.providerTokenChart.length > 0 || section.sampledDayCount >= 2 ? (
+          {section.providerTokenChart.length > 0 || section.sampledDayCount >= 1 ? (
             <div className="grid min-w-0 gap-4 border-t border-border/40 pt-3 lg:grid-cols-2">
               {section.providerTokenChart.length > 0 ? (
                 <div className="min-w-0">
@@ -951,7 +985,7 @@ export function ProviderUsageCard({
                   />
                 </div>
               ) : null}
-              {section.sampledDayCount >= 2 ? (
+              {section.sampledDayCount >= 1 ? (
                 <div className="min-w-0">
                   <span className="text-[10px] text-muted-foreground/60">
                     Peak allowance pressure
@@ -1551,6 +1585,10 @@ export function UsageSettingsPanel() {
           }
         }
         const stats = computeStats(providerByDay, today);
+        const providerCalendar = buildCalendar({ byDay: providerByDay, weeksCount, today });
+        const providerTokenScale = makeTokenLevelScale(
+          [...providerByDay.values()].flat().map((usage) => usage.tokens),
+        );
         const providerDaily = buildTokenSeries(providerByDay, calendar.startKey, todayKey);
         const providerPoints =
           tokenMode === "cumulative" ? toCumulativeSeries(providerDaily) : providerDaily;
@@ -1581,6 +1619,8 @@ export function UsageSettingsPanel() {
           }
         }
         const sampledDayCount = sampleByDay.size;
+        const peakAllowancePercent =
+          sampledDayCount === 0 ? null : Math.max(...sampleByDay.values());
         const pressureDayLabels = providerDaily.map((point) => formatDayLabel(point.day));
         const pressureSeries: ReadonlyArray<ChartSeries> = [
           {
@@ -1594,11 +1634,14 @@ export function UsageSettingsPanel() {
         return {
           provider,
           stats,
+          calendar: providerCalendar,
+          tokenScale: providerTokenScale,
           providerDayLabels,
           providerTokenChart,
           pressureDayLabels,
           pressureSeries,
           sampledDayCount,
+          peakAllowancePercent,
           topModel: topModel ?? null,
           estimatedCostUsd: apiCostEstimate.providerCosts.get(provider) ?? null,
         };
@@ -1606,6 +1649,7 @@ export function UsageSettingsPanel() {
     [
       visibleByDay,
       today,
+      weeksCount,
       calendar.startKey,
       todayKey,
       tokenMode,

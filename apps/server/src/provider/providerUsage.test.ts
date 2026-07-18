@@ -36,6 +36,7 @@ import {
   parseCodexResetCredits,
   parseGrokAuthCredentials,
   parseGrokBilling,
+  parseGitHubCopilotUsage,
   parseKiloAuthCredentials,
   parseKiloBalance,
   parseKiloPassWindow,
@@ -47,6 +48,31 @@ import {
   usageSettingsKey,
   WEEKLY_WINDOW_MINUTES,
 } from "./providerUsage.ts";
+
+describe("parseGitHubCopilotUsage", () => {
+  it("maps premium requests and suppresses unlimited buckets", () => {
+    const reset = "2026-08-01T00:00:00Z";
+    const parsed = parseGitHubCopilotUsage(
+      {
+        copilot_plan: "individual_pro",
+        quota_reset_date: reset,
+        quota_snapshots: {
+          premium_interactions: { entitlement: 300, remaining: 90, percent_remaining: 30 },
+          chat: { entitlement: -1, remaining: -1, unlimited: true },
+          completions: { entitlement: 0, remaining: 0 },
+        },
+      },
+      123,
+    );
+    expect(parsed?.weekly).toMatchObject({
+      label: "Premium requests",
+      usedPercent: 70,
+      resetsAt: Date.parse(reset),
+    });
+    expect(parsed?.extraLimits).toEqual([]);
+    expect(parsed?.planLabel).toBe("Individual Pro");
+  });
+});
 
 const TestLayer = Layer.mergeAll(ProcessRunner.layer, FetchHttpClient.layer).pipe(
   Layer.provideMerge(NodeServicesLayer),
@@ -61,6 +87,7 @@ const DISABLED_SETTINGS: ServerSettings = {
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
     grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
     kilocode: { ...DEFAULT_SERVER_SETTINGS.providers.kilocode, enabled: false },
+    githubCopilot: { ...DEFAULT_SERVER_SETTINGS.providers.githubCopilot, enabled: false },
   },
 };
 
@@ -937,6 +964,7 @@ describe("getProviderUsage caching", () => {
     Effect.gen(function* () {
       const result = yield* getProviderUsage(DISABLED_SETTINGS);
       expect(result.usage.map((snapshot) => snapshot.status)).toEqual([
+        "unavailable",
         "unavailable",
         "unavailable",
         "unavailable",

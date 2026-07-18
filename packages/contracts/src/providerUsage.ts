@@ -9,7 +9,13 @@ import * as Effect from "effect/Effect";
 // surfaced in the client status UI as "session" (~5h) and "weekly" (~7d)
 // meters.
 
-export const ProviderUsageProviderKind = Schema.Literals(["claude", "codex", "grok", "kilocode"]);
+export const ProviderUsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "grok",
+  "kilocode",
+  "githubCopilot",
+]);
 export type ProviderUsageProviderKind = typeof ProviderUsageProviderKind.Type;
 
 export const ProviderUsageStatus = Schema.Literals([
@@ -138,6 +144,7 @@ export const ProviderTokenActivityKind = Schema.Literals([
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ]);
 export type ProviderTokenActivityKind = typeof ProviderTokenActivityKind.Type;
 

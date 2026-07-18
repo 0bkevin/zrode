@@ -26,6 +26,7 @@ import {
   parseCodexRolloutLine,
   parseCodexTurnContextModel,
   parseGrokUnifiedLog,
+  parseGitHubCopilotEventLine,
   parseOpenCodeMessageFile,
   USAGE_HISTORY_RETENTION_DAYS,
 } from "./ProviderUsageHistory.ts";
@@ -440,6 +441,80 @@ describe("token log parsing", () => {
     );
     assert.strictEqual(parsed?.tokens, 12);
     assert.isNull(parsed?.recordedCostUsd);
+  });
+
+  it("preserves positive OpenCode costs for direct cloud providers", () => {
+    for (const providerID of ["google-vertex", "azure", "amazon-bedrock"]) {
+      const parsed = parseOpenCodeMessageFile(
+        JSON.stringify({
+          id: `msg_${providerID}`,
+          role: "assistant",
+          providerID,
+          modelID: "provider-model",
+          cost: 12.34,
+          time: { created: 100 },
+          tokens: { total: 12, input: 10, output: 2 },
+        }),
+      );
+      assert.strictEqual(parsed?.recordedCostUsd, 12.34);
+    }
+  });
+
+  it("attributes OpenCode traffic routed through Copilot to GitHub Copilot", () => {
+    const parsed = parseOpenCodeMessageFile(
+      JSON.stringify({
+        id: "msg_copilot",
+        role: "assistant",
+        providerID: "github-copilot",
+        modelID: "gpt-5.3-codex",
+        cost: 0,
+        time: { created: 100 },
+        tokens: { total: 12, input: 10, output: 2 },
+      }),
+    );
+    assert.strictEqual(parsed?.provider, "githubCopilot");
+    assert.strictEqual(parsed?.model, "github-copilot/gpt-5.3-codex");
+    assert.isNull(parsed?.recordedCostUsd);
+  });
+
+  it("parses native Copilot CLI per-model session metrics", () => {
+    const entries = parseGitHubCopilotEventLine(
+      JSON.stringify({
+        type: "session.shutdown",
+        id: "shutdown-1",
+        timestamp: "2026-05-19T07:54:38.792Z",
+        data: {
+          modelMetrics: {
+            "gpt-5-mini": {
+              usage: {
+                inputTokens: 100,
+                outputTokens: 20,
+                cacheReadTokens: 30,
+                cacheWriteTokens: 4,
+                reasoningTokens: 5,
+              },
+            },
+          },
+        },
+      }),
+    );
+    assert.deepStrictEqual(entries, [
+      {
+        entryKey: "shutdown-1:gpt-5-mini",
+        epochMs: Date.parse("2026-05-19T07:54:38.792Z"),
+        tokens: 159,
+        model: "gpt-5-mini",
+        inputTokens: 100,
+        cachedInputTokens: 30,
+        cacheWriteTokens: 4,
+        cacheWrite1hTokens: 0,
+        outputTokens: 25,
+        recordedCostUsd: null,
+        isFast: false,
+        usesLongContext: false,
+        dedupPriority: 0,
+      },
+    ]);
   });
 
   it("marks BYO OpenCode requests with provider-specific long-context tiers", () => {
@@ -883,6 +958,37 @@ const freshTables = Effect.gen(function* () {
 });
 
 layer("ProviderUsageHistory", (it) => {
+  it.effect("returns persisted GitHub Copilot token and model history", () =>
+    Effect.gen(function* () {
+      yield* freshTables;
+      const history = yield* make;
+      const sql = yield* SqlClient.SqlClient;
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO provider_token_entries (
+          provider, entry_key, sampled_epoch_ms, tokens, model,
+          input_tokens, cached_input_tokens, cache_write_tokens,
+          cache_write_1h_tokens, output_tokens, recorded_cost_usd,
+          is_fast, dedup_priority, uses_long_context
+        ) VALUES (
+          'githubCopilot', 'copilot-entry', ${now}, 159, 'gpt-5-mini',
+          100, 30, 4, 0, 25, NULL, 0, 0, 0
+        )
+      `;
+
+      const result = yield* history.readHistory({ days: 30 }, TEST_SETTINGS);
+      assert.deepStrictEqual(
+        result.tokenActivity.map(({ provider, tokens }) => ({ provider, tokens })),
+        [{ provider: "githubCopilot", tokens: 159 }],
+      );
+      assert.include(result.modelActivity[0], {
+        provider: "githubCopilot",
+        model: "gpt-5-mini",
+        totalTokens: 159,
+      });
+    }),
+  );
+
   it.effect("records ok snapshots and aggregates them per provider per day", () =>
     Effect.gen(function* () {
       yield* freshTables;

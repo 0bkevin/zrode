@@ -1306,7 +1306,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverGetProviderUsageHistory,
             serverSettings.getSettings.pipe(
-              Effect.flatMap((settings) => providerUsageHistory.readHistory(input, settings)),
+              Effect.flatMap((settings) =>
+                getProviderUsage(settings).pipe(
+                  Effect.tap((result) => providerUsageHistory.record(result)),
+                  Effect.andThen(providerUsageHistory.readHistory(input, settings)),
+                ),
+              ),
               Effect.catch((error) =>
                 Effect.gen(function* () {
                   yield* Effect.logWarning("Failed to read settings for provider usage history", {

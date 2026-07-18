@@ -92,6 +92,8 @@ export class ProviderUsageHistory extends Context.Service<
 // ── Log-line parsing (pure, exported for tests) ──────────────────────
 
 export interface ParsedTokenEntry {
+  /** Override the source provider when a gateway log identifies the real subscription. */
+  readonly provider?: ProviderTokenActivityKind;
   readonly entryKey: string;
   readonly epochMs: number;
   readonly tokens: number;
@@ -686,13 +688,18 @@ export function parseOpenCodeMessageFile(
     modelId.length > 0 ? (providerId.length > 0 ? `${providerId}/${modelId}` : modelId) : null;
   const isHostedGateway = providerId === "opencode" || providerId === "opencode-go";
   const recordedCost =
-    isHostedGateway &&
     typeof record.cost === "number" &&
     Number.isFinite(record.cost) &&
-    record.cost >= 0
+    // OpenCode calculates this ledger value from the exact provider/model
+    // catalog active for the request. Positive BYO charges (Vertex, Azure,
+    // Bedrock, etc.) are therefore more precise than re-pricing a stripped
+    // model alias later. BYO providers also emit zero as an unknown-price
+    // placeholder, so only hosted gateways may treat zero as authoritative.
+    (record.cost > 0 || (isHostedGateway && record.cost === 0))
       ? record.cost
       : null;
   return {
+    ...(providerId === "github-copilot" ? { provider: "githubCopilot" as const } : {}),
     entryKey: id,
     epochMs,
     tokens,
@@ -709,6 +716,61 @@ export function parseOpenCodeMessageFile(
       usesKnownLongContextTier(qualifiedModel, inputTokens + cachedInputTokens + cacheWriteTokens),
     dedupPriority: 0,
   };
+}
+
+/** Parse Copilot CLI's final per-model session accounting event. */
+export function parseGitHubCopilotEventLine(line: string): ReadonlyArray<ParsedTokenEntry> {
+  let record: Record<string, unknown>;
+  try {
+    record = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  if (record.type !== "session.shutdown") return [];
+  const data = record.data;
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return [];
+  const eventId = typeof record.id === "string" ? record.id : null;
+  const epochMs = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
+  const metrics = (data as Record<string, unknown>).modelMetrics;
+  if (
+    eventId === null ||
+    !Number.isFinite(epochMs) ||
+    metrics === null ||
+    typeof metrics !== "object" ||
+    Array.isArray(metrics)
+  ) {
+    return [];
+  }
+  return Object.entries(metrics as Record<string, unknown>).flatMap(([model, raw]) => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const usage = (raw as Record<string, unknown>).usage;
+    if (usage === null || typeof usage !== "object" || Array.isArray(usage)) return [];
+    const values = usage as Record<string, unknown>;
+    const inputTokens = asFiniteNumber(values.inputTokens);
+    const cachedInputTokens = asFiniteNumber(values.cacheReadTokens);
+    const cacheWriteTokens = asFiniteNumber(values.cacheWriteTokens);
+    const outputTokens =
+      asFiniteNumber(values.outputTokens) + asFiniteNumber(values.reasoningTokens);
+    const tokens = inputTokens + cachedInputTokens + cacheWriteTokens + outputTokens;
+    if (tokens <= 0) return [];
+    return [
+      {
+        entryKey: `${eventId}:${model}`,
+        epochMs,
+        tokens,
+        model,
+        inputTokens,
+        cachedInputTokens,
+        cacheWriteTokens,
+        cacheWrite1hTokens: 0,
+        outputTokens,
+        recordedCostUsd: null,
+        isFast: false,
+        usesLongContext: false,
+        dedupPriority: 0,
+      },
+    ];
+  });
 }
 
 interface GrokParseState {
@@ -879,6 +941,7 @@ const RATE_LIMIT_PROVIDERS: ReadonlyArray<ProviderUsageProviderKind> = [
   "codex",
   "grok",
   "kilocode",
+  "githubCopilot",
 ];
 /** Providers whose per-message token usage is backfillable from local logs. */
 const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
@@ -886,6 +949,7 @@ const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "codex",
   "grok",
   "opencode",
+  "githubCopilot",
 ];
 
 function isRateLimitProvider(provider: string): provider is ProviderUsageProviderKind {
@@ -911,7 +975,7 @@ interface TokenLogSource {
    * on mtime/size change. "message-json": one immutable message per file —
    * once parsed a file never changes, so it's skipped on later scans.
    */
-  readonly format: "jsonl" | "message-json" | "opencode-sqlite";
+  readonly format: "jsonl" | "message-json" | "opencode-sqlite" | "github-copilot-jsonl";
   /** Optional exact filename matcher inside the source directory. */
   readonly accepts?: (filename: string) => boolean;
 }
@@ -1123,6 +1187,21 @@ export const make = Effect.gen(function* () {
           accepts: (filename) => /^opencode(?:-[^.]+)?\.db$/.test(filename),
         });
       }
+      const copilotEnabled = Object.values(settings.providerInstances).some(
+        (instance) => instance.driver === "githubCopilot" && instance.enabled !== false,
+      );
+      if (copilotEnabled || settings.providers.githubCopilot.enabled) {
+        const configuredHome = settings.providers.githubCopilot.homePath.trim();
+        const copilotHome =
+          configuredHome.length > 0 ? configuredHome : path.join(NodeOS.homedir(), ".copilot");
+        sources.push({
+          provider: "githubCopilot",
+          directory: path.join(copilotHome, "session-state"),
+          extension: ".jsonl",
+          format: "github-copilot-jsonl",
+          accepts: (filename) => filename === "events.jsonl",
+        });
+      }
       return sources;
     }).pipe(Effect.provideService(Path.Path, path));
 
@@ -1181,6 +1260,8 @@ export const make = Effect.gen(function* () {
             } else if (source.provider === "grok" && grokState !== null) {
               const parsed = parseGrokLogLine(line, grokState);
               if (parsed !== null) entries.push(parsed);
+            } else if (source.format === "github-copilot-jsonl") {
+              entries.push(...parseGitHubCopilotEventLine(line));
             }
           }),
         ),
@@ -1214,6 +1295,7 @@ export const make = Effect.gen(function* () {
             `;
           }
           for (const entry of entries) {
+            const entryProvider = entry.provider ?? source.provider;
             const claudeDedup = source.provider === "claude" ? entry.claudeDedup : undefined;
             if (claudeDedup?.isSidechain === true) {
               const requestPrefix = claudeRequestEntryPrefix(claudeDedup.groupKey);
@@ -1257,7 +1339,7 @@ export const make = Effect.gen(function* () {
                 uses_long_context
               )
               VALUES (
-                ${source.provider},
+                ${entryProvider},
                 ${entry.entryKey},
                 ${entry.epochMs},
                 ${entry.tokens},

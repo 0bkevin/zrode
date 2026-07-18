@@ -186,6 +186,25 @@ describe("ProviderUsageCard", () => {
             longestStreak: 5,
             peakDay: { key: "2026-06-16", tokens: 900_000, percent: null },
           },
+          calendar: buildCalendar({
+            byDay: new Map([
+              [
+                "2026-06-16",
+                [
+                  {
+                    provider: "codex",
+                    tokens: 900_000,
+                    models: [],
+                    peakSessionPercent: null,
+                    peakWeeklyPercent: null,
+                  },
+                ],
+              ],
+            ]),
+            weeksCount: 12,
+            today: new Date(2026, 6, 18),
+          }),
+          tokenScale: makeTokenLevelScale([900_000]),
           providerDayLabels: [],
           providerTokenChart: [],
           pressureDayLabels: [],

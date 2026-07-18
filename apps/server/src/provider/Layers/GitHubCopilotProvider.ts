@@ -171,6 +171,11 @@ function resolveGitHubCopilotAuth(environment: NodeJS.ProcessEnv | undefined): S
   return resolveGitHubCopilotEnvironmentAuth(environment) ?? { status: "unknown" };
 }
 
+/** AWS Copilot also installs a `copilot` executable, but it is not an ACP client. */
+export function isAwsCopilotCliVersionOutput(output: string): boolean {
+  return /^copilot version:\s*v\d+(?:\.\d+){2}/im.test(output);
+}
+
 export const checkGitHubCopilotProviderStatus = Effect.fn("checkGitHubCopilotProviderStatus")(
   function* (
     copilotSettings: GitHubCopilotSettings,
@@ -240,7 +245,8 @@ export const checkGitHubCopilotProviderStatus = Effect.fn("checkGitHubCopilotPro
     }
 
     const versionOutput = versionResult.success.value;
-    const version = parseGenericCliVersion(`${versionOutput.stdout}\n${versionOutput.stderr}`);
+    const combinedVersionOutput = `${versionOutput.stdout}\n${versionOutput.stderr}`;
+    const version = parseGenericCliVersion(combinedVersionOutput);
     if (versionOutput.code !== 0) {
       yield* Effect.logWarning("GitHub Copilot CLI version probe exited with a non-zero status.", {
         exitCode: versionOutput.code,
@@ -258,6 +264,23 @@ export const checkGitHubCopilotProviderStatus = Effect.fn("checkGitHubCopilotPro
           status: "error",
           auth: { status: "unknown" },
           message: "GitHub Copilot CLI is installed but failed to run.",
+        },
+      });
+    }
+
+    if (isAwsCopilotCliVersionOutput(combinedVersionOutput)) {
+      return buildServerProvider({
+        presentation: GITHUB_COPILOT_PRESENTATION,
+        enabled: copilotSettings.enabled,
+        checkedAt,
+        models: fallbackModels,
+        probe: {
+          installed: false,
+          version,
+          status: "error",
+          auth: { status: "unknown" },
+          message:
+            "The configured `copilot` executable is AWS Copilot, not GitHub Copilot CLI. Install `@github/copilot` and select its binary path.",
         },
       });
     }

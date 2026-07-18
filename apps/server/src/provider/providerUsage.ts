@@ -99,6 +99,7 @@ const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`;
 const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
 const GROK_DEFAULT_API_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 const KILO_DEFAULT_API_BASE_URL = "https://api.kilo.ai";
+const GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 const GROK_AUTH_REFRESH_TIMEOUT = "15 seconds" as const;
 const CLAUDE_USAGE_RATE_LIMIT_MESSAGE =
   "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.";
@@ -284,6 +285,7 @@ const PROVIDER_USAGE_KINDS = [
   "codex",
   "grok",
   "kilocode",
+  "githubCopilot",
 ] as const satisfies ReadonlyArray<ProviderUsageProviderKind>;
 
 function providerUsageFetchResult(
@@ -329,6 +331,7 @@ export function usageSettingsKey(settings: ServerSettings): string {
     codexUsageSettingsKey(settings.providers.codex),
     grokUsageSettingsKey(settings.providers.grok),
     kiloUsageSettingsKey(settings),
+    githubCopilotUsageSettingsKey(settings),
   ]);
 }
 
@@ -413,6 +416,38 @@ function kiloUsageSettingsKey(settings: ServerSettings): string {
   ]);
 }
 
+const GITHUB_COPILOT_DRIVER_KIND = ProviderDriverKind.make("githubCopilot");
+const GITHUB_COPILOT_DEFAULT_INSTANCE_ID = ProviderInstanceId.make("githubCopilot");
+
+function githubCopilotUsageEnvironment(settings: ServerSettings): NodeJS.ProcessEnv {
+  const instance = settings.providerInstances[GITHUB_COPILOT_DEFAULT_INSTANCE_ID];
+  return {
+    ...process.env,
+    ...(instance?.driver === GITHUB_COPILOT_DRIVER_KIND
+      ? environmentRecord(instance.environment)
+      : undefined),
+  };
+}
+
+function githubCopilotUsageEnabled(settings: ServerSettings): boolean {
+  const instance = settings.providerInstances[GITHUB_COPILOT_DEFAULT_INSTANCE_ID];
+  if (instance?.driver === GITHUB_COPILOT_DRIVER_KIND && instance.enabled !== undefined) {
+    return instance.enabled;
+  }
+  return settings.providers.githubCopilot.enabled;
+}
+
+function githubCopilotUsageSettingsKey(settings: ServerSettings): string {
+  const environment = githubCopilotUsageEnvironment(settings);
+  return JSON.stringify([
+    githubCopilotUsageEnabled(settings),
+    environment.XDG_CONFIG_HOME?.trim() ?? "",
+    Boolean(environment.COPILOT_GITHUB_TOKEN?.trim()),
+    Boolean(environment.GH_TOKEN?.trim()),
+    Boolean(environment.GITHUB_TOKEN?.trim()),
+  ]);
+}
+
 export function providerUsageSettingsKey(
   provider: ProviderUsageProviderKind,
   settings: ServerSettings,
@@ -428,6 +463,8 @@ export function providerUsageSettingsKey(
       return grokUsageSettingsKey(settings.providers.grok);
     case "kilocode":
       return kiloUsageSettingsKey(settings);
+    case "githubCopilot":
+      return githubCopilotUsageSettingsKey(settings);
   }
 }
 
@@ -1554,6 +1591,208 @@ export const fetchKiloUsage = Effect.fn("fetchKiloUsage")(function* (settings: S
   return (yield* fetchKiloUsageResult(settings)).snapshot;
 });
 
+// ── GitHub Copilot ──────────────────────────────────────────────────
+
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function copilotQuotaWindow(raw: unknown, label: string, resetsAt: number | null) {
+  const bucket = unknownRecord(raw);
+  if (bucket === null || bucket.unlimited === true) return null;
+  const entitlement = bucket.entitlement;
+  const remaining = bucket.remaining;
+  const percentRemaining = bucket.percent_remaining;
+  // GitHub uses -1 for unlimited legacy buckets. A zero entitlement is also
+  // a placeholder rather than meaningful usage.
+  if (entitlement === -1 || remaining === -1 || entitlement === 0) return null;
+  let usedPercent: number | null = null;
+  if (typeof percentRemaining === "number" && Number.isFinite(percentRemaining)) {
+    usedPercent = 100 - percentRemaining;
+  } else if (
+    typeof entitlement === "number" &&
+    entitlement > 0 &&
+    typeof remaining === "number" &&
+    Number.isFinite(remaining)
+  ) {
+    usedPercent = 100 - (remaining / entitlement) * 100;
+  }
+  if (usedPercent === null) return null;
+  return {
+    label,
+    usedPercent: clampPercent(usedPercent),
+    windowMinutes: null,
+    resetsAt: normalizeResetsAt(bucket.quota_reset_at) ?? resetsAt,
+  } satisfies ProviderUsageWindow;
+}
+
+/** Maps GitHub's personal Copilot quota response using OpenUsage's bucket rules. */
+export function parseGitHubCopilotUsage(
+  payload: unknown,
+  updatedAt: number,
+): ProviderUsageSnapshot | null {
+  const root = unknownRecord(payload);
+  if (root === null) return null;
+  const snapshots = unknownRecord(root.quota_snapshots);
+  const legacy = unknownRecord(root.limited_user_quotas) ?? unknownRecord(root.monthly_quotas);
+  const buckets = snapshots ?? legacy;
+  if (buckets === null) return null;
+  const resetsAt = normalizeResetsAt(root.quota_reset_date ?? root.limited_user_reset_date);
+  const premium = copilotQuotaWindow(buckets.premium_interactions, "Premium requests", resetsAt);
+  const chat = copilotQuotaWindow(buckets.chat, "Chat", resetsAt);
+  const completions = copilotQuotaWindow(buckets.completions, "Completions", resetsAt);
+  const primary = premium ?? chat ?? completions;
+  const extras = [chat, completions].flatMap((window) =>
+    window === null || window === primary
+      ? []
+      : [{ label: window.label, session: null, weekly: window }],
+  );
+  const rawPlan = root.copilot_plan;
+  const planLabel =
+    typeof rawPlan === "string" && rawPlan.trim().length > 0
+      ? rawPlan
+          .trim()
+          .split(/[_-]/)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ")
+      : null;
+  return {
+    ...usageSnapshot("githubCopilot", "ok", null, updatedAt),
+    weekly: primary,
+    extraLimits: extras,
+    planLabel,
+    detailsUrl: "https://github.com/settings/billing",
+  };
+}
+
+function parseCopilotTokenFile(raw: string): string | null {
+  try {
+    const root = unknownRecord(JSON.parse(raw));
+    if (root === null) return null;
+    for (const [key, value] of Object.entries(root)) {
+      if (key !== "github.com" && !key.startsWith("github.com:")) continue;
+      const token = unknownRecord(value)?.oauth_token;
+      if (typeof token === "string" && token.trim().length > 0) return token.trim();
+    }
+  } catch {
+    // Malformed auth files are treated as absent, matching other providers.
+  }
+  return null;
+}
+
+const resolveGitHubCopilotToken = Effect.fn("resolveGitHubCopilotToken")(function* (
+  settings: ServerSettings,
+) {
+  const environment = githubCopilotUsageEnvironment(settings);
+  for (const key of ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
+    const token = environment[key]?.trim();
+    if (token) return token;
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const configHome = environment.XDG_CONFIG_HOME?.trim() || path.join(NodeOS.homedir(), ".config");
+  for (const filename of ["apps.json", "hosts.json"] as const) {
+    const token = yield* fs.readFileString(path.join(configHome, "github-copilot", filename)).pipe(
+      Effect.map(parseCopilotTokenFile),
+      Effect.orElseSucceed(() => null),
+    );
+    if (token !== null) return token;
+  }
+  // GitHub CLI commonly keeps its OAuth token in the OS credential store,
+  // leaving hosts.yml without an oauth_token. `gh auth token` resolves both
+  // file and keychain-backed authentication without exposing it to the UI.
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const ghToken = yield* processRunner
+    .run({
+      command: "gh",
+      args: ["auth", "token", "--hostname", "github.com"],
+      timeout: "5 seconds",
+    })
+    .pipe(Effect.orElseSucceed(() => null));
+  if (ghToken !== null && ghToken.code === 0 && ghToken.stdout.trim().length > 0) {
+    return ghToken.stdout.trim();
+  }
+  return null;
+});
+
+const fetchGitHubCopilotUsageResult = Effect.fn("fetchGitHubCopilotUsageResult")(function* (
+  settings: ServerSettings,
+) {
+  const startedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (!githubCopilotUsageEnabled(settings)) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "githubCopilot",
+        "unavailable",
+        "GitHub Copilot is disabled in Zrode settings.",
+        startedAt,
+      ),
+    );
+  }
+  const token = yield* resolveGitHubCopilotToken(settings);
+  if (token === null) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "githubCopilot",
+        "unauthenticated",
+        "No GitHub Copilot credentials were found. Sign in with the Copilot CLI first.",
+        startedAt,
+      ),
+    );
+  }
+  const response = yield* fetchJsonWithTimeout(
+    HttpClientRequest.get(GITHUB_COPILOT_USAGE_URL).pipe(
+      HttpClientRequest.setHeaders({
+        Authorization: `token ${token}`,
+        Accept: "application/json",
+        "Editor-Version": "vscode/1.96.2",
+        "Editor-Plugin-Version": "copilot-chat/0.26.7",
+        "User-Agent": "GitHubCopilotChat/0.26.7",
+        "X-Github-Api-Version": "2025-04-01",
+      }),
+    ),
+  );
+  const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  if (response === null) {
+    return providerUsageFetchResult(
+      usageSnapshot("githubCopilot", "error", "Failed to reach GitHub Copilot usage.", updatedAt),
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "githubCopilot",
+        "unauthenticated",
+        "The GitHub Copilot session is not authorized for usage data.",
+        updatedAt,
+      ),
+    );
+  }
+  if (response.status === 429) {
+    return providerUsageFetchResult(
+      usageSnapshot(
+        "githubCopilot",
+        "error",
+        "GitHub Copilot usage is temporarily rate limited.",
+        updatedAt,
+      ),
+      { mainBackoffTtlMs: rateLimitTtlMs(response.retryAfterMs) },
+    );
+  }
+  const snapshot = parseGitHubCopilotUsage(response.payload, updatedAt);
+  return providerUsageFetchResult(
+    snapshot ??
+      usageSnapshot(
+        "githubCopilot",
+        "error",
+        "GitHub returned an unexpected Copilot usage response.",
+        updatedAt,
+      ),
+  );
+});
+
 // ── Codex ────────────────────────────────────────────────────────────────
 
 /** Auth lives in the shadow home when configured; matches session resolution. */
@@ -2227,6 +2466,11 @@ export const getProviderUsage = Effect.fn("getProviderUsage")(function* (setting
         kiloUsageSettingsKey(settings),
         foldProviderDefects("kilocode", fetchKiloUsageResult(settings)),
       ),
+      getProviderUsageSnapshot(
+        "githubCopilot",
+        githubCopilotUsageSettingsKey(settings),
+        foldProviderDefects("githubCopilot", fetchGitHubCopilotUsageResult(settings)),
+      ),
     ],
     { concurrency: "unbounded" },
   );
@@ -2244,6 +2488,7 @@ export const providerUsageUnavailable = Effect.fn("providerUsageUnavailable")(fu
       usageSnapshot("codex", "error", message, updatedAt),
       usageSnapshot("grok", "error", message, updatedAt),
       usageSnapshot("kilocode", "error", message, updatedAt),
+      usageSnapshot("githubCopilot", "error", message, updatedAt),
     ],
   } satisfies ServerProviderUsageResult;
 });

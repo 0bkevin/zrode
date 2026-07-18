@@ -72,6 +72,7 @@ const PROVIDER_USAGE_URL: Record<AnyUsageProviderKind, string> = {
   grok: "https://grok.com/?_s=usage",
   kilocode: "https://app.kilo.ai",
   opencode: "https://opencode.ai",
+  githubCopilot: "https://github.com/settings/billing",
 };
 
 const LIVE_USAGE_CLIENT_STALE_MS = 60_000;
@@ -88,6 +89,7 @@ const DRIVER_TO_USAGE_KIND: Readonly<Record<string, AnyUsageProviderKind>> = {
   grok: "grok",
   kilocode: "kilocode",
   opencode: "opencode",
+  githubCopilot: "githubCopilot",
 };
 
 function isDefaultProviderInstance(provider: ServerProvider): boolean {
@@ -159,6 +161,8 @@ function providerDisplayName(provider: AnyUsageProviderKind): string {
       return "Kilo Code";
     case "opencode":
       return "OpenCode";
+    case "githubCopilot":
+      return "GitHub Copilot";
   }
 }
 
