@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import type * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import { performance } from "node:perf_hooks";
-import type { Dirent } from "node:fs";
+import * as NodePerfHooks from "node:perf_hooks";
 
 import { FileFinder, type MixedItem, type MixedSearchResult } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
@@ -289,17 +289,17 @@ const scanNonGitSupplementalEntries = Effect.fn(
     try: async (): Promise<WorkspaceSupplementalEntries> => {
       const entries: ProjectEntry[] = [];
       const pendingDirectories: string[] = [""];
-      const deadline = performance.now() + WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS;
+      const deadline = NodePerfHooks.performance.now() + WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS;
       let scannedEntryCount = 0;
       let truncated = false;
 
       while (pendingDirectories.length > 0) {
-        if (performance.now() >= deadline) {
+        if (NodePerfHooks.performance.now() >= deadline) {
           truncated = true;
           break;
         }
         const relativeDirectory = pendingDirectories.shift()!;
-        let directoryEntries: Dirent<string>[];
+        let directoryEntries: NodeFS.Dirent<string>[];
         try {
           directoryEntries = await NodeFSP.readdir(NodePath.join(cwd, relativeDirectory), {
             withFileTypes: true,
