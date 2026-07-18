@@ -32,6 +32,11 @@ import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import {
+  checkpointBaselineRefForThreadTurn,
+  checkpointRefForThreadTurn,
+} from "../../checkpointing/Utils.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -276,6 +281,8 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly sendTurn?: ProviderServiceShape["sendTurn"];
+    readonly checkpointOperations?: string[];
+    readonly checkpointCaptureFailure?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -347,12 +354,19 @@ describe("ProviderCommandReactor", () => {
       return Effect.succeed(session);
     });
     const sendTurn = vi.fn((sendInput: Parameters<ProviderServiceShape["sendTurn"]>[0]) =>
-      input?.sendTurn
+      (input?.sendTurn
         ? input.sendTurn(sendInput)
         : Effect.succeed({
             threadId: ThreadId.make("thread-1"),
             turnId: asTurnId("turn-1"),
+          })
+      ).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            input?.checkpointOperations?.push("send-turn");
           }),
+        ),
+      ),
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -480,6 +494,24 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
+      Layer.provideMerge(
+        Layer.succeed(CheckpointStore.CheckpointStore, {
+          isGitRepository: () =>
+            Effect.succeed(
+              input?.checkpointOperations !== undefined || input?.checkpointCaptureFailure === true,
+            ),
+          captureCheckpoint: ({ checkpointRef }) =>
+            input?.checkpointCaptureFailure === true
+              ? Effect.die(new Error("temporary checkpoint capture unavailable"))
+              : Effect.sync(() => {
+                  input?.checkpointOperations?.push(`capture:${checkpointRef}`);
+                }),
+          hasCheckpointRef: () => Effect.succeed(false),
+          restoreCheckpoint: () => Effect.succeed(false),
+          diffCheckpoints: () => Effect.succeed(""),
+          deleteCheckpointRefs: () => Effect.void,
+        }),
+      ),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
@@ -597,6 +629,74 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("captures the exact turn-start baseline before sending work to the provider", async () => {
+    const checkpointOperations: string[] = [];
+    const harness = await createHarness({ checkpointOperations });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-checkpoint-order"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-checkpoint-order"),
+          role: "user",
+          text: "change one file",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await waitFor(() => checkpointOperations.includes("send-turn"));
+    const threadId = ThreadId.make("thread-1");
+    expect(checkpointOperations).toEqual([
+      `capture:${checkpointRefForThreadTurn(threadId, 0)}`,
+      `capture:${checkpointBaselineRefForThreadTurn(threadId, 1)}`,
+      "send-turn",
+    ]);
+  });
+
+  it("does not start provider work when the exact baseline cannot be captured", async () => {
+    const harness = await createHarness({ checkpointCaptureFailure: true });
+
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-checkpoint-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-checkpoint-failure"),
+          role: "user",
+          text: "change one file",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toMatchObject({ payload: { retryable: true } });
   });
 
   it("forwards an explicit steer to the exact active provider turn", async () => {
@@ -2374,6 +2474,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.activity.append",
@@ -2395,6 +2496,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.approval.respond",

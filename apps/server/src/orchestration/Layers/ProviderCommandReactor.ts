@@ -29,6 +29,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { captureTurnBaseline } from "../../checkpointing/TurnBaseline.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
@@ -250,6 +252,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -870,6 +873,43 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const captureBaselineBeforeTurnStart = Effect.fn("captureBaselineBeforeTurnStart")(function* (
+    threadId: ThreadId,
+  ) {
+    const thread = yield* resolveThread(threadId);
+    if (!thread) {
+      return;
+    }
+
+    const [project, sessions] = yield* Effect.all([
+      resolveProject(thread.projectId),
+      providerService.listSessions(),
+    ]);
+    const sessionCwd = sessions.find((session) => session.threadId === threadId)?.cwd;
+    const cwd =
+      sessionCwd ??
+      resolveThreadWorkspaceCwd({
+        thread,
+        projects: project ? [project] : [],
+      });
+    if (!cwd || !(yield* checkpointStore.isGitRepository(cwd))) {
+      return;
+    }
+
+    const turnCount =
+      thread.checkpoints.reduce(
+        (maximum, checkpoint) => Math.max(maximum, checkpoint.checkpointTurnCount),
+        0,
+      ) + 1;
+    yield* captureTurnBaseline({
+      checkpointStore,
+      cwd,
+      threadId,
+      turnCount,
+      refreshExisting: true,
+    });
+  });
+
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
@@ -929,12 +969,15 @@ const make = Effect.gen(function* () {
       }
     }
 
-    const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
+    const handleTurnStartFailure = (
+      cause: Cause.Cause<unknown>,
+      options?: { readonly retryable?: boolean },
+    ) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
-      const retryable = isRetryableTurnStartFailure(cause);
+      const retryable = options?.retryable ?? isRetryableTurnStartFailure(cause);
       const turnStart = {
         ...(event.payload.modelSelection !== undefined
           ? { modelSelection: event.payload.modelSelection }
@@ -996,6 +1039,26 @@ const make = Effect.gen(function* () {
     );
 
     if (Option.isNone(sendTurnRequest)) {
+      return;
+    }
+
+    // This must finish before sendTurn: otherwise a fast provider can edit the
+    // workspace before the turn's "before" snapshot exists. A failed capture
+    // aborts this attempt so a later runtime event cannot create a late,
+    // incomplete baseline and present it as exact.
+    const baselineCaptured = yield* captureBaselineBeforeTurnStart(event.payload.threadId).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to capture checkpoint baseline before provider turn start", {
+          threadId: event.payload.threadId,
+          cause: Cause.pretty(cause),
+        }).pipe(
+          Effect.andThen(handleTurnStartFailure(cause, { retryable: true })),
+          Effect.as(false),
+        ),
+      ),
+    );
+    if (!baselineCaptured) {
       return;
     }
 

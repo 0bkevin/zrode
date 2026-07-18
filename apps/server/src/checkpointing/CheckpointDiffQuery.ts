@@ -30,7 +30,7 @@ import {
   CheckpointWorkspacePathMissingError,
 } from "./Errors.ts";
 import type { CheckpointServiceError } from "./Errors.ts";
-import { checkpointRefForThreadTurn } from "./Utils.ts";
+import { checkpointBaselineRefForThreadTurn, checkpointRefForThreadTurn } from "./Utils.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 
 /** Service tag for checkpoint diff queries. */
@@ -137,13 +137,13 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const fromCheckpointRef =
+      const fallbackFromCheckpointRef =
         input.fromTurnCount === 0
           ? checkpointRefForThreadTurn(input.threadId, 0)
           : threadContext.value.checkpoints.find(
               (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
             )?.checkpointRef;
-      if (!fromCheckpointRef) {
+      if (!fallbackFromCheckpointRef) {
         return yield* new CheckpointRefUnavailableError({
           operation,
           threadId: input.threadId,
@@ -152,10 +152,10 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const toCheckpointRef = threadContext.value.checkpoints.find(
+      const toCheckpoint = threadContext.value.checkpoints.find(
         (checkpoint) => checkpoint.checkpointTurnCount === input.toTurnCount,
-      )?.checkpointRef;
-      if (!toCheckpointRef) {
+      );
+      if (!toCheckpoint) {
         return yield* new CheckpointRefUnavailableError({
           operation,
           threadId: input.threadId,
@@ -164,11 +164,35 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const isSingleTurn = input.toTurnCount === input.fromTurnCount + 1;
+      const hasUnavailableSummary =
+        toCheckpoint.status === "error" && toCheckpoint.files.length === 0;
+      const useLegacyFallback = isSingleTurn && !hasUnavailableSummary;
+      const fromCheckpointRef = isSingleTurn
+        ? checkpointBaselineRefForThreadTurn(input.threadId, input.toTurnCount)
+        : fallbackFromCheckpointRef;
+
+      if (isSingleTurn && !useLegacyFallback) {
+        const baselineExists = yield* checkpointStore.hasCheckpointRef({
+          cwd: workspaceCwd,
+          checkpointRef: fromCheckpointRef,
+        });
+        if (!baselineExists) {
+          return yield* new CheckpointRefUnavailableError({
+            operation,
+            threadId: input.threadId,
+            turnCount: input.fromTurnCount,
+            checkpoint: "from",
+          });
+        }
+      }
+
       const diff = yield* checkpointStore
         .diffCheckpoints({
           cwd: workspaceCwd,
           fromCheckpointRef,
-          toCheckpointRef,
+          ...(useLegacyFallback ? { fallbackFromCheckpointRef } : {}),
+          toCheckpointRef: toCheckpoint.checkpointRef,
           fallbackFromToHead: false,
           ignoreWhitespace,
         })

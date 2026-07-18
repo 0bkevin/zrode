@@ -721,11 +721,32 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
         }
 
-        yield* execute({
+        const updateRefResult = yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["update-ref", input.checkpointRef, commitOid],
+          args:
+            input.ifMissing === true
+              ? ["update-ref", "--stdin"]
+              : ["update-ref", input.checkpointRef, commitOid],
+          ...(input.ifMissing === true
+            ? { stdin: `create ${input.checkpointRef} ${commitOid}\n` }
+            : {}),
+          allowNonZeroExit: input.ifMissing === true,
         });
+
+        if (updateRefResult.exitCode !== 0) {
+          const existingCommit = yield* resolveCheckpointCommit(input.cwd, input.checkpointRef);
+          if (existingCommit) {
+            return;
+          }
+          return yield* new VcsProcessExitError({
+            operation,
+            command: "git update-ref",
+            cwd: input.cwd,
+            exitCode: updateRefResult.exitCode,
+            detail: updateRefResult.stderr.trim() || "git update-ref failed",
+          });
+        }
       }).pipe(Effect.ensuring(cleanupTempIndex));
     }),
 
@@ -781,6 +802,13 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       });
 
       let fromRevision: string = input.fromCheckpointRef;
+      if (input.fallbackFromCheckpointRef !== undefined) {
+        const resolvedFromCommit = yield* resolveCheckpointCommit(
+          input.cwd,
+          input.fromCheckpointRef,
+        );
+        fromRevision = resolvedFromCommit ?? input.fallbackFromCheckpointRef;
+      }
       if (input.fallbackFromToHead === true) {
         const resolvedFromCommit = yield* resolveCheckpointCommit(
           input.cwd,

@@ -71,13 +71,14 @@ function git(
 
 function initRepoWithCommit(
   cwd: string,
+  objectFormat?: "sha1" | "sha256",
 ): Effect.Effect<
   void,
   VcsError | PlatformError.PlatformError,
   VcsProcess.VcsProcess | FileSystem.FileSystem
 > {
   return Effect.gen(function* () {
-    yield* git(cwd, ["init"]);
+    yield* git(cwd, ["init", ...(objectFormat ? [`--object-format=${objectFormat}`] : [])]);
     yield* git(cwd, ["config", "user.email", "test@test.com"]);
     yield* git(cwd, ["config", "user.name", "Test"]);
     yield* writeTextFile(NodePath.join(cwd, "README.md"), "# test\n");
@@ -115,6 +116,98 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
   });
 
   describe("diffCheckpoints", () => {
+    it.effect("keeps the first checkpoint when capture is create-only", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-create-only");
+        const baselineRef = checkpointRefForThreadTurn(threadId, 0);
+        const targetRef = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: baselineRef,
+          ifMissing: true,
+        });
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "updated\n");
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: baselineRef,
+          ifMissing: true,
+        });
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: targetRef });
+
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef: baselineRef,
+          toCheckpointRef: targetRef,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("-# test");
+        expect(diff).toContain("+updated");
+      }),
+    );
+
+    it.effect("creates checkpoints atomically in SHA-256 repositories", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp, "sha256");
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-create-only-sha256");
+        const baselineRef = checkpointRefForThreadTurn(threadId, 0);
+        const targetRef = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: baselineRef,
+          ifMissing: true,
+        });
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "updated\n");
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: baselineRef,
+          ifMissing: true,
+        });
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: targetRef });
+
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef: baselineRef,
+          toCheckpointRef: targetRef,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("-# test");
+        expect(diff).toContain("+updated");
+      }),
+    );
+
+    it.effect("uses a legacy from-ref when the dedicated baseline is unavailable", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-legacy-fallback");
+        const missingBaselineRef = checkpointRefForThreadTurn(threadId, 99);
+        const legacyRef = checkpointRefForThreadTurn(threadId, 0);
+        const targetRef = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: legacyRef });
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "updated\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: targetRef });
+
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef: missingBaselineRef,
+          fallbackFromCheckpointRef: legacyRef,
+          toCheckpointRef: targetRef,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("-# test");
+        expect(diff).toContain("+updated");
+      }),
+    );
+
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();

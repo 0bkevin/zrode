@@ -32,7 +32,7 @@ import {
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
-import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
+import { normalizeTurnDiffFiles, summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import {
   getRenderablePatch,
   resolveDiffThemeName,
@@ -1447,11 +1447,15 @@ function AssistantChangedFilesSectionInner({
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
 }) {
   const allDirectoriesExpanded = useUiStateStore(
-    (store) => store.threadChangedFilesExpandedById[routeThreadKey]?.[turnSummary.turnId] ?? true,
+    (store) => store.threadChangedFilesExpandedById[routeThreadKey]?.[turnSummary.turnId] ?? false,
   );
   const setExpanded = useUiStateStore((store) => store.setThreadChangedFilesExpanded);
-  const summaryStat = summarizeTurnDiffStats(checkpointFiles);
-  const changedFileCountLabel = String(checkpointFiles.length);
+  const normalizedCheckpointFiles = useMemo(
+    () => normalizeTurnDiffFiles(checkpointFiles),
+    [checkpointFiles],
+  );
+  const summaryStat = summarizeTurnDiffStats(normalizedCheckpointFiles);
+  const changedFileCountLabel = String(normalizedCheckpointFiles.length);
 
   return (
     <div className="mt-2 rounded-lg border border-border/80 bg-card/45 p-2.5">
@@ -1479,7 +1483,7 @@ function AssistantChangedFilesSectionInner({
             type="button"
             size="xs"
             variant="outline"
-            onClick={() => onOpenTurnDiff(turnSummary.turnId, checkpointFiles[0]?.path)}
+            onClick={() => onOpenTurnDiff(turnSummary.turnId, normalizedCheckpointFiles[0]?.path)}
           >
             View diff
           </Button>
@@ -1488,7 +1492,7 @@ function AssistantChangedFilesSectionInner({
       <ChangedFilesTree
         key={`changed-files-tree:${turnSummary.turnId}`}
         turnId={turnSummary.turnId}
-        files={checkpointFiles}
+        files={normalizedCheckpointFiles}
         allDirectoriesExpanded={allDirectoriesExpanded}
         resolvedTheme={resolvedTheme}
         onOpenTurnDiff={onOpenTurnDiff}

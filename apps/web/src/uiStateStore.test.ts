@@ -116,19 +116,21 @@ describe("uiStateStore pure functions", () => {
     );
   });
 
-  it("stores only collapsed changed-file turns", () => {
+  it("stores only expanded changed-file turns", () => {
     const threadId = ThreadId.make("thread-1");
-    const collapsed = setThreadChangedFilesExpanded(makeUiState(), threadId, "turn-1", false);
+    const initial = makeUiState();
+    const expanded = setThreadChangedFilesExpanded(initial, threadId, "turn-1", true);
 
-    expect(collapsed.threadChangedFilesExpandedById).toEqual({
+    expect(expanded.threadChangedFilesExpandedById).toEqual({
       [threadId]: {
-        "turn-1": false,
+        "turn-1": true,
       },
     });
     expect(
-      setThreadChangedFilesExpanded(collapsed, threadId, "turn-1", true)
+      setThreadChangedFilesExpanded(expanded, threadId, "turn-1", false)
         .threadChangedFilesExpandedById,
     ).toEqual({});
+    expect(setThreadChangedFilesExpanded(initial, threadId, "turn-1", false)).toBe(initial);
   });
 
   it("stores the endpoint preference by stable key", () => {
@@ -174,7 +176,7 @@ describe("parsePersistedState", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
-          "turn-1": false,
+          "turn-2": true,
         },
       },
     });
@@ -280,7 +282,7 @@ describe("uiStateStore persistence", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
-          "turn-1": false,
+          "turn-2": true,
         },
       },
     });
@@ -288,7 +290,7 @@ describe("uiStateStore persistence", () => {
       ...state,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
-          "turn-1": false,
+          "turn-2": true,
         },
       },
     });

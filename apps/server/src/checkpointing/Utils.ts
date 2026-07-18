@@ -9,6 +9,22 @@ export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number
   );
 }
 
+/**
+ * The immutable workspace snapshot taken immediately before a turn starts.
+ *
+ * This is intentionally separate from the completed-turn checkpoint ref. A
+ * completed checkpoint must stay immutable so older turn diffs and reverts do
+ * not change when the workspace is edited between turns.
+ */
+export function checkpointBaselineRefForThreadTurn(
+  threadId: ThreadId,
+  turnCount: number,
+): CheckpointRef {
+  return CheckpointRef.make(
+    `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/baseline/${turnCount}`,
+  );
+}
+
 export function resolveThreadWorkspaceCwd(input: {
   readonly thread: {
     readonly projectId: ProjectId;
