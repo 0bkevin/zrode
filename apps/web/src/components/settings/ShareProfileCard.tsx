@@ -31,6 +31,8 @@ export interface ShareStatItem {
 export interface ShareProviderTotal {
   readonly label: string;
   readonly tokens: number;
+  readonly billingRequests?: number;
+  readonly billingAiCredits?: number;
   /** CSS color expression (e.g. `var(--color-orange-600)`), resolved for canvas. */
   readonly colorVar: string;
 }
@@ -39,6 +41,8 @@ export interface ShareHeatmapDay {
   readonly day: string;
   /** Total tokens that day (drives the intensity level). */
   readonly total: number;
+  /** Unit-neutral activity intensity for request/credit/allowance-only days. */
+  readonly activityLevel?: number;
   /** Hue of the subscription used most that day; null when idle. */
   readonly colorVar: string | null;
 }
@@ -173,7 +177,8 @@ export function buildHeatmapGrid(input: {
         continue;
       }
       const point = byDay.get(toDayKey(date));
-      const level = levelOf(point?.total ?? 0);
+      const activityLevel = Math.max(0, Math.min(4, point?.activityLevel ?? 0));
+      const level = Math.max(levelOf(point?.total ?? 0), activityLevel);
       column.push({ level, colorVar: level > 0 ? (point?.colorVar ?? null) : null });
     }
     weeks.push(column);
@@ -264,6 +269,23 @@ function isLightColor(rgb: string): boolean {
   const [r, g, b] = match.map(Number);
   // Perceived luminance (sRGB) — pick ink that contrasts with a fill.
   return 0.299 * r! + 0.587 * g! + 0.114 * b! > 150;
+}
+
+function formatCompactQuantity(value: number): string {
+  if (value >= 1_000) return formatCompactTokens(value);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
+
+function formatProviderActivity(entry: ShareProviderTotal): string {
+  const values: string[] = [];
+  if (entry.tokens > 0) values.push(formatCompactTokens(entry.tokens));
+  if ((entry.billingRequests ?? 0) > 0) {
+    values.push(`${formatCompactQuantity(entry.billingRequests ?? 0)} req`);
+  }
+  if ((entry.billingAiCredits ?? 0) > 0) {
+    values.push(`${formatCompactQuantity(entry.billingAiCredits ?? 0)} cr`);
+  }
+  return values.length > 0 ? values.join(" · ") : "activity";
 }
 
 // ── Canvas drawing ───────────────────────────────────────────────────
@@ -456,6 +478,22 @@ function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
     if (label) ctx.fillText(label, PAD + wIndex * step, monthsY);
   });
 
+  // Match the in-app calendar's orientation labels so the exported image is
+  // a complete, immediately readable heatmap rather than an unlabeled grid.
+  ctx.font = `500 11px ${FONT}`;
+  ctx.fillStyle = c.mutedForeground;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (const [dayIndex, label] of [
+    [1, "Mon"],
+    [3, "Wed"],
+    [5, "Fri"],
+  ] as const) {
+    ctx.fillText(label, PAD - 9, gridTop + dayIndex * step + HEATMAP_CELL / 2);
+  }
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+
   const cellColorFor = (colorVar: string | null, level: number): string => {
     if (level <= 0) return emptyFill;
     const hue = colorVar ? (extra[colorVar] ?? accent) : accent;
@@ -475,21 +513,31 @@ function drawShareCard(ctx: CanvasRenderingContext2D, input: DrawInput): void {
   // ── Footer row: provider legend (left) + intensity key (right) ──
   const footY = gridTop + 7 * step + 26;
   let legendX = PAD;
+  let legendY = footY;
+  const legendRight = CARD_W - PAD - 190;
   ctx.textBaseline = "middle";
   for (const entry of data.providerTotals) {
+    ctx.font = `600 15px ${FONT}`;
+    const labelW = ctx.measureText(entry.label).width;
+    ctx.font = `500 15px ${FONT}`;
+    const value = formatProviderActivity(entry);
+    const valueW = ctx.measureText(value).width;
+    const entryW = 20 + labelW + 8 + valueW + 30;
+    if (legendX > PAD && legendX + entryW > legendRight) {
+      legendX = PAD;
+      legendY += 26;
+    }
     const color = extra[entry.colorVar] ?? accent;
     ctx.fillStyle = color;
-    roundRect(ctx, legendX, footY - 6, 12, 12, 3);
+    roundRect(ctx, legendX, legendY - 6, 12, 12, 3);
     ctx.fill();
     ctx.fillStyle = c.foreground;
     ctx.font = `600 15px ${FONT}`;
-    ctx.fillText(entry.label, legendX + 20, footY);
-    const labelW = ctx.measureText(entry.label).width;
+    ctx.fillText(entry.label, legendX + 20, legendY);
     ctx.fillStyle = c.mutedForeground;
     ctx.font = `500 15px ${FONT}`;
-    const value = formatCompactTokens(entry.tokens);
-    ctx.fillText(value, legendX + 20 + labelW + 8, footY);
-    legendX += 20 + labelW + 8 + ctx.measureText(value).width + 30;
+    ctx.fillText(value, legendX + 20 + labelW + 8, legendY);
+    legendX += entryW;
   }
 
   ctx.textAlign = "right";

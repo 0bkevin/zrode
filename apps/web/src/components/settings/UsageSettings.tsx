@@ -85,7 +85,7 @@ const PROVIDER_HUE: Record<ProviderTokenActivityKind, string> = {
   grok: "var(--color-violet-600)",
   kilocode: "var(--color-yellow-500)",
   opencode: "var(--color-zinc-500)",
-  githubCopilot: "var(--color-zinc-600)",
+  githubCopilot: "var(--color-emerald-500)",
 };
 
 /**
@@ -99,7 +99,7 @@ const PROVIDER_SHARE_HEX: Record<ProviderTokenActivityKind, string> = {
   grok: "#7c3aed",
   kilocode: "#eab308",
   opencode: "#71717a",
-  githubCopilot: "#52525b",
+  githubCopilot: "#10b981",
 };
 
 const PROVIDER_LABEL: Record<ProviderTokenActivityKind, string> = {
@@ -1894,28 +1894,52 @@ export function UsageSettingsPanel() {
   // as a rich 12-month calendar regardless of what's on screen.
   const shareData = useMemo<ShareProfileData>(() => {
     const fullStats = computeStats(byDayAll, today);
-    const providerTotalMap = new Map<ProviderTokenActivityKind, number>();
-    const heatmap: Array<{ day: string; total: number; colorVar: string | null }> = [];
+    const providerTotals = new Map<
+      ProviderTokenActivityKind,
+      { tokens: number; billingRequests: number; billingAiCredits: number; active: boolean }
+    >();
+    const heatmap: Array<{
+      day: string;
+      total: number;
+      activityLevel: number;
+      colorVar: string | null;
+    }> = [];
     for (const [day, usages] of byDayAll) {
       let total = 0;
-      let topProvider: ProviderTokenActivityKind | null = null;
+      let activityLevel = 0;
+      let topUsage: DayUsage | null = null;
       for (const usage of usages) {
         total += usage.tokens;
-        if (usage.tokens > 0) {
-          providerTotalMap.set(
-            usage.provider,
-            (providerTotalMap.get(usage.provider) ?? 0) + usage.tokens,
+        const provider = providerTotals.get(usage.provider) ?? {
+          tokens: 0,
+          billingRequests: 0,
+          billingAiCredits: 0,
+          active: false,
+        };
+        provider.tokens += usage.tokens;
+        provider.billingRequests += usage.billingRequests ?? 0;
+        provider.billingAiCredits += usage.billingAiCredits ?? 0;
+        provider.active ||= isActiveUsage(usage);
+        providerTotals.set(usage.provider, provider);
+
+        // Token intensity is ranked from the daily total by the canvas
+        // renderer. Carry only the non-token signal here so Copilot billing
+        // and allowance-only days are not silently dropped from the image.
+        if (usage.tokens <= 0) {
+          activityLevel = Math.max(
+            activityLevel,
+            usageLevel(usage, () => 0),
           );
-          const topValue = topProvider
-            ? (usages.find((u) => u.provider === topProvider)?.tokens ?? 0)
-            : 0;
-          if (usage.tokens > topValue) topProvider = usage.provider;
+        }
+        if (isActiveUsage(usage) && (topUsage === null || usageRank(usage) > usageRank(topUsage))) {
+          topUsage = usage;
         }
       }
       heatmap.push({
         day,
         total,
-        colorVar: topProvider ? PROVIDER_SHARE_HEX[topProvider] : null,
+        activityLevel,
+        colorVar: topUsage ? PROVIDER_SHARE_HEX[topUsage.provider] : null,
       });
     }
     return {
@@ -1926,16 +1950,18 @@ export function UsageSettingsPanel() {
         { label: "Longest streak", value: `${fullStats.longestStreak}d` },
         {
           label: "Peak day",
-          value: fullStats.peakDay ? formatTokens(fullStats.peakDay.tokens) : "—",
+          value: peakDayValue(fullStats),
         },
       ],
       providerTotals: HISTORY_PROVIDERS.flatMap((provider) => {
-        const total = providerTotalMap.get(provider) ?? 0;
-        return total > 0
+        const total = providerTotals.get(provider);
+        return total?.active
           ? [
               {
                 label: PROVIDER_LABEL[provider],
-                tokens: total,
+                tokens: total.tokens,
+                billingRequests: total.billingRequests,
+                billingAiCredits: total.billingAiCredits,
                 colorVar: PROVIDER_SHARE_HEX[provider],
               },
             ]

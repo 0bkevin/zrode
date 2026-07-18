@@ -47,4 +47,21 @@ describe("buildHeatmapGrid", () => {
     expect(week[4]).toEqual({ level: 0, colorVar: null }); // today, no data
     expect(week[5]!.level).toBe(-1); // future
   });
+
+  it("renders unit-neutral billing and allowance activity when no tokens were recorded", () => {
+    const grid = buildHeatmapGrid({
+      heatmap: [
+        {
+          day: "2026-06-15",
+          total: 0,
+          activityLevel: 3,
+          colorVar: "#10b981",
+        },
+      ],
+      todayKey: "2026-06-18",
+      weeksCount: 1,
+    });
+
+    expect(grid.weeks[0]![1]).toEqual({ level: 3, colorVar: "#10b981" });
+  });
 });
