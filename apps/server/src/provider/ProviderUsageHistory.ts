@@ -345,6 +345,7 @@ interface CodexReplayGate {
 }
 
 interface CodexParseState {
+  sessionId: string | null;
   currentModel: string | null;
   previousTotals: RawCodexUsage | null;
   isFast: boolean;
@@ -354,6 +355,7 @@ interface CodexParseState {
 
 function makeCodexParseState(): CodexParseState {
   return {
+    sessionId: null,
     currentModel: null,
     previousTotals: null,
     isFast: false,
@@ -494,6 +496,7 @@ function parseCodexRolloutLineWithState(
   }
   if (record.type === "session_meta" && !state.sawSessionMeta) {
     state.sawSessionMeta = true;
+    state.sessionId = nonEmptyString(payload?.id);
     if (payload !== null && isCodexChildSession(payload)) {
       const createdAt = nonEmptyString(record.timestamp);
       const createdAtMs = createdAt === null ? Number.NaN : Date.parse(createdAt);
@@ -570,6 +573,7 @@ function parseCodexRolloutLineWithState(
   if (tokens <= 0) return null;
   return {
     entryKey: [
+      state.sessionId ?? "unknown-session",
       "event",
       epochMs,
       model,
@@ -1558,6 +1562,7 @@ export const make = Effect.gen(function* () {
               ]
             : [],
         ),
+        githubCopilotBilling: null,
         isBackfilling: currentSync.running,
         today: localDayKey(nowMs),
         lastScanAt: currentSync.lastCompletedAt > 0 ? currentSync.lastCompletedAt : null,
@@ -1572,6 +1577,7 @@ export const make = Effect.gen(function* () {
             days: [],
             tokenActivity: [],
             modelActivity: [],
+            githubCopilotBilling: null,
             isBackfilling: false,
             today: localDayKey(nowMs),
             lastScanAt: null,

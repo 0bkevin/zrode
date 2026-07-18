@@ -25,6 +25,7 @@ export const TOKEN_PROVIDERS: ReadonlyArray<ProviderTokenActivityKind> = [
   "grok",
   "kilocode",
   "opencode",
+  "githubCopilot",
 ];
 
 type TokenValues = Record<ProviderTokenActivityKind, number>;

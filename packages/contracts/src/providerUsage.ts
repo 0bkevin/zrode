@@ -101,8 +101,41 @@ export const ProviderUsageSnapshot = Schema.Struct({
 });
 export type ProviderUsageSnapshot = typeof ProviderUsageSnapshot.Type;
 
+export const GitHubCopilotBillingHistory = Schema.Struct({
+  status: ProviderUsageStatus,
+  message: Schema.NullOr(Schema.String),
+  days: Schema.Array(
+    Schema.Struct({
+      /** Calendar day reported by GitHub's detailed billing ledger, formatted YYYY-MM-DD. */
+      day: Schema.String,
+      unit: Schema.Literals(["requests", "aiCredits"]),
+      quantity: Schema.Number,
+      grossAmountUsd: Schema.Number,
+      discountAmountUsd: Schema.Number,
+      netAmountUsd: Schema.Number,
+      sku: Schema.String,
+    }),
+  ),
+  models: Schema.Array(
+    Schema.Struct({
+      year: Schema.Number,
+      unit: Schema.Literals(["requests", "aiCredits"]),
+      model: Schema.String,
+      quantity: Schema.Number,
+      grossAmountUsd: Schema.Number,
+      discountAmountUsd: Schema.Number,
+      netAmountUsd: Schema.Number,
+    }),
+  ),
+  updatedAt: Schema.Number,
+});
+export type GitHubCopilotBillingHistory = typeof GitHubCopilotBillingHistory.Type;
+
 export const ServerProviderUsageResult = Schema.Struct({
   usage: Schema.Array(ProviderUsageSnapshot),
+  githubCopilotBilling: Schema.NullOr(GitHubCopilotBillingHistory).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 });
 export type ServerProviderUsageResult = typeof ServerProviderUsageResult.Type;
 
@@ -210,6 +243,10 @@ export const ServerProviderUsageHistoryResult = Schema.Struct({
   /** Daily model/category totals used for model rankings and API-equivalent cost estimates. */
   modelActivity: Schema.Array(ProviderModelTokenActivityDay).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** GitHub's account-level monthly request/AI-credit ledger (not token activity). */
+  githubCopilotBilling: Schema.NullOr(GitHubCopilotBillingHistory).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   /** True while a background scan of the local session logs is running. */
   isBackfilling: Schema.Boolean,

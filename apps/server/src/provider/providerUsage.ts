@@ -46,6 +46,7 @@ import {
   type ClaudeSettings,
   type CodexSettings,
   type GrokSettings,
+  type GitHubCopilotBillingHistory,
   type ProviderInstanceEnvironment,
   type ProviderUsageExtraLimit,
   type ProviderUsageProviderKind,
@@ -100,12 +101,15 @@ const CODEX_RESET_CREDITS_TIMEOUT_MS = 3_000;
 const GROK_DEFAULT_API_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 const KILO_DEFAULT_API_BASE_URL = "https://api.kilo.ai";
 const GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
+const GITHUB_API_URL = "https://api.github.com";
 const GROK_AUTH_REFRESH_TIMEOUT = "15 seconds" as const;
 const CLAUDE_USAGE_RATE_LIMIT_MESSAGE =
   "Rate limited by the Claude usage API — data will refresh automatically in a few minutes.";
 
 /** How long a fetched usage snapshot stays fresh for all connected clients. */
 const USAGE_CACHE_TTL_MS = 60_000;
+/** Historical billing changes monthly; avoid repeating six account-level API reads on every poll. */
+const GITHUB_COPILOT_BILLING_CACHE_TTL_MS = 30 * 60_000;
 /** Fallback backoff when a provider 429 omits Retry-After. */
 const USAGE_CACHE_RATE_LIMIT_DEFAULT_TTL_MS = 5 * 60_000;
 /** Any 429 should suppress immediate retries, even if Retry-After is tiny. */
@@ -279,6 +283,12 @@ interface ProviderUsageFetchResult {
 let usageCache = new Map<ProviderUsageProviderKind, ProviderUsageCacheState>();
 let usageInFlight = new Map<ProviderUsageProviderKind, ProviderUsageInFlightState>();
 let usageGeneration = new Map<ProviderUsageProviderKind, number>();
+let copilotBillingCache: {
+  readonly key: string;
+  readonly expiresAt: number;
+  readonly history: GitHubCopilotBillingHistory;
+} | null = null;
+let copilotBillingRefreshInFlight = false;
 
 const PROVIDER_USAGE_KINDS = [
   "claude",
@@ -315,10 +325,12 @@ export function invalidateProviderUsageCache(provider?: ProviderUsageProviderKin
     usageCache.delete(provider);
     usageInFlight.delete(provider);
     bumpProviderUsageGeneration(provider);
+    if (provider === "githubCopilot") copilotBillingCache = null;
     return;
   }
   usageCache = new Map();
   usageInFlight = new Map();
+  copilotBillingCache = null;
   for (const kind of PROVIDER_USAGE_KINDS) {
     bumpProviderUsageGeneration(kind);
   }
@@ -446,6 +458,108 @@ function githubCopilotUsageSettingsKey(settings: ServerSettings): string {
     Boolean(environment.GH_TOKEN?.trim()),
     Boolean(environment.GITHUB_TOKEN?.trim()),
   ]);
+}
+
+/** A credential-derived cache identity that can never reveal the credential. */
+export function githubCredentialFingerprint(token: string): string {
+  return NodeCrypto.createHash("sha256").update(token).digest("hex");
+}
+
+/** Billing prefers the GitHub CLI identity; Copilot's session token is only a fallback. */
+export function orderGitHubBillingTokens(input: {
+  readonly ghToken?: string | null | undefined;
+  readonly ghEnvToken?: string | null | undefined;
+  readonly githubEnvToken?: string | null | undefined;
+  readonly copilotToken?: string | null | undefined;
+  readonly storedCopilotToken?: string | null | undefined;
+}): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const raw of [
+    input.ghToken,
+    input.ghEnvToken,
+    input.githubEnvToken,
+    input.copilotToken,
+    input.storedCopilotToken,
+  ]) {
+    const token = raw?.trim();
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    ordered.push(token);
+  }
+  return ordered;
+}
+
+interface GitHubBillingPayload {
+  readonly usageItems?: ReadonlyArray<Record<string, unknown>>;
+}
+
+function billingNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function billingUnit(item: Record<string, unknown>): "requests" | "aiCredits" | null {
+  const unit = typeof item.unitType === "string" ? item.unitType.toLowerCase() : "";
+  const sku = typeof item.sku === "string" ? item.sku.toLowerCase() : "";
+  if (unit.includes("credit") || sku.includes("ai credit")) return "aiCredits";
+  if (unit.includes("request") || sku.includes("request") || sku.includes("cloud agent")) {
+    return "requests";
+  }
+  return null;
+}
+
+/** Parse GitHub's account ledger without treating billing units as token counts. */
+export function parseGitHubCopilotBillingDays(
+  payload: unknown,
+): GitHubCopilotBillingHistory["days"] {
+  const items = (payload as GitHubBillingPayload | null)?.usageItems;
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    const product = typeof item.product === "string" ? item.product.toLowerCase() : "";
+    const day = typeof item.date === "string" ? item.date.slice(0, 10) : "";
+    const unit = billingUnit(item);
+    if (!product.includes("copilot") || !/^\d{4}-\d{2}-\d{2}$/.test(day) || unit === null) {
+      return [];
+    }
+    return [
+      {
+        day,
+        unit,
+        quantity: billingNumber(item.quantity),
+        grossAmountUsd: billingNumber(item.grossAmount),
+        discountAmountUsd: billingNumber(item.discountAmount),
+        netAmountUsd: billingNumber(item.netAmount),
+        sku: typeof item.sku === "string" ? item.sku : "Copilot usage",
+      },
+    ];
+  });
+}
+
+/** Parse the model-level annual premium-request/AI-credit report. */
+export function parseGitHubCopilotBillingModels(
+  payload: unknown,
+  year: number,
+): GitHubCopilotBillingHistory["models"] {
+  const items = (payload as GitHubBillingPayload | null)?.usageItems;
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    const unit = billingUnit(item);
+    const model = typeof item.model === "string" ? item.model.trim() : "";
+    if (unit === null || model.length === 0) return [];
+    const quantity = billingNumber(item.grossQuantity ?? item.quantity);
+    if (quantity <= 0) return [];
+    return [
+      {
+        year,
+        unit,
+        model,
+        quantity,
+        grossAmountUsd: billingNumber(item.grossAmount),
+        discountAmountUsd: billingNumber(item.discountAmount),
+        netAmountUsd: billingNumber(item.netAmount),
+      },
+    ];
+  });
 }
 
 export function providerUsageSettingsKey(
@@ -1682,14 +1796,26 @@ function parseCopilotTokenFile(raw: string): string | null {
   return null;
 }
 
-const resolveGitHubCopilotToken = Effect.fn("resolveGitHubCopilotToken")(function* (
-  settings: ServerSettings,
+const readGitHubCliToken = Effect.fn("readGitHubCliToken")(function* (
+  environment: NodeJS.ProcessEnv,
 ) {
-  const environment = githubCopilotUsageEnvironment(settings);
-  for (const key of ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
-    const token = environment[key]?.trim();
-    if (token) return token;
-  }
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const result = yield* processRunner
+    .run({
+      command: "gh",
+      args: ["auth", "token", "--hostname", "github.com"],
+      timeout: "5 seconds",
+      env: environment,
+    })
+    .pipe(Effect.orElseSucceed(() => null));
+  return result !== null && result.code === 0 && result.stdout.trim().length > 0
+    ? result.stdout.trim()
+    : null;
+});
+
+const readStoredGitHubCopilotToken = Effect.fn("readStoredGitHubCopilotToken")(function* (
+  environment: NodeJS.ProcessEnv,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const configHome = environment.XDG_CONFIG_HOME?.trim() || path.join(NodeOS.homedir(), ".config");
@@ -1700,21 +1826,40 @@ const resolveGitHubCopilotToken = Effect.fn("resolveGitHubCopilotToken")(functio
     );
     if (token !== null) return token;
   }
+  return null;
+});
+
+const resolveGitHubCopilotToken = Effect.fn("resolveGitHubCopilotToken")(function* (
+  settings: ServerSettings,
+) {
+  const environment = githubCopilotUsageEnvironment(settings);
+  for (const key of ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
+    const token = environment[key]?.trim();
+    if (token) return token;
+  }
+  const storedToken = yield* readStoredGitHubCopilotToken(environment);
+  if (storedToken !== null) return storedToken;
   // GitHub CLI commonly keeps its OAuth token in the OS credential store,
   // leaving hosts.yml without an oauth_token. `gh auth token` resolves both
   // file and keychain-backed authentication without exposing it to the UI.
-  const processRunner = yield* ProcessRunner.ProcessRunner;
-  const ghToken = yield* processRunner
-    .run({
-      command: "gh",
-      args: ["auth", "token", "--hostname", "github.com"],
-      timeout: "5 seconds",
-    })
-    .pipe(Effect.orElseSucceed(() => null));
-  if (ghToken !== null && ghToken.code === 0 && ghToken.stdout.trim().length > 0) {
-    return ghToken.stdout.trim();
-  }
-  return null;
+  return yield* readGitHubCliToken(environment);
+});
+
+const resolveGitHubBillingTokens = Effect.fn("resolveGitHubBillingTokens")(function* (
+  settings: ServerSettings,
+) {
+  const environment = githubCopilotUsageEnvironment(settings);
+  const [ghToken, storedCopilotToken] = yield* Effect.all(
+    [readGitHubCliToken(environment), readStoredGitHubCopilotToken(environment)],
+    { concurrency: "unbounded" },
+  );
+  return orderGitHubBillingTokens({
+    ghToken,
+    ghEnvToken: environment.GH_TOKEN,
+    githubEnvToken: environment.GITHUB_TOKEN,
+    copilotToken: environment.COPILOT_GITHUB_TOKEN,
+    storedCopilotToken,
+  });
 });
 
 const fetchGitHubCopilotUsageResult = Effect.fn("fetchGitHubCopilotUsageResult")(function* (
@@ -1791,6 +1936,325 @@ const fetchGitHubCopilotUsageResult = Effect.fn("fetchGitHubCopilotUsageResult")
         updatedAt,
       ),
   );
+});
+
+function githubBillingRequest(url: string, token: string) {
+  return fetchJsonWithTimeout(
+    HttpClientRequest.get(url).pipe(
+      HttpClientRequest.setHeaders({
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "Zrode",
+        "X-GitHub-Api-Version": "2026-03-10",
+      }),
+    ),
+  );
+}
+
+interface GitHubBillingFetchResult {
+  readonly history: GitHubCopilotBillingHistory;
+  readonly credentialKey: string;
+  readonly loadedDayPeriods: ReadonlySet<string>;
+  readonly loadedModelPeriods: ReadonlySet<string>;
+}
+
+function mergeGitHubBillingRefresh(
+  previous: GitHubCopilotBillingHistory | null,
+  refresh: GitHubBillingFetchResult,
+): GitHubCopilotBillingHistory {
+  if (previous === null) return refresh.history;
+  const days = [
+    ...previous.days.filter((entry) => !refresh.loadedDayPeriods.has(entry.day.slice(0, 7))),
+    ...refresh.history.days,
+  ];
+  const models = [
+    ...previous.models.filter(
+      (entry) => !refresh.loadedModelPeriods.has(`${entry.year}:${entry.unit}`),
+    ),
+    ...refresh.history.models,
+  ];
+  return {
+    ...refresh.history,
+    days: days.toSorted((left, right) => left.day.localeCompare(right.day)),
+    models: models.toSorted((left, right) => right.quantity - left.quantity),
+  };
+}
+
+const fetchGitHubCopilotBillingHistory = Effect.fn("fetchGitHubCopilotBillingHistory")(function* (
+  settings: ServerSettings,
+  suppliedTokens?: ReadonlyArray<string>,
+) {
+  if (!githubCopilotUsageEnabled(settings)) return null;
+  const updatedAt = DateTime.toEpochMillis(yield* DateTime.now);
+  const currentParts = DateTime.toParts(DateTime.makeUnsafe(updatedAt));
+  const currentYear = currentParts.year;
+  const tokens = suppliedTokens ?? (yield* resolveGitHubBillingTokens(settings));
+  if (tokens.length === 0) {
+    return {
+      history: {
+        status: "unauthenticated",
+        message: "Authorize GitHub billing history with `gh auth refresh -h github.com -s user`.",
+        days: [],
+        models: [],
+        updatedAt,
+      },
+      credentialKey: "missing",
+      loadedDayPeriods: new Set<string>(),
+      loadedModelPeriods: new Set<string>(),
+    } satisfies GitHubBillingFetchResult;
+  }
+
+  // A Copilot session token often reads quota but lacks the `Plan`/`user`
+  // permission required by the billing API. Probe each candidate and fall
+  // back instead of assuming the first authenticated token can do both jobs.
+  let selected: { readonly token: string; readonly login: string } | null = null;
+  let identityFallback: { readonly token: string; readonly login: string } | null = null;
+  let sawUnauthorized = false;
+  for (const token of tokens) {
+    const identity = yield* githubBillingRequest(`${GITHUB_API_URL}/user`, token);
+    const login =
+      identity?.status === 200 &&
+      typeof identity.payload === "object" &&
+      identity.payload !== null &&
+      typeof (identity.payload as Record<string, unknown>).login === "string"
+        ? ((identity.payload as Record<string, unknown>).login as string)
+        : null;
+    if (login === null) {
+      sawUnauthorized ||= identity?.status === 401 || identity?.status === 403;
+      continue;
+    }
+    identityFallback ??= { token, login };
+    const probe = yield* githubBillingRequest(
+      `${GITHUB_API_URL}/users/${encodeURIComponent(login)}/settings/billing/usage?year=${currentYear}&month=${currentParts.month}`,
+      token,
+    );
+    if (probe?.status === 200) {
+      selected = { token, login };
+      break;
+    }
+    sawUnauthorized ||= probe?.status === 401 || probe?.status === 403;
+  }
+  selected ??= identityFallback;
+  if (selected === null) {
+    return {
+      history: {
+        status: sawUnauthorized ? "unauthenticated" : "error",
+        message: sawUnauthorized
+          ? "GitHub authorization cannot read personal billing history. Refresh `gh` auth with the `user` scope."
+          : "GitHub billing history is temporarily unavailable.",
+        days: [],
+        models: [],
+        updatedAt,
+      },
+      credentialKey: githubCredentialFingerprint(tokens.join("\0")),
+      loadedDayPeriods: new Set<string>(),
+      loadedModelPeriods: new Set<string>(),
+    } satisfies GitHubBillingFetchResult;
+  }
+  const { token, login } = selected;
+  const years = [currentYear - 1, currentYear];
+  const yearMonths = years.flatMap((year) =>
+    Array.from({ length: year === currentYear ? currentParts.month : 12 }, (_, index) => ({
+      year,
+      month: index + 1,
+    })),
+  );
+  const encodedLogin = encodeURIComponent(login);
+  const reports = yield* Effect.all(
+    [
+      // A year-only request is aggregated into one row per month. Asking for
+      // each month returns GitHub's exact dated ledger rows, which are needed
+      // for an honest daily heatmap.
+      ...yearMonths.map(({ year, month }) =>
+        githubBillingRequest(
+          `${GITHUB_API_URL}/users/${encodedLogin}/settings/billing/usage?year=${year}&month=${month}`,
+          token,
+        ).pipe(Effect.map((response) => ({ kind: "days" as const, year, month, response }))),
+      ),
+      ...years.flatMap((year) => [
+        githubBillingRequest(
+          `${GITHUB_API_URL}/users/${encodedLogin}/settings/billing/premium_request/usage?year=${year}`,
+          token,
+        ).pipe(
+          Effect.map((response) => ({
+            kind: "models" as const,
+            year,
+            unit: "requests" as const,
+            response,
+          })),
+        ),
+        githubBillingRequest(
+          `${GITHUB_API_URL}/users/${encodedLogin}/settings/billing/ai_credit/usage?year=${year}`,
+          token,
+        ).pipe(
+          Effect.map((response) => ({
+            kind: "models" as const,
+            year,
+            unit: "aiCredits" as const,
+            response,
+          })),
+        ),
+      ]),
+    ],
+    { concurrency: 3 },
+  );
+  const successful = reports.filter(({ response }) => response?.status === 200);
+  const successfulDayReports = reports.filter(
+    ({ kind, response }) => kind === "days" && response?.status === 200,
+  );
+  const successfulModelReports = reports.filter(
+    ({ kind, response }) => kind === "models" && response?.status === 200,
+  );
+  const allDailyPeriodsLoaded = successfulDayReports.length === yearMonths.length;
+  const allModelPeriodsLoaded = successfulModelReports.length === years.length * 2;
+  const unauthorized = reports.some(
+    ({ response }) => response?.status === 401 || response?.status === 403,
+  );
+  const days = successful.flatMap(({ kind, response }) =>
+    kind === "days" ? parseGitHubCopilotBillingDays(response!.payload) : [],
+  );
+  const models = successful.flatMap(({ kind, year, response }) =>
+    kind === "models" ? parseGitHubCopilotBillingModels(response!.payload, year) : [],
+  );
+  const history = {
+    status:
+      allDailyPeriodsLoaded && allModelPeriodsLoaded
+        ? "ok"
+        : unauthorized
+          ? "unauthenticated"
+          : "error",
+    message:
+      allDailyPeriodsLoaded && allModelPeriodsLoaded
+        ? null
+        : successfulDayReports.length > 0 || successfulModelReports.length > 0
+          ? `Some GitHub billing ${!allDailyPeriodsLoaded && !allModelPeriodsLoaded ? "days and model reports" : !allDailyPeriodsLoaded ? "days" : "model reports"} could not be refreshed; retained history is shown.`
+          : unauthorized
+            ? "GitHub authorization cannot read personal billing history."
+            : "GitHub billing history is temporarily unavailable.",
+    days: days.toSorted((left, right) => left.day.localeCompare(right.day)),
+    models: models.toSorted((left, right) => right.quantity - left.quantity),
+    updatedAt,
+  } satisfies GitHubCopilotBillingHistory;
+  return {
+    history,
+    credentialKey: githubCredentialFingerprint(`${login}\0${token}`),
+    loadedDayPeriods: new Set(
+      reports.flatMap((report) =>
+        report.kind === "days" && report.response?.status === 200
+          ? [`${report.year}-${`${report.month}`.padStart(2, "0")}`]
+          : [],
+      ),
+    ),
+    loadedModelPeriods: new Set(
+      reports.flatMap((report) =>
+        report.kind === "models" && report.response?.status === 200
+          ? [`${report.year}:${report.unit}`]
+          : [],
+      ),
+    ),
+  } satisfies GitHubBillingFetchResult;
+});
+
+const getGitHubCopilotBillingHistory = Effect.fn("getGitHubCopilotBillingHistory")(function* (
+  settings: ServerSettings,
+) {
+  if (!githubCopilotUsageEnabled(settings)) return null;
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const tokens = yield* resolveGitHubBillingTokens(settings);
+  const credentialSetKey = githubCredentialFingerprint(tokens.join("\0"));
+  const key = `${githubCopilotUsageSettingsKey(settings)}:${credentialSetKey}`;
+  const matchingCache = copilotBillingCache?.key.startsWith(`${key}:`) ? copilotBillingCache : null;
+  if (matchingCache?.expiresAt && matchingCache.expiresAt > now) {
+    return matchingCache.history;
+  }
+  if (matchingCache !== null) {
+    if (!copilotBillingRefreshInFlight) {
+      copilotBillingRefreshInFlight = true;
+      yield* fetchGitHubCopilotBillingHistory(settings, tokens).pipe(
+        Effect.tap((refresh) =>
+          refresh === null
+            ? Effect.void
+            : Effect.sync(() => {
+                const history = mergeGitHubBillingRefresh(matchingCache.history, refresh);
+                copilotBillingCache = {
+                  key: `${key}:${refresh.credentialKey}`,
+                  expiresAt:
+                    now +
+                    (history.status === "ok"
+                      ? GITHUB_COPILOT_BILLING_CACHE_TTL_MS
+                      : USAGE_CACHE_TTL_MS),
+                  history,
+                };
+              }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            copilotBillingRefreshInFlight = false;
+          }),
+        ),
+        Effect.forkDetach({ startImmediately: true }),
+      );
+    }
+    return matchingCache.history;
+  }
+  const fetched = yield* fetchGitHubCopilotBillingHistory(settings, tokens);
+  let resolvedHistory: GitHubCopilotBillingHistory | null = null;
+  if (fetched !== null) {
+    const history = mergeGitHubBillingRefresh(
+      copilotBillingCache?.key.startsWith(`${key}:`) ? copilotBillingCache.history : null,
+      fetched,
+    );
+    copilotBillingCache = {
+      key: `${key}:${fetched.credentialKey}`,
+      expiresAt:
+        now + (history.status === "ok" ? GITHUB_COPILOT_BILLING_CACHE_TTL_MS : USAGE_CACHE_TTL_MS),
+      history,
+    };
+    resolvedHistory = history;
+  }
+  return resolvedHistory;
+});
+
+/**
+ * History pages must never wait for the multi-period GitHub ledger sweep.
+ * Give a warm cache a small bounded chance to resolve, then refresh detached
+ * and return an explicit loading state. The next history poll picks it up.
+ */
+export const getGitHubCopilotBillingHistoryNonBlocking = Effect.fn(
+  "getGitHubCopilotBillingHistoryNonBlocking",
+)(function* (settings: ServerSettings) {
+  if (!githubCopilotUsageEnabled(settings)) return null;
+  const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+  const loadingHistory = () =>
+    ({
+      status: "unavailable",
+      message: "Loading GitHub billing history in the background...",
+      days: [],
+      models: [],
+      updatedAt: nowMs,
+    }) satisfies GitHubCopilotBillingHistory;
+
+  // The UI polls while a cold load is pending. Do not start another bounded
+  // attempt on every poll when there is no stale snapshot to return yet.
+  if (copilotBillingRefreshInFlight && copilotBillingCache === null) {
+    return loadingHistory();
+  }
+  const quick = yield* getGitHubCopilotBillingHistory(settings).pipe(
+    Effect.timeoutOption(Duration.millis(500)),
+  );
+  if (Option.isSome(quick)) return quick.value;
+  if (!copilotBillingRefreshInFlight) {
+    copilotBillingRefreshInFlight = true;
+    yield* getGitHubCopilotBillingHistory(settings).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          copilotBillingRefreshInFlight = false;
+        }),
+      ),
+      Effect.forkDetach({ startImmediately: true }),
+    );
+  }
+  return loadingHistory();
 });
 
 // ── Codex ────────────────────────────────────────────────────────────────
@@ -2442,9 +2906,11 @@ const getProviderUsageSnapshot = Effect.fn("getProviderUsageSnapshot")(function*
   return yield* Deferred.await(deferred);
 });
 
-export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
+export const getProviderUsageSnapshots = Effect.fn("getProviderUsageSnapshots")(function* (
+  settings: ServerSettings,
+) {
   const claude = defaultClaudeInstanceSettings(settings);
-  const usage = yield* Effect.all(
+  return yield* Effect.all(
     [
       getProviderUsageSnapshot(
         "claude",
@@ -2474,7 +2940,14 @@ export const getProviderUsage = Effect.fn("getProviderUsage")(function* (setting
     ],
     { concurrency: "unbounded" },
   );
-  return { usage } satisfies ServerProviderUsageResult;
+});
+
+export const getProviderUsage = Effect.fn("getProviderUsage")(function* (settings: ServerSettings) {
+  const [usage, githubCopilotBilling] = yield* Effect.all(
+    [getProviderUsageSnapshots(settings), getGitHubCopilotBillingHistory(settings)],
+    { concurrency: "unbounded" },
+  );
+  return { usage, githubCopilotBilling } satisfies ServerProviderUsageResult;
 });
 
 /** Fallback result when server settings cannot be read at all. */
@@ -2490,6 +2963,7 @@ export const providerUsageUnavailable = Effect.fn("providerUsageUnavailable")(fu
       usageSnapshot("kilocode", "error", message, updatedAt),
       usageSnapshot("githubCopilot", "error", message, updatedAt),
     ],
+    githubCopilotBilling: null,
   } satisfies ServerProviderUsageResult;
 });
 
@@ -2526,6 +3000,7 @@ function providerUsageFetchOptionsForTests(input: ProviderUsageFetchResultForTes
 
 /** Exposed for tests. */
 export const __testing = {
+  mergeGitHubBillingRefresh,
   getProviderUsageSnapshot: <R>(
     provider: ProviderUsageProviderKind,
     key: string,
@@ -2579,4 +3054,6 @@ export function resetProviderUsageStateForTests(): void {
   claudeTokenCache = null;
   consumeResetInFlight = false;
   consumeResetCooldownUntil = 0;
+  copilotBillingCache = null;
+  copilotBillingRefreshInFlight = false;
 }

@@ -65,7 +65,7 @@ function snapshot(overrides: Partial<ProviderUsageSnapshot>): ProviderUsageSnaps
 function usageResult(
   ...snapshots: ReadonlyArray<ProviderUsageSnapshot>
 ): ServerProviderUsageResult {
-  return { usage: snapshots };
+  return { usage: snapshots, githubCopilotBilling: null };
 }
 
 describe("token log parsing", () => {
@@ -371,6 +371,33 @@ describe("token log parsing", () => {
       entries.map((entry) => entry.tokens),
       [50],
     );
+  });
+
+  it("scopes Codex semantic keys to the stable session id", () => {
+    const rollout = (sessionId: string) =>
+      parseCodexRolloutFile(
+        [
+          JSON.stringify({
+            timestamp: "2026-07-01T18:26:25.000Z",
+            type: "session_meta",
+            payload: { id: sessionId },
+          }),
+          JSON.stringify({
+            timestamp: "2026-07-01T18:26:26.000Z",
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                last_token_usage: { input_tokens: 100, output_tokens: 5, total_tokens: 105 },
+                total_token_usage: { input_tokens: 100, output_tokens: 5, total_tokens: 105 },
+              },
+            },
+          }),
+        ].join("\n"),
+      )[0]!;
+
+    assert.notStrictEqual(rollout("session-a").entryKey, rollout("session-b").entryKey);
+    assert.strictEqual(rollout("session-a").entryKey, rollout("session-a").entryKey);
   });
 
   it("rejects Codex lines without last token usage", () => {

@@ -57,6 +57,16 @@ describe("buildTokenSeries", () => {
     ]);
     expect(buildTokenSeries(new Map(), "2026-02-02", "2026-01-30")).toEqual([]);
   });
+
+  it("includes GitHub Copilot in combined daily totals", () => {
+    const [point] = buildTokenSeries(
+      new Map([["2026-04-06", day(["githubCopilot", 83_420_000])]]),
+      "2026-04-06",
+      "2026-04-06",
+    );
+    expect(point?.values.githubCopilot).toBe(83_420_000);
+    expect(point?.total).toBe(83_420_000);
+  });
 });
 
 describe("toCumulativeSeries", () => {

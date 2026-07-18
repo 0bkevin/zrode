@@ -33,7 +33,11 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
-import type { ProviderModelTokenActivityDay, ProviderTokenActivityKind } from "@t3tools/contracts";
+import type {
+  GitHubCopilotBillingHistory,
+  ProviderModelTokenActivityDay,
+  ProviderTokenActivityKind,
+} from "@t3tools/contracts";
 
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
@@ -245,6 +249,10 @@ export interface DayUsage {
   /** Peak session-window utilization sampled that day, when recorded. */
   readonly peakSessionPercent: number | null;
   readonly peakWeeklyPercent: number | null;
+  /** Unit-neutral activity signal for sources that report requests/credits, not tokens. */
+  readonly activityLevel?: number;
+  readonly billingRequests?: number;
+  readonly billingAiCredits?: number;
 }
 
 interface DayCell {
@@ -262,11 +270,13 @@ function peakPercent(usage: DayUsage): number {
 
 function usageRank(usage: DayUsage): number {
   // Tokens dominate; percent breaks ties for token-less sampled days.
-  return usage.tokens > 0 ? usage.tokens : peakPercent(usage) / 1_000;
+  return usage.tokens > 0
+    ? usage.tokens
+    : Math.max(peakPercent(usage) / 1_000, (usage.activityLevel ?? 0) / 10);
 }
 
 export function isActiveUsage(usage: DayUsage): boolean {
-  return usage.tokens > 0 || peakPercent(usage) > 0;
+  return usage.tokens > 0 || peakPercent(usage) > 0 || (usage.activityLevel ?? 0) > 0;
 }
 
 /**
@@ -306,6 +316,7 @@ export function usageLevel(usage: DayUsage, tokenScale: (tokens: number) => numb
     return tokenScale(usage.tokens);
   }
   const percent = peakPercent(usage);
+  if ((usage.activityLevel ?? 0) > 0) return usage.activityLevel ?? 0;
   if (percent <= 0) return 0;
   if (percent < 25) return 1;
   if (percent < 50) return 2;
@@ -378,6 +389,7 @@ interface UsageStats {
     readonly key: string;
     readonly tokens: number;
     readonly percent: number | null;
+    readonly activityLevel?: number;
   } | null;
 }
 
@@ -394,11 +406,21 @@ export function computeStats(
     const dayTokens = usages.reduce((total, usage) => total + usage.tokens, 0);
     totalTokens += dayTokens;
     const dayPercent = Math.max(0, ...usages.map(peakPercent));
-    const rank = dayTokens > 0 ? dayTokens : dayPercent / 1_000;
+    const dayActivityLevel = Math.max(0, ...usages.map((usage) => usage.activityLevel ?? 0));
+    const rank = dayTokens > 0 ? dayTokens : Math.max(dayPercent / 1_000, dayActivityLevel / 10);
     const bestRank =
-      peakDay === null ? -1 : peakDay.tokens > 0 ? peakDay.tokens : (peakDay.percent ?? 0) / 1_000;
+      peakDay === null
+        ? -1
+        : peakDay.tokens > 0
+          ? peakDay.tokens
+          : Math.max((peakDay.percent ?? 0) / 1_000, (peakDay.activityLevel ?? 0) / 10);
     if (rank > bestRank) {
-      peakDay = { key, tokens: dayTokens, percent: dayPercent > 0 ? dayPercent : null };
+      peakDay = {
+        key,
+        tokens: dayTokens,
+        percent: dayPercent > 0 ? dayPercent : null,
+        activityLevel: dayActivityLevel,
+      };
     }
   }
 
@@ -449,6 +471,12 @@ function usageSummary(usage: DayUsage): string {
   if (usage.tokens > 0) {
     parts.push(`${formatTokens(usage.tokens)} tokens`);
   }
+  if ((usage.billingRequests ?? 0) > 0) {
+    parts.push(`${formatBillingQuantity(usage.billingRequests ?? 0)} premium requests`);
+  }
+  if ((usage.billingAiCredits ?? 0) > 0) {
+    parts.push(`${formatBillingQuantity(usage.billingAiCredits ?? 0)} AI credits`);
+  }
   if (usage.peakSessionPercent !== null && usage.peakSessionPercent > 0) {
     parts.push(`session peak ${Math.round(usage.peakSessionPercent)}%`);
   }
@@ -483,25 +511,7 @@ function HeatmapTooltipContent({ cell }: { cell: DayCell }) {
               aria-hidden
             />
             <span className="text-muted-foreground">
-              {PROVIDER_LABEL[usage.provider]}{" "}
-              {usage.tokens > 0 ? (
-                <>
-                  <span className="tabular-nums text-foreground">{formatTokens(usage.tokens)}</span>
-                  <span className="text-muted-foreground/60"> tokens</span>
-                </>
-              ) : null}
-              {usage.peakSessionPercent !== null && usage.peakSessionPercent > 0 ? (
-                <span className="text-muted-foreground/60">
-                  {usage.tokens > 0 ? " · " : " "}
-                  session {Math.round(usage.peakSessionPercent)}%
-                </span>
-              ) : null}
-              {usage.peakWeeklyPercent !== null && usage.peakWeeklyPercent > 0 ? (
-                <span className="text-muted-foreground/60">
-                  {" "}
-                  · wk {Math.round(usage.peakWeeklyPercent)}%
-                </span>
-              ) : null}
+              {PROVIDER_LABEL[usage.provider]} {usageSummary(usage)}
             </span>
           </div>
         ))
@@ -790,6 +800,7 @@ function StatTile({
 function peakDayValue(stats: UsageStats): string {
   if (!stats.peakDay) return "—";
   if (stats.peakDay.tokens > 0) return formatTokens(stats.peakDay.tokens);
+  if ((stats.peakDay.activityLevel ?? 0) > 0) return "Activity";
   return stats.peakDay.percent !== null ? `${Math.round(stats.peakDay.percent)}%` : "—";
 }
 
@@ -830,6 +841,297 @@ interface ProviderUsageSection {
   readonly peakAllowancePercent?: number | null;
   readonly topModel: ReturnType<typeof estimateApiEquivalentCost>["models"][number] | null;
   readonly estimatedCostUsd: number | null;
+  readonly copilotBilling: GitHubCopilotBillingHistory | null;
+}
+
+function formatBillingQuantity(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
+
+type CopilotBillingUnit = GitHubCopilotBillingHistory["days"][number]["unit"];
+type CopilotBillingTotals = Record<CopilotBillingUnit, number>;
+
+function copilotBillingCellColor(intensityRatio: number): string | undefined {
+  if (intensityRatio <= 0) return undefined;
+  const intensity = 18 + Math.max(0, Math.min(1, intensityRatio)) * 64;
+  return `color-mix(in srgb, ${PROVIDER_HUE.githubCopilot} ${intensity}%, transparent)`;
+}
+
+/**
+ * Exact daily GitHub billing activity. Requests and AI credits remain separate
+ * from token counts, while the intensity normalizes each billing unit against
+ * its own peak so the 2026 unit transition remains visually meaningful.
+ */
+export function CopilotBillingHeatmap({
+  days,
+  calendar,
+  tokenScale,
+}: {
+  days: GitHubCopilotBillingHistory["days"];
+  calendar: CalendarModel;
+  tokenScale: (tokens: number) => number;
+}) {
+  const totals = new Map<string, CopilotBillingTotals>();
+  for (const entry of days) {
+    const key = entry.day;
+    const current = totals.get(key) ?? { requests: 0, aiCredits: 0 };
+    current[entry.unit] += entry.quantity;
+    totals.set(key, current);
+  }
+  const maxRequests = Math.max(0, ...[...totals.values()].map((entry) => entry.requests));
+  const maxAiCredits = Math.max(0, ...[...totals.values()].map((entry) => entry.aiCredits));
+  const columnTemplate = `repeat(${calendar.weeks.length}, minmax(0, 1fr))`;
+
+  return (
+    <div className="min-w-0" data-testid="copilot-billing-heatmap">
+      <div
+        className="ml-7 grid min-w-0 text-[9px] leading-none text-muted-foreground/60"
+        style={{ gridTemplateColumns: columnTemplate, columnGap: CELL_GAP }}
+        aria-hidden
+      >
+        {calendar.monthLabels.map((month) => (
+          <span key={month.key} className="overflow-visible whitespace-nowrap">
+            {month.label}
+          </span>
+        ))}
+      </div>
+      <div className="mt-1 flex w-full min-w-0 gap-1.5">
+        <div
+          className="grid w-[22px] shrink-0 grid-rows-7 text-[9px] leading-none text-muted-foreground/60"
+          style={{ rowGap: CELL_GAP }}
+          aria-hidden
+        >
+          {(
+            [
+              ["sun", ""],
+              ["mon", "Mon"],
+              ["tue", ""],
+              ["wed", "Wed"],
+              ["thu", ""],
+              ["fri", "Fri"],
+              ["sat", ""],
+            ] as const
+          ).map(([key, label]) => (
+            <span key={key} className="flex items-center">
+              {label}
+            </span>
+          ))}
+        </div>
+        <div
+          className="grid min-w-0 flex-1 grid-flow-col"
+          style={{
+            gridTemplateRows: "repeat(7, minmax(0, 1fr))",
+            gridTemplateColumns: columnTemplate,
+            gap: CELL_GAP,
+          }}
+          role="group"
+          aria-label="GitHub Copilot daily billing activity"
+        >
+          {calendar.weeks.map((week) =>
+            week.map((cell) => {
+              if (cell.isFuture) {
+                return <span key={cell.key} className="aspect-square min-w-0" aria-hidden />;
+              }
+              const value = totals.get(cell.key) ?? { requests: 0, aiCredits: 0 };
+              const localUsage = cell.usages.find((entry) => entry.provider === "githubCopilot");
+              const intensityRatio = Math.max(
+                maxRequests > 0 ? value.requests / maxRequests : 0,
+                maxAiCredits > 0 ? value.aiCredits / maxAiCredits : 0,
+                localUsage ? usageLevel(localUsage, tokenScale) / 4 : 0,
+              );
+              const backgroundColor = copilotBillingCellColor(intensityRatio);
+              const usageParts = [
+                value.requests > 0
+                  ? `${formatBillingQuantity(value.requests)} premium requests`
+                  : null,
+                value.aiCredits > 0 ? `${formatBillingQuantity(value.aiCredits)} AI credits` : null,
+                localUsage && localUsage.tokens > 0
+                  ? `${formatTokens(localUsage.tokens)} locally recorded tokens`
+                  : null,
+              ].filter((part): part is string => part !== null);
+              const title = `${formatDayLabel(cell.key)}: ${usageParts.length > 0 ? usageParts.join(", ") : "no GitHub billing usage"}`;
+              return (
+                <span
+                  key={cell.key}
+                  role="img"
+                  aria-label={title}
+                  title={title}
+                  className={cn(
+                    "aspect-square min-w-0 rounded-[2.5px]",
+                    backgroundColor === undefined && "bg-muted/50",
+                  )}
+                  style={backgroundColor === undefined ? undefined : { backgroundColor }}
+                />
+              );
+            }),
+          )}
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <p className="text-[9px] leading-relaxed text-muted-foreground/55">
+          Exact daily GitHub billing entries, with local token activity layered in when available.
+        </p>
+        <div className="flex shrink-0 items-center gap-1 text-[9px] text-muted-foreground/60">
+          Less
+          {[0, 0.25, 0.5, 0.75, 1].map((level) => (
+            <span
+              key={level}
+              className={cn("size-2.5 rounded-[2px]", level === 0 && "bg-muted/50")}
+              style={level === 0 ? undefined : { backgroundColor: copilotBillingCellColor(level) }}
+              aria-hidden
+            />
+          ))}
+          More
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function CopilotBillingHistoryPanel({
+  history,
+  calendar,
+  tokenScale,
+}: {
+  history: GitHubCopilotBillingHistory;
+  calendar: CalendarModel;
+  tokenScale: (tokens: number) => number;
+}) {
+  const monthKeys = [...new Set(history.days.map((entry) => entry.day.slice(0, 7)))].toSorted();
+  const quantityByMonth = new Map<string, { requests: number; aiCredits: number }>();
+  for (const entry of history.days) {
+    const month = entry.day.slice(0, 7);
+    const value = quantityByMonth.get(month) ?? { requests: 0, aiCredits: 0 };
+    value[entry.unit] += entry.quantity;
+    quantityByMonth.set(month, value);
+  }
+  const requests = history.days
+    .filter((entry) => entry.unit === "requests")
+    .reduce((sum, entry) => sum + entry.quantity, 0);
+  const aiCredits = history.days
+    .filter((entry) => entry.unit === "aiCredits")
+    .reduce((sum, entry) => sum + entry.quantity, 0);
+  const gross = history.days.reduce((sum, entry) => sum + entry.grossAmountUsd, 0);
+  const net = history.days.reduce((sum, entry) => sum + entry.netAmountUsd, 0);
+  const labels = monthKeys.map((month) =>
+    new Intl.DateTimeFormat("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }).format(
+      new Date(`${month}-01T00:00:00Z`),
+    ),
+  );
+  const modelGroups = (["requests", "aiCredits"] as const).map((unit) => {
+    const totals = new Map<string, number>();
+    for (const entry of history.models) {
+      if (entry.unit === unit)
+        totals.set(entry.model, (totals.get(entry.model) ?? 0) + entry.quantity);
+    }
+    return {
+      unit,
+      rows: [...totals].toSorted((left, right) => right[1] - left[1]).slice(0, 6),
+    };
+  });
+
+  // A partial refresh may fail after GitHub already returned usable ledger
+  // rows. Prefer rendering those rows with a stale/error note instead of
+  // hiding the entire historical view behind the latest status flag.
+  if (monthKeys.length === 0 && history.models.length === 0) {
+    return history.message ? (
+      <p className="text-[11px] text-muted-foreground/70">{history.message}</p>
+    ) : null;
+  }
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4 border-t border-border/40 pt-3">
+      <div>
+        <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
+          GitHub usage history
+        </span>
+        <p className="mt-1 text-[10px] text-muted-foreground/60">
+          Authoritative account ledger. Requests and AI credits are separate from locally recorded
+          tokens. Metered usage billed excludes the Copilot plan fee.
+        </p>
+        {history.status !== "ok" && history.message ? (
+          <p className="mt-1 text-[10px] text-amber-500/80">{history.message}</p>
+        ) : null}
+      </div>
+      {monthKeys.length > 0 ? (
+        <>
+          <CopilotBillingHeatmap days={history.days} calendar={calendar} tokenScale={tokenScale} />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Premium requests" value={formatBillingQuantity(requests)} />
+            <StatTile label="AI credits" value={formatBillingQuantity(aiCredits)} />
+            <StatTile label="Allowance value" value={formatUsd(gross)} />
+            <StatTile label="Metered usage billed" value={formatUsd(net)} />
+          </div>
+        </>
+      ) : (
+        <p className="text-[10px] text-muted-foreground/65">
+          Exact daily billing history is unavailable for this account; annual model reports are
+          shown below.
+        </p>
+      )}
+      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+        {requests > 0 ? (
+          <div className="min-w-0">
+            <span className="text-[10px] text-muted-foreground/60">Premium requests by month</span>
+            <UsageAreaChart
+              dayLabels={labels}
+              series={[
+                {
+                  key: "githubCopilot",
+                  label: "Requests",
+                  colorVar: PROVIDER_HUE.githubCopilot,
+                  values: monthKeys.map((day) => quantityByMonth.get(day)?.requests ?? 0),
+                },
+              ]}
+              formatValue={formatBillingQuantity}
+              height={120}
+              ariaLabel="GitHub Copilot premium requests by month"
+            />
+          </div>
+        ) : null}
+        {aiCredits > 0 ? (
+          <div className="min-w-0">
+            <span className="text-[10px] text-muted-foreground/60">AI credits by month</span>
+            <UsageAreaChart
+              dayLabels={labels}
+              series={[
+                {
+                  key: "githubCopilot",
+                  label: "AI credits",
+                  colorVar: PROVIDER_HUE.githubCopilot,
+                  values: monthKeys.map((day) => quantityByMonth.get(day)?.aiCredits ?? 0),
+                },
+              ]}
+              formatValue={formatBillingQuantity}
+              height={120}
+              ariaLabel="GitHub Copilot AI credits by month"
+            />
+          </div>
+        ) : null}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        {modelGroups.map(({ unit, rows }) =>
+          rows.length > 0 ? (
+            <div key={unit} className="min-w-0">
+              <span className="text-[10px] text-muted-foreground/60">
+                Top models by {unit === "requests" ? "requests" : "AI credits"} (annual reports)
+              </span>
+              <div className="mt-2 flex flex-col gap-2">
+                {rows.map(([model, quantity]) => (
+                  <div key={model} className="flex items-center justify-between gap-3 text-[10px]">
+                    <span className="truncate text-foreground/80">{model}</span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {formatBillingQuantity(quantity)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null,
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function ProviderUsageCard({
@@ -848,6 +1150,16 @@ export function ProviderUsageCard({
   const share = totalTokens > 0 ? (section.stats.totalTokens / totalTokens) * 100 : 0;
   const average =
     section.stats.activeDays > 0 ? section.stats.totalTokens / section.stats.activeDays : 0;
+  const copilotRequests =
+    section.copilotBilling?.days
+      .filter((entry) => entry.unit === "requests")
+      .reduce((sum, entry) => sum + entry.quantity, 0) ?? 0;
+  const copilotAiCredits =
+    section.copilotBilling?.days
+      .filter((entry) => entry.unit === "aiCredits")
+      .reduce((sum, entry) => sum + entry.quantity, 0) ?? 0;
+  const hasCopilotDailyLedger =
+    section.provider === "githubCopilot" && (section.copilotBilling?.days.length ?? 0) > 0;
 
   return (
     <Collapsible className="rounded-2xl border bg-card text-card-foreground shadow-sm/4 transition-colors hover:border-border/80 dark:shadow-none">
@@ -887,17 +1199,17 @@ export function ProviderUsageCard({
         </CollapsibleTrigger>
         {section.provider === "githubCopilot" ? (
           <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Recorded tokens" value={formatTokens(section.stats.totalTokens)} />
+            <StatTile label="Premium requests" value={formatBillingQuantity(copilotRequests)} />
+            <StatTile label="AI credits" value={formatBillingQuantity(copilotAiCredits)} />
             <StatTile
-              label="Premium quota used"
+              label="Current quota used"
               value={
                 section.peakAllowancePercent == null
                   ? "Waiting for sample"
                   : formatPercent(section.peakAllowancePercent)
               }
             />
-            <StatTile label="Sampled days" value={`${section.sampledDayCount}`} />
-            <StatTile label="Usage unit" value="Premium requests" />
-            <StatTile label="Token cost" value="Not reported" />
           </div>
         ) : (
           <div className="grid w-full grid-cols-2 gap-3 sm:grid-cols-4">
@@ -928,6 +1240,14 @@ export function ProviderUsageCard({
       </div>
       <CollapsiblePanel>
         <div className="flex flex-col gap-4 border-t border-border/40 px-4 pb-4 pt-3 sm:px-5">
+          {section.provider === "githubCopilot" && section.copilotBilling !== null ? (
+            <CopilotBillingHistoryPanel
+              history={section.copilotBilling}
+              calendar={section.calendar}
+              tokenScale={section.tokenScale}
+            />
+          ) : null}
+
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <StatTile
               label="Current streak"
@@ -945,10 +1265,12 @@ export function ProviderUsageCard({
             <StatTile label="Avg. active day" value={formatTokens(average)} />
           </div>
 
-          {hasTokens || hasSamples ? (
+          {(hasTokens || hasSamples) && !hasCopilotDailyLedger ? (
             <div className="flex min-w-0 flex-col gap-2 border-t border-border/40 pt-3">
               <span className="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60">
-                Activity calendar
+                {section.provider === "githubCopilot"
+                  ? "Locally recorded token calendar"
+                  : "Activity calendar"}
               </span>
               <UsageHeatmap
                 calendar={section.calendar}
@@ -1213,7 +1535,7 @@ function RecentActivityTable({ byDay }: { byDay: ReadonlyMap<string, ReadonlyArr
             <tr className="text-muted-foreground/60">
               <th className="py-1 pr-3 font-medium">Day</th>
               <th className="py-1 pr-3 font-medium">Subscription</th>
-              <th className="py-1 pr-3 font-medium">Tokens</th>
+              <th className="py-1 pr-3 font-medium">Usage</th>
               <th className="py-1 pr-3 font-medium">Peak session</th>
               <th className="py-1 font-medium">Peak weekly</th>
             </tr>
@@ -1224,7 +1546,20 @@ function RecentActivityTable({ byDay }: { byDay: ReadonlyMap<string, ReadonlyArr
                 <td className="py-1 pr-3">{formatDayLabel(row.day)}</td>
                 <td className="py-1 pr-3">{PROVIDER_LABEL[row.provider]}</td>
                 <td className="py-1 pr-3 tabular-nums">
-                  {row.usage.tokens > 0 ? formatTokens(row.usage.tokens) : "—"}
+                  {row.usage.tokens > 0
+                    ? `${formatTokens(row.usage.tokens)} tokens`
+                    : (row.usage.billingRequests ?? 0) > 0 || (row.usage.billingAiCredits ?? 0) > 0
+                      ? [
+                          (row.usage.billingRequests ?? 0) > 0
+                            ? `${formatBillingQuantity(row.usage.billingRequests ?? 0)} requests`
+                            : null,
+                          (row.usage.billingAiCredits ?? 0) > 0
+                            ? `${formatBillingQuantity(row.usage.billingAiCredits ?? 0)} credits`
+                            : null,
+                        ]
+                          .filter((value): value is string => value !== null)
+                          .join(", ")
+                      : "—"}
                 </td>
                 <td className="py-1 pr-3 tabular-nums">
                   {row.usage.peakSessionPercent !== null
@@ -1252,13 +1587,18 @@ function csvField(value: string): string {
 }
 
 function exportUsageCsv(byDay: ReadonlyMap<string, ReadonlyArray<DayUsage>>, todayKey: string) {
-  const lines = ["day,provider,tokens,peak_session_percent,peak_weekly_percent"];
+  const lines = [
+    "day,provider,tokens,has_activity,billing_premium_requests,billing_ai_credits,peak_session_percent,peak_weekly_percent",
+  ];
   for (const row of activityRows(byDay)) {
     lines.push(
       [
         csvField(row.day),
         csvField(row.provider),
         `${row.usage.tokens}`,
+        isActiveUsage(row.usage) ? "true" : "false",
+        `${row.usage.billingRequests ?? 0}`,
+        `${row.usage.billingAiCredits ?? 0}`,
         row.usage.peakSessionPercent !== null ? `${row.usage.peakSessionPercent}` : "",
         row.usage.peakWeeklyPercent !== null ? `${row.usage.peakWeeklyPercent}` : "",
       ].join(","),
@@ -1286,6 +1626,9 @@ interface MutableDayUsage {
   tokens: number;
   peakSessionPercent: number | null;
   peakWeeklyPercent: number | null;
+  activityLevel: number;
+  billingRequests: number;
+  billingAiCredits: number;
 }
 
 /**
@@ -1328,6 +1671,9 @@ export function UsageSettingsPanel() {
         }),
   );
   const isBackfilling = historyData?.isBackfilling ?? false;
+  const isBillingRefreshing =
+    historyData?.githubCopilotBilling?.message?.startsWith("Loading GitHub billing history") ??
+    false;
   const lastScanAt = historyData?.lastScanAt ?? null;
 
   // A requested rescan is "delivered" as soon as any response for it arrives
@@ -1360,6 +1706,13 @@ export function UsageSettingsPanel() {
     }, 3_000);
     return () => clearInterval(id);
   }, [isBackfilling, refreshHistory]);
+  useEffect(() => {
+    if (!isBillingRefreshing) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") refreshHistory();
+    }, 2_000);
+    return () => clearInterval(id);
+  }, [isBillingRefreshing, refreshHistory]);
 
   // Anchor the calendar to the server's current day; fall back to the
   // browser clock (kept fresh across midnight) until data arrives.
@@ -1387,6 +1740,9 @@ export function UsageSettingsPanel() {
           tokens: 0,
           peakSessionPercent: null,
           peakWeeklyPercent: null,
+          activityLevel: 0,
+          billingRequests: 0,
+          billingAiCredits: 0,
         } satisfies MutableDayUsage);
       providers.set(provider, usage);
       return usage;
@@ -1398,6 +1754,28 @@ export function UsageSettingsPanel() {
       const usage = upsert(sample.day, sample.provider);
       usage.peakSessionPercent = sample.peakSessionPercent;
       usage.peakWeeklyPercent = sample.peakWeeklyPercent;
+    }
+    const billingDays = historyData?.githubCopilotBilling?.days ?? [];
+    const billingByDay = new Map<string, { requests: number; aiCredits: number }>();
+    for (const entry of billingDays) {
+      const current = billingByDay.get(entry.day) ?? { requests: 0, aiCredits: 0 };
+      current[entry.unit] += entry.quantity;
+      billingByDay.set(entry.day, current);
+    }
+    const requestScale = makeTokenLevelScale(
+      [...billingByDay.values()].map((entry) => entry.requests),
+    );
+    const creditScale = makeTokenLevelScale(
+      [...billingByDay.values()].map((entry) => entry.aiCredits),
+    );
+    for (const [day, billing] of billingByDay) {
+      const usage = upsert(day, "githubCopilot");
+      usage.billingRequests = billing.requests;
+      usage.billingAiCredits = billing.aiCredits;
+      usage.activityLevel = Math.max(
+        requestScale(billing.requests),
+        creditScale(billing.aiCredits),
+      );
     }
     const result = new Map<string, ReadonlyArray<DayUsage>>();
     for (const [day, providers] of map) {
@@ -1644,6 +2022,15 @@ export function UsageSettingsPanel() {
           peakAllowancePercent,
           topModel: topModel ?? null,
           estimatedCostUsd: apiCostEstimate.providerCosts.get(provider) ?? null,
+          copilotBilling:
+            provider === "githubCopilot" && historyData?.githubCopilotBilling
+              ? {
+                  ...historyData.githubCopilotBilling,
+                  days: historyData.githubCopilotBilling.days.filter(
+                    (entry) => entry.day >= calendar.startKey && entry.day <= todayKey,
+                  ),
+                }
+              : null,
         };
       }),
     [
@@ -1654,6 +2041,7 @@ export function UsageSettingsPanel() {
       todayKey,
       tokenMode,
       historyData?.days,
+      historyData?.githubCopilotBilling,
       apiCostEstimate,
     ],
   );

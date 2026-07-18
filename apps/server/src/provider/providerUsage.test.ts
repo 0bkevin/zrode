@@ -27,15 +27,19 @@ import {
   fetchGrokUsage,
   fetchKiloUsage,
   getProviderUsage,
+  githubCredentialFingerprint,
   invalidateProviderUsageCache,
   mapCodexExtraLimits,
   normalizeResetsAt,
+  orderGitHubBillingTokens,
   parseClaudeLimits,
   parseClaudeOAuthCredentials,
   parseCodexBackendAuth,
   parseCodexResetCredits,
   parseGrokAuthCredentials,
   parseGrokBilling,
+  parseGitHubCopilotBillingModels,
+  parseGitHubCopilotBillingDays,
   parseGitHubCopilotUsage,
   parseKiloAuthCredentials,
   parseKiloBalance,
@@ -71,6 +75,142 @@ describe("parseGitHubCopilotUsage", () => {
     });
     expect(parsed?.extraLimits).toEqual([]);
     expect(parsed?.planLabel).toBe("Individual Pro");
+  });
+});
+
+describe("GitHub Copilot billing history", () => {
+  it("prefers gh billing auth, dedupes candidates, and hashes cache identities", () => {
+    expect(
+      orderGitHubBillingTokens({
+        ghToken: " gh-token ",
+        ghEnvToken: "gh-token",
+        githubEnvToken: "api-token",
+        copilotToken: "copilot-token",
+      }),
+    ).toEqual(["gh-token", "api-token", "copilot-token"]);
+    expect(githubCredentialFingerprint("secret-token")).toHaveLength(64);
+    expect(githubCredentialFingerprint("secret-token")).not.toContain("secret-token");
+    expect(githubCredentialFingerprint("other-token")).not.toBe(
+      githubCredentialFingerprint("secret-token"),
+    );
+  });
+
+  it("retains periods that a partial refresh could not reload", () => {
+    const previous = {
+      status: "ok" as const,
+      message: null,
+      days: [
+        {
+          day: "2025-08-01",
+          unit: "requests" as const,
+          quantity: 10,
+          grossAmountUsd: 1,
+          discountAmountUsd: 1,
+          netAmountUsd: 0,
+          sku: "request",
+        },
+        {
+          day: "2025-09-01",
+          unit: "requests" as const,
+          quantity: 20,
+          grossAmountUsd: 2,
+          discountAmountUsd: 2,
+          netAmountUsd: 0,
+          sku: "request",
+        },
+      ],
+      models: [
+        {
+          year: 2025,
+          unit: "requests" as const,
+          model: "old-model",
+          quantity: 30,
+          grossAmountUsd: 3,
+          discountAmountUsd: 3,
+          netAmountUsd: 0,
+        },
+      ],
+      updatedAt: 1,
+    };
+    const merged = __testing.mergeGitHubBillingRefresh(previous, {
+      credentialKey: "account-a",
+      loadedDayPeriods: new Set(["2025-09"]),
+      loadedModelPeriods: new Set<string>(),
+      history: {
+        status: "error",
+        message: "partial",
+        days: [{ ...previous.days[1]!, quantity: 25 }],
+        models: [],
+        updatedAt: 2,
+      },
+    });
+    expect(merged.days.map(({ day, quantity }) => [day, quantity])).toEqual([
+      ["2025-08-01", 10],
+      ["2025-09-01", 25],
+    ]);
+    expect(merged.models).toEqual(previous.models);
+    expect(merged.status).toBe("error");
+  });
+
+  it("keeps dated requests and AI credits separate from tokens", () => {
+    expect(
+      parseGitHubCopilotBillingDays({
+        usageItems: [
+          {
+            date: "2025-08-01T00:00:00Z",
+            product: "copilot",
+            sku: "Copilot Premium Request",
+            unitType: "Requests",
+            quantity: 299.58,
+            grossAmount: 11.9832,
+            discountAmount: 11.9832,
+            netAmount: 0,
+          },
+          {
+            date: "2026-06-01T00:00:00Z",
+            product: "copilot",
+            sku: "Copilot AI Credits",
+            unitType: "AICredits",
+            quantity: 155.02431,
+            grossAmount: 1.5502431,
+            discountAmount: 1.5502431,
+            netAmount: 0,
+          },
+          { date: "2026-06-01T00:00:00Z", product: "actions", quantity: 999 },
+        ],
+      }),
+    ).toEqual([
+      expect.objectContaining({ day: "2025-08-01", unit: "requests", quantity: 299.58 }),
+      expect.objectContaining({ day: "2026-06-01", unit: "aiCredits", quantity: 155.02431 }),
+    ]);
+  });
+
+  it("parses annual model quantities from GitHub's billing report", () => {
+    expect(
+      parseGitHubCopilotBillingModels(
+        {
+          usageItems: [
+            {
+              model: "Claude Sonnet 4",
+              sku: "Copilot Premium Request",
+              unitType: "requests",
+              grossQuantity: 373,
+              grossAmount: 14.92,
+              discountAmount: 14.92,
+              netAmount: 0,
+            },
+          ],
+        },
+        2025,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        year: 2025,
+        unit: "requests",
+        model: "Claude Sonnet 4",
+        quantity: 373,
+      }),
+    ]);
   });
 });
 
