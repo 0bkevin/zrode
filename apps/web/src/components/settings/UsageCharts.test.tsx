@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildAreaBands,
   buildTokenSeries,
   toCumulativeSeries,
   UsageAreaChart,
@@ -100,6 +101,19 @@ describe("chart rendering", () => {
       values: [10, 5, 0],
     },
   ];
+
+  it("plots every provider from zero instead of stacking providers together", () => {
+    const bands = buildAreaBands(series);
+
+    expect(bands.find((entry) => entry.layer.key === "claude")!.band[0]).toEqual({
+      base: 0,
+      top: 100,
+    });
+    expect(bands.find((entry) => entry.layer.key === "opencode")!.band[0]).toEqual({
+      base: 0,
+      top: 10,
+    });
+  });
 
   it("renders an accessible area chart with all series hues", () => {
     const markup = renderToStaticMarkup(

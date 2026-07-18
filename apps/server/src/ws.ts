@@ -1316,6 +1316,7 @@ const makeWsRpcLayer = (
                   return {
                     days: [],
                     tokenActivity: [],
+                    modelActivity: [],
                     isBackfilling: false,
                     today: ProviderUsageHistory.localDayKey(nowMs),
                     lastScanAt: null,

@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeSqlite from "node:sqlite";
 import {
   DEFAULT_SERVER_SETTINGS,
   type ProviderUsageSnapshot,
@@ -20,7 +21,11 @@ import {
   localDayKey,
   make,
   parseClaudeTranscriptLine,
+  parseClaudeTranscriptEntries,
+  parseCodexRolloutFile,
   parseCodexRolloutLine,
+  parseCodexTurnContextModel,
+  parseGrokUnifiedLog,
   parseOpenCodeMessageFile,
   USAGE_HISTORY_RETENTION_DAYS,
 } from "./ProviderUsageHistory.ts";
@@ -34,6 +39,7 @@ const TEST_SETTINGS: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS.providers,
     claudeAgent: { ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent, enabled: false },
     codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+    grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
     opencode: { ...DEFAULT_SERVER_SETTINGS.providers.opencode, enabled: false },
   },
 };
@@ -69,6 +75,7 @@ describe("token log parsing", () => {
       requestId: "req_1",
       message: {
         id: "msg_1",
+        model: "claude-sonnet-5",
         usage: {
           input_tokens: 100,
           output_tokens: 50,
@@ -79,9 +86,20 @@ describe("token log parsing", () => {
     });
     const parsed = parseClaudeTranscriptLine(line);
     assert.deepStrictEqual(parsed, {
-      entryKey: "msg_1:req_1",
+      entryKey: "msg_1",
       epochMs: Date.parse("2026-07-04T20:53:16.209Z"),
       tokens: 200,
+      model: "claude-sonnet-5",
+      inputTokens: 100,
+      cachedInputTokens: 25,
+      cacheWriteTokens: 25,
+      cacheWrite1hTokens: 0,
+      outputTokens: 50,
+      recordedCostUsd: null,
+      isFast: false,
+      usesLongContext: false,
+      dedupPriority: 1_000_000_000_000_400,
+      legacyEntryPrefix: "msg_1",
     });
   });
 
@@ -99,6 +117,52 @@ describe("token log parsing", () => {
     );
   });
 
+  it("keeps Claude cache duration, fast tier, carried cost, and advisor usage", () => {
+    const entries = parseClaudeTranscriptEntries(
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-04T20:53:16.209Z",
+        costUSD: 0.42,
+        message: {
+          id: "msg_rich",
+          model: "claude-opus-4-8",
+          usage: {
+            input_tokens: 10,
+            output_tokens: 20,
+            speed: "fast",
+            cache_creation: {
+              ephemeral_5m_input_tokens: 30,
+              ephemeral_1h_input_tokens: 40,
+            },
+            cache_read_input_tokens: 50,
+            iterations: [
+              {
+                type: "advisor_message",
+                model: "claude-haiku-4-5",
+                input_tokens: 2,
+                output_tokens: 3,
+              },
+            ],
+          },
+        },
+      }),
+    );
+    assert.lengthOf(entries, 2);
+    assert.include(entries[0], {
+      tokens: 150,
+      cacheWriteTokens: 30,
+      cacheWrite1hTokens: 40,
+      recordedCostUsd: 0.42,
+      isFast: true,
+    });
+    assert.include(entries[1], {
+      entryKey: "msg_rich:advisor:0",
+      tokens: 5,
+      model: "claude-haiku-4-5",
+      recordedCostUsd: null,
+    });
+  });
+
   it("parses a Codex rollout token_count line", () => {
     const line = JSON.stringify({
       timestamp: "2026-07-01T18:26:25.971Z",
@@ -107,16 +171,119 @@ describe("token log parsing", () => {
         type: "token_count",
         info: {
           total_token_usage: { total_tokens: 100_000 },
-          last_token_usage: { input_tokens: 14_475, output_tokens: 321, total_tokens: 14_796 },
+          last_token_usage: {
+            input_tokens: 14_475,
+            cached_input_tokens: 4_000,
+            output_tokens: 321,
+            total_tokens: 14_796,
+          },
         },
       },
     });
-    const parsed = parseCodexRolloutLine(line, "rollout-a.jsonl", 7);
+    const parsed = parseCodexRolloutLine(line, "rollout-a.jsonl", 7, "gpt-5.3-codex");
     assert.deepStrictEqual(parsed, {
       entryKey: "rollout-a.jsonl:7",
       epochMs: Date.parse("2026-07-01T18:26:25.971Z"),
       tokens: 14_796,
+      model: "gpt-5.3-codex",
+      inputTokens: 10_475,
+      cachedInputTokens: 4_000,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      outputTokens: 321,
+      recordedCostUsd: null,
+      isFast: false,
+      usesLongContext: false,
+      dedupPriority: 0,
     });
+  });
+
+  it("reads the active model from a Codex turn context", () => {
+    assert.strictEqual(
+      parseCodexTurnContextModel(
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.4" } }),
+      ),
+      "gpt-5.4",
+    );
+    assert.isNull(parseCodexTurnContextModel('{"type":"event_msg","payload":{}}'));
+  });
+
+  it("recovers Codex deltas, skips stale totals, and retains priority tier", () => {
+    const token = (timestamp: string, info: Record<string, unknown>) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: { type: "token_count", info },
+      });
+    const entries = parseCodexRolloutFile(
+      [
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.4" } }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "thread_settings_applied",
+            thread_settings: { service_tier: "priority" },
+          },
+        }),
+        token("2026-07-01T18:26:25.000Z", {
+          total_token_usage: { input_tokens: 100, total_tokens: 100 },
+          last_token_usage: { input_tokens: 100, total_tokens: 100 },
+        }),
+        token("2026-07-01T18:26:26.000Z", {
+          total_token_usage: { input_tokens: 100, total_tokens: 100 },
+          last_token_usage: { input_tokens: 100, total_tokens: 100 },
+        }),
+        token("2026-07-01T18:26:27.000Z", {
+          total_token_usage: { input_tokens: 160, total_tokens: 160 },
+        }),
+      ].join("\n"),
+    );
+    assert.deepStrictEqual(
+      entries.map((entry) => [entry.tokens, entry.isFast]),
+      [
+        [100, true],
+        [60, true],
+      ],
+    );
+  });
+
+  it("suppresses copied parent history in a Codex child rollout", () => {
+    const created = "2026-07-01T18:26:25.000Z";
+    const token = (timestamp: string, input: number, total: number) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: total, total_tokens: total },
+            last_token_usage: { input_tokens: input, total_tokens: input },
+          },
+        },
+      });
+    const entries = parseCodexRolloutFile(
+      [
+        JSON.stringify({
+          timestamp: created,
+          type: "session_meta",
+          payload: { thread_source: "subagent" },
+        }),
+        token("2026-07-01T18:26:26.000Z", 100, 100),
+        JSON.stringify({
+          timestamp: "2026-07-01T18:26:27.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            started_at: Math.floor(Date.parse(created) / 1_000) + 2,
+          },
+        }),
+        token("2026-07-01T18:26:28.000Z", 50, 150),
+      ].join("\n"),
+    );
+    assert.deepStrictEqual(
+      entries.map((entry) => entry.tokens),
+      [50],
+    );
   });
 
   it("rejects Codex lines without last token usage", () => {
@@ -139,7 +306,7 @@ describe("token log parsing", () => {
       role: "assistant",
       sessionID: "ses_1",
       modelID: "gemini-3-pro-preview",
-      providerID: "google-vertex",
+      providerID: "opencode",
       time: { created: 1_770_416_054_123, completed: 1_770_416_060_856 },
       tokens: { input: 11_312, output: 36, reasoning: 223, cache: { read: 100, write: 50 } },
       cost: 0.025_732,
@@ -148,6 +315,16 @@ describe("token log parsing", () => {
       entryKey: "msg_1",
       epochMs: 1_770_416_060_856,
       tokens: 11_721,
+      model: "opencode/gemini-3-pro-preview",
+      inputTokens: 11_312,
+      cachedInputTokens: 100,
+      cacheWriteTokens: 50,
+      cacheWrite1hTokens: 0,
+      outputTokens: 259,
+      recordedCostUsd: 0.025_732,
+      isFast: false,
+      usesLongContext: false,
+      dedupPriority: 0,
     });
   });
 
@@ -161,6 +338,48 @@ describe("token log parsing", () => {
       ),
     );
     assert.isNull(parseOpenCodeMessageFile("not json"));
+  });
+
+  it("does not treat BYO OpenCode zero-cost placeholders as authoritative", () => {
+    const parsed = parseOpenCodeMessageFile(
+      JSON.stringify({
+        id: "msg_byo",
+        role: "assistant",
+        providerID: "anthropic",
+        modelID: "claude-sonnet-5",
+        cost: 0,
+        time: { created: 100 },
+        tokens: { total: 12, input: 10, output: 2 },
+      }),
+    );
+    assert.strictEqual(parsed?.tokens, 12);
+    assert.isNull(parsed?.recordedCostUsd);
+  });
+
+  it("attributes Grok token rows to the active model for each process", () => {
+    const entries = parseGrokUnifiedLog(
+      [
+        JSON.stringify({ pid: 7, msg: "model changed", ctx: { model: "grok-code-fast-1" } }),
+        JSON.stringify({
+          pid: 7,
+          ts: "2026-07-01T18:26:25.000Z",
+          msg: "shell.turn.inference_done",
+          ctx: {
+            prompt_tokens: 100,
+            cached_prompt_tokens: 20,
+            completion_tokens: 10,
+            reasoning_tokens: 5,
+          },
+        }),
+      ].join("\n"),
+    );
+    assert.include(entries[0], {
+      tokens: 115,
+      model: "grok-code-fast-1",
+      inputTokens: 80,
+      cachedInputTokens: 20,
+      outputTokens: 15,
+    });
   });
 });
 
@@ -176,7 +395,11 @@ function claudeLine(input: {
     type: "assistant",
     timestamp: input.timestamp,
     requestId: input.requestId,
-    message: { id: input.messageId, usage: { input_tokens: input.tokens, output_tokens: 0 } },
+    message: {
+      id: input.messageId,
+      model: "claude-sonnet-5",
+      usage: { input_tokens: input.tokens, output_tokens: 0 },
+    },
   });
 }
 
@@ -186,8 +409,25 @@ function codexLine(input: { readonly timestamp: string; readonly tokens: number 
     type: "event_msg",
     payload: {
       type: "token_count",
-      info: { last_token_usage: { total_tokens: input.tokens } },
+      info: {
+        total_token_usage: { input_tokens: input.tokens, total_tokens: input.tokens },
+        last_token_usage: { input_tokens: input.tokens, total_tokens: input.tokens },
+      },
     },
+  });
+}
+
+function codexTurnContext(): string {
+  return JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.4" } });
+}
+
+function openCodeHostedDatabaseMessage(): string {
+  return JSON.stringify({
+    role: "assistant",
+    providerID: "opencode-go",
+    modelID: "gpt-5.4",
+    cost: 0.02,
+    tokens: { total: 300, input: 250, output: 50 },
   });
 }
 
@@ -198,6 +438,7 @@ describe("token log scanning (integration)", () => {
       // Captured in the outer scope so the restore below always runs, even if
       // an assertion inside the generator throws.
       const previousXdg = process.env.XDG_DATA_HOME;
+      const previousGrokHome = process.env.GROK_HOME;
       return Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -213,8 +454,10 @@ describe("token log scanning (integration)", () => {
         // OpenCode resolves its store from XDG_DATA_HOME; point it at the temp
         // root and restore afterwards so no real machine data is scanned.
         process.env.XDG_DATA_HOME = root;
+        process.env.GROK_HOME = path.join(root, "grok-home");
         const opencodeMessages = path.join(root, "opencode", "storage", "message", "ses_1");
         yield* fs.makeDirectory(opencodeMessages, { recursive: true });
+        const opencodeDbPath = path.join(root, "opencode", "opencode.db");
         const dbPath = path.join(root, "history.sqlite");
 
         const settings: ServerSettings = {
@@ -226,6 +469,7 @@ describe("token log scanning (integration)", () => {
               homePath: claudeHome,
             },
             codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, homePath: codexHome },
+            grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
             opencode: { ...DEFAULT_SERVER_SETTINGS.providers.opencode, enabled: true },
           },
         };
@@ -238,6 +482,9 @@ describe("token log scanning (integration)", () => {
           JSON.stringify({
             id,
             role: "assistant",
+            modelID: "glm-5",
+            providerID: "opencode",
+            cost: 0.01,
             time: { created: nowMs - 90 * 60_000, completed: nowMs - 89 * 60_000 },
             tokens: { input: tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           });
@@ -252,14 +499,45 @@ describe("token log scanning (integration)", () => {
             "",
           ].join("\n"),
         );
-        yield* fs.writeFileString(codexFile, `${codexLine({ timestamp: t1, tokens: 500 })}\n`);
+        yield* fs.writeFileString(
+          codexFile,
+          `${codexTurnContext()}\n${codexLine({ timestamp: t1, tokens: 500 })}\n`,
+        );
         yield* fs.writeFileString(
           path.join(opencodeMessages, "msg_o1.json"),
           opencodeMessage("msg_o1", 700),
         );
+        yield* Effect.sync(() => {
+          const database = new NodeSqlite.DatabaseSync(opencodeDbPath);
+          try {
+            database.exec(
+              "CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+            );
+            database
+              .prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
+              .run("msg_db", nowMs - 80 * 60_000, openCodeHostedDatabaseMessage());
+          } finally {
+            database.close();
+          }
+        });
 
+        let seedLegacyRows = true;
         const runScan = Effect.gen(function* () {
           yield* runMigrations();
+          if (seedLegacyRows) {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`
+              INSERT INTO provider_token_entries (
+                provider, entry_key, sampled_epoch_ms, tokens
+              ) VALUES ('claude', 'msg_1:req_1', ${nowMs}, 100)
+            `;
+            yield* sql`
+              INSERT INTO provider_token_entries (
+                provider, entry_key, sampled_epoch_ms, tokens
+              ) VALUES ('codex', 'rollout-x.jsonl:2', ${nowMs}, 500)
+            `;
+            seedLegacyRows = false;
+          }
           const history = yield* make;
           let result = yield* history.readHistory({ days: 400, rescan: true }, settings);
           for (let i = 0; i < 300; i += 1) {
@@ -278,7 +556,23 @@ describe("token log scanning (integration)", () => {
         const first = yield* runScan;
         assert.strictEqual(total("claude", first), 300);
         assert.strictEqual(total("codex", first), 500);
-        assert.strictEqual(total("opencode", first), 700);
+        assert.strictEqual(total("opencode", first), 1_000);
+        assert.deepStrictEqual(
+          [
+            ...new Map(
+              first.modelActivity.map((entry) => [
+                `${entry.provider}:${entry.model}`,
+                [entry.provider, entry.model],
+              ]),
+            ).values(),
+          ],
+          [
+            ["claude", "claude-sonnet-5"],
+            ["codex", "gpt-5.4"],
+            ["opencode", "opencode-go/gpt-5.4"],
+            ["opencode", "opencode/glm-5"],
+          ],
+        );
         assert.strictEqual(first.today, localDayKey(nowMs));
 
         // Append a replayed message (same ids — must dedupe) plus a new one,
@@ -302,7 +596,7 @@ describe("token log scanning (integration)", () => {
         assert.strictEqual(total("claude", second), 350);
         assert.strictEqual(total("codex", second), 500);
         // 700 (already parsed, immutable) + 200 (new file) — no double count.
-        assert.strictEqual(total("opencode", second), 900);
+        assert.strictEqual(total("opencode", second), 1_200);
 
         yield* fs.remove(root, { recursive: true });
       }).pipe(
@@ -310,6 +604,8 @@ describe("token log scanning (integration)", () => {
           Effect.sync(() => {
             if (previousXdg === undefined) delete process.env.XDG_DATA_HOME;
             else process.env.XDG_DATA_HOME = previousXdg;
+            if (previousGrokHome === undefined) delete process.env.GROK_HOME;
+            else process.env.GROK_HOME = previousGrokHome;
           }),
         ),
         Effect.provide(NodeServices.layer),

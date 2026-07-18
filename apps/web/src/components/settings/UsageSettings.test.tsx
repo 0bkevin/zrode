@@ -8,6 +8,9 @@ import {
   formatTokens,
   isActiveUsage,
   makeTokenLevelScale,
+  ProviderSpendBreakdown,
+  ProviderUsageCard,
+  StatsRow,
   toDayKey,
   usageLevel,
   UsageHeatmap,
@@ -145,6 +148,93 @@ describe("computeStats", () => {
   });
 });
 
+describe("StatsRow", () => {
+  it("keeps the complete overall summary visible at a glance", () => {
+    const markup = renderToStaticMarkup(
+      <StatsRow
+        stats={{
+          totalTokens: 12_000_000_000,
+          activeDays: 116,
+          currentStreak: 18,
+          longestStreak: 24,
+          peakDay: { key: "2026-07-12", tokens: 849_000_000, percent: null },
+        }}
+      />,
+    );
+
+    expect(markup).toContain("Total tokens");
+    expect(markup).toContain("Active days");
+    expect(markup).toContain("Current streak");
+    expect(markup).toContain("Longest streak");
+    expect(markup).toContain("Peak day");
+    expect(markup).toContain("Avg. active day");
+    expect(markup).toContain("12B");
+    expect(markup).toContain("849M");
+  });
+});
+
+describe("ProviderUsageCard", () => {
+  it("shows a compact provider summary before its details are expanded", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderUsageCard
+        section={{
+          provider: "codex",
+          stats: {
+            totalTokens: 2_400_000,
+            activeDays: 8,
+            currentStreak: 3,
+            longestStreak: 5,
+            peakDay: { key: "2026-06-16", tokens: 900_000, percent: null },
+          },
+          providerDayLabels: [],
+          providerTokenChart: [],
+          pressureDayLabels: [],
+          pressureSeries: [],
+          sampledDayCount: 0,
+          topModel: null,
+          estimatedCostUsd: 4.25,
+        }}
+        tokenMode="daily"
+        modelRows={[]}
+        totalTokens={12_000_000}
+      />,
+    );
+
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("20% of recorded tokens");
+    expect(markup).toContain("Top model");
+    expect(markup).toContain("API estimate");
+    expect(markup).toContain("Details");
+    expect(markup).not.toContain("Current streak");
+  });
+});
+
+describe("ProviderSpendBreakdown", () => {
+  it("shows estimated spend and pricing coverage for each active provider", () => {
+    const markup = renderToStaticMarkup(
+      <ProviderSpendBreakdown
+        estimate={{
+          totalUsd: 12.5,
+          pricedTokens: 100,
+          totalTokens: 150,
+          providerCosts: new Map([["claude", 12.5]]),
+          models: [
+            { provider: "claude", model: "claude-sonnet-5", totalTokens: 100, costUsd: 12.5 },
+            { provider: "codex", model: "unknown", totalTokens: 50, costUsd: null },
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain("By provider");
+    expect(markup).toContain("Claude");
+    expect(markup).toContain("$12.50");
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("Not priced");
+    expect(markup).toContain("0% covered");
+  });
+});
+
 describe("UsageHeatmap", () => {
   const byDay = new Map([
     [
@@ -170,6 +260,9 @@ describe("UsageHeatmap", () => {
     expect(markup).toContain('aria-label="Jun 15, 2026: no usage recorded"');
     // The grid is keyboard-focusable for arrow-key inspection.
     expect(markup).toContain('tabindex="0"');
+    // Columns share the available width; the heatmap never creates a horizontal scroller.
+    expect(markup).toContain("repeat(2, minmax(0, 1fr))");
+    expect(markup).not.toContain("overflow-x-auto");
   });
 
   it("filters to the given subscription's own hue in per-provider view", () => {
