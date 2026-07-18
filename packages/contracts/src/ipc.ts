@@ -350,6 +350,9 @@ export const DesktopSshPasswordPromptRequestSchema = Schema.Struct({
 
 export const DesktopSshPasswordPromptCancelledType = "ssh-password-prompt-cancelled" as const;
 
+/** Native desktop menu action routed to the renderer before closing a window. */
+export const DesktopCloseActiveFileOrWindowAction = "close-active-file-or-window" as const;
+
 export const DesktopSshPasswordPromptCancelledResultSchema = Schema.Struct({
   type: Schema.Literal(DesktopSshPasswordPromptCancelledType),
   message: Schema.String,

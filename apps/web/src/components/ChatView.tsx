@@ -266,6 +266,7 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  shouldRouteFileCloseShortcut,
   waitForSettledTurnAssistantText,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -298,9 +299,8 @@ import { useAssetUrls } from "../assets/assetUrls";
 import {
   fileDocumentStore,
   prepareFileDocumentForClose,
-  type FileDocumentCloseDecision,
-  type FileDocumentClosePrompt,
   useFileDocumentBeforeUnloadProtection,
+  useFileDocumentCloseDecisionPrompt,
   useFileDocumentStoreVersion,
 } from "./files/fileDocumentRuntime";
 import { FileDocumentCloseDialog } from "./files/FileDocumentCloseDialog";
@@ -453,6 +453,8 @@ type ChatViewProps =
        * shared bottom-corner slot, so it shows once instead of once per pane).
        */
       serverStatusSlot?: HTMLElement | null;
+      /** Whether this view owns window-global keyboard shortcut routing. */
+      globalShortcutRoutingEnabled?: boolean;
       routeKind: "server";
       draftId?: never;
     }
@@ -463,6 +465,8 @@ type ChatViewProps =
       reserveTitleBarControlInset?: boolean;
       topBarSlot?: HTMLElement | null;
       serverStatusSlot?: HTMLElement | null;
+      /** Whether this view owns window-global keyboard shortcut routing. */
+      globalShortcutRoutingEnabled?: boolean;
       routeKind: "draft";
       draftId: DraftId;
     };
@@ -943,6 +947,7 @@ function ChatViewContent(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
     topBarSlot,
     serverStatusSlot,
+    globalShortcutRoutingEnabled = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
@@ -2600,33 +2605,11 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return pending;
   }, [activeProject, activeWorkspaceRoot, fileDocumentStoreVersion]);
-  const [fileDocumentClosePrompt, setFileDocumentClosePrompt] =
-    useState<FileDocumentClosePrompt | null>(null);
-  const fileDocumentCloseResolverRef = useRef<
-    ((decision: FileDocumentCloseDecision) => void) | null
-  >(null);
-  const requestFileDocumentCloseDecision = useCallback(
-    (prompt: FileDocumentClosePrompt) =>
-      new Promise<FileDocumentCloseDecision>((resolve) => {
-        fileDocumentCloseResolverRef.current?.("cancel");
-        fileDocumentCloseResolverRef.current = resolve;
-        setFileDocumentClosePrompt(prompt);
-      }),
-    [],
-  );
-  const resolveFileDocumentCloseDecision = useCallback((decision: FileDocumentCloseDecision) => {
-    const resolve = fileDocumentCloseResolverRef.current;
-    fileDocumentCloseResolverRef.current = null;
-    setFileDocumentClosePrompt(null);
-    resolve?.(decision);
-  }, []);
-  useEffect(
-    () => () => {
-      fileDocumentCloseResolverRef.current?.("cancel");
-      fileDocumentCloseResolverRef.current = null;
-    },
-    [],
-  );
+  const {
+    prompt: fileDocumentClosePrompt,
+    requestDecision: requestFileDocumentCloseDecision,
+    resolveDecision: resolveFileDocumentCloseDecision,
+  } = useFileDocumentCloseDecisionPrompt();
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -3703,6 +3686,11 @@ function ChatViewContent(props: ChatViewProps) {
       syncActivePreviewSurface,
     ],
   );
+  const closeActiveFileSurface = useCallback(() => {
+    if (activeRightPanelSurface?.kind === "file") {
+      closeRightPanelSurface(activeRightPanelSurface);
+    }
+  }, [activeRightPanelSurface, closeRightPanelSurface]);
   const openChatInNewWindow = useCallback(() => {
     if (!activeThreadRef) return;
     void openPaneWindow({
@@ -6698,6 +6686,12 @@ function ChatViewContent(props: ChatViewProps) {
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
           pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}
+          {...(shouldRouteFileCloseShortcut({
+            activeSurfaceKind: activeRightPanelSurface.kind,
+            globalShortcutRoutingEnabled,
+          })
+            ? { onCloseActiveFile: closeActiveFileSurface }
+            : {})}
           onCloseFile={closeRightPanelSurface}
           onCloseAllFiles={closeAllFileSurfaces}
         />

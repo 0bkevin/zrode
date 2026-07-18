@@ -1,7 +1,11 @@
 import type { ProjectEntry } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { directoriesNeedingLazyLoad, mergeWorkspaceEntries } from "./fileBrowserLazyEntries";
+import {
+  directoriesNeedingLazyLoad,
+  directoriesNeedingLazyLoadAfterBulkAction,
+  mergeWorkspaceEntries,
+} from "./fileBrowserLazyEntries";
 
 describe("lazy file browser entries", () => {
   it("merges ignored directory listings without duplicating indexed entries", () => {
@@ -38,5 +42,20 @@ describe("lazy file browser entries", () => {
         requestedDirectories: new Set(["node_modules"]),
       }),
     ).toEqual([]);
+  });
+
+  it("requests every unloaded directory expanded by the bulk action", () => {
+    const common = {
+      directoryPaths: ["src", "packages", "node_modules"],
+      loadedDirectories: new Set(["src"]),
+      requestedDirectories: new Set(["packages"]),
+    };
+
+    expect(directoriesNeedingLazyLoadAfterBulkAction({ action: "expand", ...common })).toEqual([
+      "node_modules",
+    ]);
+    expect(directoriesNeedingLazyLoadAfterBulkAction({ action: "collapse", ...common })).toEqual(
+      [],
+    );
   });
 });

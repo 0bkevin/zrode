@@ -28,6 +28,13 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+export function shouldRouteFileCloseShortcut(input: {
+  readonly activeSurfaceKind: string | null | undefined;
+  readonly globalShortcutRoutingEnabled: boolean;
+}): boolean {
+  return input.globalShortcutRoutingEnabled && input.activeSurfaceKind === "file";
+}
+
 export function buildLocalDraftThread(
   threadId: ThreadId,
   draftThread: DraftThreadState,

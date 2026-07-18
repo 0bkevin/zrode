@@ -138,6 +138,40 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(paths).not.toContain("ignored.txt");
       }),
     );
+
+    it.effect("includes hidden dotenv files in non-Git workspaces", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "zrode-workspace-list-non-git-dotenv-" });
+        yield* writeTextFile(cwd, ".env", "SECRET=value\n");
+        yield* writeTextFile(cwd, ".hidden/.env.local", "LOCAL_SECRET=value\n");
+        yield* writeTextFile(cwd, "node_modules/pkg/.env", "DEPENDENCY_SECRET=value\n");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toContain(".env");
+        expect(paths).toContain(".hidden/.env.local");
+        expect(paths).not.toContain("node_modules/pkg/.env");
+      }),
+    );
+
+    it.effect("includes tracked dotenv files that later match ignore rules", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({
+          prefix: "zrode-workspace-list-tracked-dotenv-",
+          git: true,
+        });
+        yield* writeTextFile(cwd, ".env", "SECRET=value\n");
+        yield* git(cwd, ["add", ".env"]);
+        yield* writeTextFile(cwd, ".gitignore", ".env\n");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+
+        expect(result.entries).toContainEqual({ path: ".env", kind: "file" });
+      }),
+    );
   });
 
   describe("search", () => {

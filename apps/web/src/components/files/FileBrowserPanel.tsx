@@ -1,27 +1,41 @@
-import type { FileTreeDirectoryHandle, FileTreeItemHandle } from "@pierre/trees";
-import type { EnvironmentId, ProjectEntry, ProjectListDirectoryResult } from "@t3tools/contracts";
+import type {
+  ContextMenuItem as FileTreeContextMenuItem,
+  ContextMenuOpenContext as FileTreeContextMenuOpenContext,
+  FileTreeDirectoryHandle,
+  FileTreeItemHandle,
+} from "@pierre/trees";
+import type {
+  ContextMenuItem,
+  EnvironmentId,
+  ProjectEntry,
+  ProjectListDirectoryResult,
+} from "@t3tools/contracts";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import {
   ChevronsDownUp,
+  ChevronsUpDown,
+  Ellipsis,
   Eye,
   FilePlus2,
   FolderPlus,
   ListFilter,
   RefreshCw,
-  Search,
-  Trash2,
   X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
+import { readLocalApi } from "~/localApi";
 import { ZRODE_PIERRE_ICONS, ZRODE_PIERRE_ICON_TREE_CSS } from "~/pierre-icons";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 
 import {
   resetFileTreePathsPreservingExpansion,
+  resolveFileTreeBulkFolderAction,
   revealActiveFile,
   shouldRevealActiveFile,
+  toggleAllFileTreeDirectories,
 } from "./fileBrowserTreeState";
 import {
   clearFailedPierreCreation,
@@ -31,13 +45,19 @@ import {
   type WorkspaceCreationKind,
   type WorkspaceCreationSession,
 } from "./fileBrowserCreation";
-import { directoriesNeedingLazyLoad, mergeWorkspaceEntries } from "./fileBrowserLazyEntries";
+import {
+  directoriesNeedingLazyLoad,
+  directoriesNeedingLazyLoadAfterBulkAction,
+  mergeWorkspaceEntries,
+} from "./fileBrowserLazyEntries";
+import { type FilePreviewLayoutMode, resolveFileExplorerToolbarLayout } from "./fileExplorerLayout";
 import { useProjectDirectoryQuery, useProjectEntriesQuery } from "./projectFilesQueryState";
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
+  layoutMode: FilePreviewLayoutMode;
   activeRelativePath: string | null;
   onOpenFile: (relativePath: string) => void;
   onCreateFile: (relativePath: string) => Promise<void>;
@@ -46,7 +66,6 @@ interface FileBrowserPanelProps {
     relativePath: string,
     kind: ProjectEntry["kind"],
   ) => Promise<{ readonly status: "deleted" | "canceled" }>;
-  onShowSearch: () => void;
   visible: boolean;
 }
 
@@ -197,12 +216,12 @@ function FileBrowserPanel({
   environmentId,
   cwd,
   projectName,
+  layoutMode,
   activeRelativePath,
   onOpenFile,
   onCreateFile,
   onCreateDirectory,
   onDeleteEntry,
-  onShowSearch,
   visible,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
@@ -225,8 +244,8 @@ function FileBrowserPanel({
     [],
   );
   const [creationError, setCreationError] = useState<string | null>(null);
-  const [selectedEntry, setSelectedEntry] = useState<ProjectEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [treeRevision, setTreeRevision] = useState(0);
   const filterInputRef = useRef<HTMLInputElement>(null);
   const creationSessionRef = useRef<WorkspaceCreationSession | null>(creationSession);
   const modelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
@@ -234,6 +253,9 @@ function FileBrowserPanel({
   const nextOptimisticEntryIdRef = useRef(0);
   const createFileRef = useRef(onCreateFile);
   const createDirectoryRef = useRef(onCreateDirectory);
+  const contextMenuHandlerRef = useRef<
+    (item: FileTreeContextMenuItem, context: FileTreeContextMenuOpenContext) => void
+  >(() => undefined);
   createFileRef.current = onCreateFile;
   createDirectoryRef.current = onCreateDirectory;
 
@@ -333,6 +355,13 @@ function FileBrowserPanel({
   onOpenFileRef.current = onOpenFile;
 
   const { model } = useFileTree({
+    composition: {
+      contextMenu: {
+        enabled: true,
+        triggerMode: "right-click",
+        onOpen: (item, context) => contextMenuHandlerRef.current(item, context),
+      },
+    },
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
@@ -341,11 +370,6 @@ function FileBrowserPanel({
     onSelectionChange: (selectedPaths) => {
       if (suppressSelectionChangeRef.current) return;
       const selectedPath = selectedPaths.at(-1)?.replace(/\/$/, "");
-      setSelectedEntry(
-        selectedPath && entryKindsRef.current.has(selectedPath)
-          ? { path: selectedPath, kind: entryKindsRef.current.get(selectedPath)! }
-          : null,
-      );
       if (
         selectedPath &&
         selectedPath !== activeRelativePathRef.current &&
@@ -460,6 +484,8 @@ function FileBrowserPanel({
   const previousActivePathRef = useRef<string | null>(null);
   const previousVisibleRef = useRef(visible);
 
+  useEffect(() => model.subscribe(() => setTreeRevision((revision) => revision + 1)), [model]);
+
   useEffect(() => {
     suppressSelectionChangeRef.current = true;
     try {
@@ -566,12 +592,25 @@ function FileBrowserPanel({
     queueUnchangedPierreCreationCommit(() => creationSessionRef.current, commitCreation);
   }, [commitCreation]);
 
-  const collapseAllFiles = useCallback(() => {
-    for (const directoryPath of directoryPaths) {
-      const item = model.getItem(directoryPath);
-      if (isFileTreeDirectoryHandle(item)) item.collapse();
+  const bulkFolderAction = useMemo(
+    () => resolveFileTreeBulkFolderAction({ directoryPaths, model }),
+    [directoryPaths, model, treeRevision],
+  );
+  const toggleAllFolders = useCallback(() => {
+    const action = toggleAllFileTreeDirectories({ directoryPaths, model });
+    if (!showIgnoredFiles) return;
+    const needed = directoriesNeedingLazyLoadAfterBulkAction({
+      action,
+      directoryPaths,
+      loadedDirectories,
+      requestedDirectories,
+    });
+    if (needed.length > 0) {
+      setRequestedDirectories((current) => new Set([...current, ...needed]));
     }
-  }, [directoryPaths, model]);
+  }, [directoryPaths, loadedDirectories, model, requestedDirectories, showIgnoredFiles]);
+  const bulkFolderActionLabel =
+    bulkFolderAction === "collapse" ? "Collapse All Folders" : "Expand All Folders";
 
   const toggleIgnoredFiles = useCallback(() => {
     const next = !showIgnoredFiles;
@@ -586,7 +625,6 @@ function FileBrowserPanel({
     });
     setLazyDirectoryResults(new Map());
     setLazyDirectoryErrors(new Map());
-    setSelectedEntry(null);
   }, [directoryPaths, model, showIgnoredFiles]);
 
   const fileCount = useMemo(
@@ -594,27 +632,78 @@ function FileBrowserPanel({
     [entries],
   );
   const creationBusy = creationSession?.status === "committing";
+  const toolbarLayout = resolveFileExplorerToolbarLayout(layoutMode);
 
-  const deleteSelectedEntry = useCallback(() => {
-    if (!selectedEntry || deleting || creationSession !== null) return;
-    setDeleting(true);
-    setCreationError(null);
-    void onDeleteEntry(selectedEntry.path, selectedEntry.kind).then(
-      (outcome) => {
-        if (outcome.status === "canceled") {
+  const deleteTreeEntry = useCallback(
+    (relativePath: string, kind: ProjectEntry["kind"]) => {
+      if (deleting || creationSession !== null) return;
+      setDeleting(true);
+      setCreationError(null);
+      void onDeleteEntry(relativePath, kind).then(
+        (outcome) => {
+          if (outcome.status === "canceled") {
+            setDeleting(false);
+            return;
+          }
+          refreshAllEntries();
           setDeleting(false);
-          return;
+        },
+        (error: unknown) => {
+          setCreationError(error instanceof Error ? error.message : "Could not delete the item.");
+          setDeleting(false);
+        },
+      );
+    },
+    [creationSession, deleting, onDeleteEntry, refreshAllEntries],
+  );
+
+  const toggleFilter = useCallback(() => {
+    if (filterVisible) setFilterValue("");
+    setFilterVisible((visible) => !visible);
+  }, [filterVisible]);
+
+  contextMenuHandlerRef.current = (item, context) => {
+    const api = readLocalApi();
+    if (!api) {
+      context.close();
+      return;
+    }
+
+    model.getItem(item.path)?.focus();
+    const menuItems: readonly ContextMenuItem<"new-file" | "new-folder" | "delete">[] = [
+      {
+        id: "new-file",
+        label: "New File",
+        disabled: creationSession !== null,
+      },
+      {
+        id: "new-folder",
+        label: "New Folder",
+        disabled: creationSession !== null,
+      },
+      {
+        id: "delete",
+        label: item.kind === "directory" ? "Delete Folder Permanently" : "Delete Permanently",
+        destructive: true,
+        disabled: creationSession !== null || deleting,
+        icon: "trash",
+      },
+    ];
+
+    void api.contextMenu
+      .show(menuItems, {
+        x: context.anchorRect.left,
+        y: context.anchorRect.bottom,
+      })
+      .then((action) => {
+        context.close({ restoreFocus: action !== "new-file" && action !== "new-folder" });
+        if (action === "new-file") startCreate("file");
+        if (action === "new-folder") startCreate("directory");
+        if (action === "delete") {
+          deleteTreeEntry(withoutTrailingSlash(item.path), item.kind);
         }
-        setSelectedEntry(null);
-        refreshAllEntries();
-        setDeleting(false);
-      },
-      (error: unknown) => {
-        setCreationError(error instanceof Error ? error.message : "Could not delete the item.");
-        setDeleting(false);
-      },
-    );
-  }, [creationSession, deleting, onDeleteEntry, refreshAllEntries, selectedEntry]);
+      }, context.close);
+  };
 
   return (
     <div
@@ -649,16 +738,6 @@ function FileBrowserPanel({
         </div>
         <button
           type="button"
-          className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-          aria-label="Permanently delete selected item"
-          title="Delete Permanently"
-          disabled={selectedEntry === null || creationSession !== null || deleting}
-          onClick={deleteSelectedEntry}
-        >
-          <Trash2 className="size-3.5" />
-        </button>
-        <button
-          type="button"
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
           aria-label="New file"
           title="New File"
@@ -677,68 +756,68 @@ function FileBrowserPanel({
         >
           <FolderPlus className="size-3.5" />
         </button>
-        <button
-          type="button"
-          className={cn(
-            "rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground",
-            filterVisible && "bg-accent text-foreground",
-          )}
-          aria-label="Filter files"
-          title="Filter Files"
-          onClick={() => {
-            if (filterVisible) setFilterValue("");
-            setFilterVisible((visible) => !visible);
-          }}
-        >
-          <ListFilter className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground",
-            showIgnoredFiles && "bg-accent text-foreground",
-          )}
-          aria-label={
-            showIgnoredFiles
-              ? "Hide ignored and generated files"
-              : "Show ignored and generated files"
-          }
-          aria-pressed={showIgnoredFiles}
-          title={showIgnoredFiles ? "Hide Ignored Files" : "Show Ignored Files"}
-          onClick={toggleIgnoredFiles}
-        >
-          <Eye className={cn("size-3.5", lazyLoading && "animate-pulse")} />
-        </button>
-        <button
-          type="button"
-          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label="Search in files"
-          title="Search in Files"
-          onClick={onShowSearch}
-        >
-          <Search className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-          aria-label="Refresh workspace files"
-          title="Refresh Explorer"
-          onClick={refreshAllEntries}
-        >
-          <RefreshCw
-            className={cn("size-3.5", (entriesQuery.isPending || lazyLoading) && "animate-spin")}
-          />
-        </button>
-        <button
-          type="button"
-          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
-          aria-label="Collapse all files"
-          title="Collapse Folders"
-          disabled={directoryPaths.length === 0}
-          onClick={collapseAllFiles}
-        >
-          <ChevronsDownUp className="size-3.5" />
-        </button>
+        {toolbarLayout.showRefreshInline ? (
+          <button
+            type="button"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            aria-label="Refresh workspace files"
+            title="Refresh Explorer"
+            onClick={refreshAllEntries}
+          >
+            <RefreshCw
+              className={cn("size-3.5", (entriesQuery.isPending || lazyLoading) && "animate-spin")}
+            />
+          </button>
+        ) : null}
+        {toolbarLayout.showCollapseInline ? (
+          <button
+            type="button"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+            aria-label={bulkFolderActionLabel}
+            title={bulkFolderActionLabel}
+            disabled={bulkFolderAction === null}
+            onClick={toggleAllFolders}
+          >
+            {bulkFolderAction === "collapse" ? (
+              <ChevronsDownUp className="size-3.5" />
+            ) : (
+              <ChevronsUpDown className="size-3.5" />
+            )}
+          </button>
+        ) : null}
+        <Menu>
+          <MenuTrigger
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            aria-label="More Explorer actions"
+            title="More Actions"
+          >
+            <Ellipsis className="size-3.5" />
+          </MenuTrigger>
+          <MenuPopup align="end" className="min-w-48">
+            <MenuItem onClick={toggleFilter}>
+              <ListFilter />
+              {filterVisible ? "Hide file filter" : "Filter files"}
+            </MenuItem>
+            <MenuItem onClick={toggleIgnoredFiles}>
+              <Eye className={cn(lazyLoading && "animate-pulse")} />
+              {showIgnoredFiles ? "Hide ignored files" : "Show ignored files"}
+            </MenuItem>
+            {!toolbarLayout.showRefreshInline ? (
+              <MenuItem onClick={refreshAllEntries}>
+                <RefreshCw
+                  className={cn((entriesQuery.isPending || lazyLoading) && "animate-spin")}
+                />
+                Refresh Explorer
+              </MenuItem>
+            ) : null}
+            {!toolbarLayout.showCollapseInline ? (
+              <MenuItem disabled={bulkFolderAction === null} onClick={toggleAllFolders}>
+                {bulkFolderAction === "collapse" ? <ChevronsDownUp /> : <ChevronsUpDown />}
+                {bulkFolderActionLabel}
+              </MenuItem>
+            ) : null}
+          </MenuPopup>
+        </Menu>
       </div>
       {filterVisible ? (
         <div className="flex shrink-0 items-center gap-1 border-b border-border/60 px-2 py-1.5">

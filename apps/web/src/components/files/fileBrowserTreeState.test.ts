@@ -5,8 +5,10 @@ import type { FileBrowserTreeModel } from "./fileBrowserTreeState";
 import {
   activeFileAncestorPaths,
   resetFileTreePathsPreservingExpansion,
+  resolveFileTreeBulkFolderAction,
   revealActiveFile,
   shouldRevealActiveFile,
+  toggleAllFileTreeDirectories,
 } from "./fileBrowserTreeState";
 
 function directoryHandle(path: string, expanded: boolean): FileTreeDirectoryHandle {
@@ -157,5 +159,48 @@ describe("file browser tree state", () => {
       }),
     ).toBe(false);
     expect(model.scrollToPath).not.toHaveBeenCalled();
+  });
+
+  it("expands every closed folder when the tree is only partially expanded", () => {
+    const open = directoryHandle("open/", true);
+    const closed = directoryHandle("closed/", false);
+    const model = treeModel(
+      new Map<string, FileTreeDirectoryHandle | FileTreeFileHandle>([
+        ["open/", open],
+        ["closed/", closed],
+      ]),
+    );
+
+    expect(resolveFileTreeBulkFolderAction({ directoryPaths: ["open", "closed"], model })).toBe(
+      "expand",
+    );
+    expect(toggleAllFileTreeDirectories({ directoryPaths: ["open", "closed"], model })).toBe(
+      "expand",
+    );
+    expect(open.expand).not.toHaveBeenCalled();
+    expect(closed.expand).toHaveBeenCalledOnce();
+  });
+
+  it("collapses every folder once the entire tree is expanded", () => {
+    const first = directoryHandle("first/", true);
+    const second = directoryHandle("second/", true);
+    const model = treeModel(
+      new Map<string, FileTreeDirectoryHandle | FileTreeFileHandle>([
+        ["first/", first],
+        ["second/", second],
+      ]),
+    );
+
+    expect(toggleAllFileTreeDirectories({ directoryPaths: ["first", "second"], model })).toBe(
+      "collapse",
+    );
+    expect(first.collapse).toHaveBeenCalledOnce();
+    expect(second.collapse).toHaveBeenCalledOnce();
+  });
+
+  it("disables the bulk folder action when the tree has no known directories", () => {
+    const model = treeModel(new Map());
+    expect(resolveFileTreeBulkFolderAction({ directoryPaths: [], model })).toBeNull();
+    expect(toggleAllFileTreeDirectories({ directoryPaths: [], model })).toBeNull();
   });
 });

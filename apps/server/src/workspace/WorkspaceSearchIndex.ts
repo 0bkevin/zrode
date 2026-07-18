@@ -1,3 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import type * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodePerfHooks from "node:perf_hooks";
+
 import { FileFinder, type MixedItem, type MixedSearchResult } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -25,12 +31,14 @@ const WORKSPACE_INDEX_SCAN_POLL_INTERVAL = "50 millis";
 const WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES = 1_000;
 const WORKSPACE_SUPPLEMENTAL_MAX_OUTPUT_BYTES = 1024 * 1024;
 const WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS = 5_000;
+const WORKSPACE_SUPPLEMENTAL_MAX_SCANNED_ENTRIES = 100_000;
 const WORKSPACE_SUPPLEMENTAL_GIT_ARGS = [
   "-c",
   "core.fsmonitor=false",
   "-c",
   "core.untrackedCache=false",
   "ls-files",
+  "--cached",
   "--others",
   "--ignored",
   "--exclude-standard",
@@ -247,9 +255,9 @@ const scanSupplementalEntries = Effect.fn("WorkspaceSearchIndex.scanSupplemental
         Effect.mapError((cause) => new WorkspaceSearchIndexSupplementalScanFailed({ cwd, cause })),
       );
 
-    // Non-Git workspaces are supported by FileFinder; they simply have no
-    // Git-ignored supplement to merge into its index.
-    if (result.exitCode !== 0) return EMPTY_SUPPLEMENTAL_ENTRIES;
+    if (result.exitCode !== 0) {
+      return yield* scanNonGitSupplementalEntries(cwd);
+    }
 
     const paths = result.stdout.split("\0");
     if (result.stdoutTruncated) paths.pop();
@@ -268,6 +276,75 @@ const scanSupplementalEntries = Effect.fn("WorkspaceSearchIndex.scanSupplemental
     return { entries, truncated };
   },
 );
+
+/**
+ * FileFinder intentionally excludes dotfiles. Git can enumerate those cheaply
+ * for repositories; non-Git workspaces need a bounded fallback so root and
+ * nested env files do not disappear from Explorer and composer search.
+ */
+const scanNonGitSupplementalEntries = Effect.fn(
+  "WorkspaceSearchIndex.scanNonGitSupplementalEntries",
+)(function* (cwd: string) {
+  return yield* Effect.tryPromise({
+    try: async (): Promise<WorkspaceSupplementalEntries> => {
+      const entries: ProjectEntry[] = [];
+      const pendingDirectories: string[] = [""];
+      const deadline = NodePerfHooks.performance.now() + WORKSPACE_SUPPLEMENTAL_SCAN_TIMEOUT_MS;
+      let scannedEntryCount = 0;
+      let truncated = false;
+
+      while (pendingDirectories.length > 0) {
+        if (NodePerfHooks.performance.now() >= deadline) {
+          truncated = true;
+          break;
+        }
+        const relativeDirectory = pendingDirectories.shift()!;
+        let directoryEntries: NodeFS.Dirent<string>[];
+        try {
+          directoryEntries = await NodeFSP.readdir(NodePath.join(cwd, relativeDirectory), {
+            withFileTypes: true,
+          });
+        } catch (cause) {
+          if (relativeDirectory.length === 0) throw cause;
+          continue;
+        }
+
+        for (const directoryEntry of directoryEntries.toSorted((left, right) =>
+          left.name.localeCompare(right.name),
+        )) {
+          scannedEntryCount += 1;
+          if (scannedEntryCount > WORKSPACE_SUPPLEMENTAL_MAX_SCANNED_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          const relativePath = toPosixPath(
+            relativeDirectory.length === 0
+              ? directoryEntry.name
+              : `${relativeDirectory}/${directoryEntry.name}`,
+          );
+          if (directoryEntry.isDirectory()) {
+            if (directoryEntry.name !== ".git" && directoryEntry.name !== "node_modules") {
+              pendingDirectories.push(relativePath);
+            }
+            continue;
+          }
+          if (!directoryEntry.isFile() && !directoryEntry.isSymbolicLink()) continue;
+          if (!directoryEntry.name.startsWith(".env")) continue;
+          if (!isValidProjectEntryPath(relativePath)) continue;
+          if (entries.length >= WORKSPACE_SUPPLEMENTAL_MAX_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          entries.push({ path: relativePath, kind: "file" });
+        }
+        if (truncated) break;
+      }
+
+      return { entries, truncated };
+    },
+    catch: (cause) => new WorkspaceSearchIndexSupplementalScanFailed({ cwd, cause }),
+  });
+});
 
 const recoverSupplementalScan = (cwd: string) =>
   Effect.catch((cause: WorkspaceSearchIndexSupplementalScanFailed) =>

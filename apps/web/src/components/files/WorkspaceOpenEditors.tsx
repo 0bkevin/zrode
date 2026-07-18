@@ -22,21 +22,30 @@ interface WorkspaceOpenEditorsProps {
   onCloseAllFiles: () => void;
 }
 
-function WorkspaceOpenEditors({
-  threadRef,
-  pendingSurfaceIds,
+export interface OpenEditorListItem {
+  readonly id: string;
+  readonly relativePath: string;
+}
+
+interface OpenEditorsSectionProps<TFile extends OpenEditorListItem> {
+  readonly files: readonly TFile[];
+  readonly activeFileId: string | null;
+  readonly pendingFileIds: ReadonlySet<string>;
+  readonly onActivateFile: (file: TFile) => void;
+  readonly onCloseFile: (file: TFile) => void;
+  readonly onCloseAllFiles: () => void;
+}
+
+export function OpenEditorsSection<TFile extends OpenEditorListItem>({
+  files,
+  activeFileId,
+  pendingFileIds,
+  onActivateFile,
   onCloseFile,
   onCloseAllFiles,
-}: WorkspaceOpenEditorsProps) {
+}: OpenEditorsSectionProps<TFile>) {
   const { resolvedTheme } = useTheme();
   const [expanded, setExpanded] = useState(true);
-  const panelState = useRightPanelStore((state) =>
-    selectThreadRightPanelState(state.byThreadKey, threadRef),
-  );
-  const files = useMemo(
-    () => selectOrderedFileSurfaces(panelState.surfaces),
-    [panelState.surfaces],
-  );
 
   return (
     <section className="shrink-0" aria-label="Open editors">
@@ -67,13 +76,13 @@ function WorkspaceOpenEditors({
           {files.length === 0 ? (
             <div className="px-5 py-2 text-[11px] text-muted-foreground">No open editors</div>
           ) : (
-            files.map((surface) => {
-              const active = panelState.activeSurfaceId === surface.id;
-              const dirty = pendingSurfaceIds.has(surface.id);
-              const title = surface.relativePath.slice(surface.relativePath.lastIndexOf("/") + 1);
+            files.map((file) => {
+              const active = activeFileId === file.id;
+              const dirty = pendingFileIds.has(file.id);
+              const title = file.relativePath.slice(file.relativePath.lastIndexOf("/") + 1);
               return (
                 <div
-                  key={surface.id}
+                  key={file.id}
                   className={cn(
                     "group/editor flex h-6 items-center gap-1.5 border-l-2 pl-2 pr-1 text-xs",
                     active
@@ -84,22 +93,20 @@ function WorkspaceOpenEditors({
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                    title={surface.relativePath}
-                    onClick={() =>
-                      useRightPanelStore.getState().activateSurface(threadRef, surface.id)
-                    }
+                    title={file.relativePath}
+                    onClick={() => onActivateFile(file)}
                   >
                     <PierreEntryIcon
-                      pathValue={surface.relativePath}
+                      pathValue={file.relativePath}
                       kind="file"
                       theme={resolvedTheme}
                       className="size-3.5 shrink-0"
                     />
                     <span className="truncate">{title}</span>
                     <span className="ml-auto truncate text-[10px] text-muted-foreground/70">
-                      {surface.relativePath === title
+                      {file.relativePath === title
                         ? ""
-                        : surface.relativePath.slice(0, -(title.length + 1))}
+                        : file.relativePath.slice(0, -(title.length + 1))}
                     </span>
                   </button>
                   <button
@@ -111,7 +118,7 @@ function WorkspaceOpenEditors({
                         : "opacity-0 group-hover/editor:opacity-100 focus:opacity-100",
                     )}
                     aria-label={`Close ${title}`}
-                    onClick={() => onCloseFile(surface)}
+                    onClick={() => onCloseFile(file)}
                   >
                     {dirty ? (
                       <>
@@ -129,6 +136,34 @@ function WorkspaceOpenEditors({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function WorkspaceOpenEditors({
+  threadRef,
+  pendingSurfaceIds,
+  onCloseFile,
+  onCloseAllFiles,
+}: WorkspaceOpenEditorsProps) {
+  const panelState = useRightPanelStore((state) =>
+    selectThreadRightPanelState(state.byThreadKey, threadRef),
+  );
+  const files = useMemo(
+    () => selectOrderedFileSurfaces(panelState.surfaces),
+    [panelState.surfaces],
+  );
+
+  return (
+    <OpenEditorsSection
+      files={files}
+      activeFileId={panelState.activeSurfaceId}
+      pendingFileIds={pendingSurfaceIds}
+      onActivateFile={(surface) =>
+        useRightPanelStore.getState().activateSurface(threadRef, surface.id)
+      }
+      onCloseFile={onCloseFile}
+      onCloseAllFiles={onCloseAllFiles}
+    />
   );
 }
 
