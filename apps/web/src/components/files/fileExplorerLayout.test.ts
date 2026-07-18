@@ -6,6 +6,7 @@ import {
   resolveFileExplorerMaxWidth,
   resolveFileExplorerPaneLayout,
   resolveFileExplorerSplitLayout,
+  resolveFileExplorerToolbarLayout,
 } from "./fileExplorerLayout";
 
 describe("resolveFileExplorerMaxWidth", () => {
@@ -67,6 +68,22 @@ describe("resolveFileExplorerSplitLayout", () => {
       resizeEdge: "right",
       resizeHandleClassName: "-right-1",
       keyboardWidthDelta: { ArrowLeft: -16, ArrowRight: 16 },
+    });
+  });
+});
+
+describe("resolveFileExplorerToolbarLayout", () => {
+  it("keeps common Explorer actions visible in a standalone window", () => {
+    expect(resolveFileExplorerToolbarLayout("standalone")).toEqual({
+      showRefreshInline: true,
+      showCollapseInline: true,
+    });
+  });
+
+  it("moves secondary actions into overflow in the docked pane", () => {
+    expect(resolveFileExplorerToolbarLayout("docked")).toEqual({
+      showRefreshInline: false,
+      showCollapseInline: false,
     });
   });
 });

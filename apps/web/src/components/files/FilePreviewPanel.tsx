@@ -15,13 +15,24 @@ import {
   ChevronRight,
   Code2,
   Eye,
-  FolderTree,
   Globe2,
   LoaderCircle,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   TriangleAlert,
 } from "lucide-react";
 import * as Schema from "effect/Schema";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import ChatMarkdown from "~/components/ChatMarkdown";
@@ -73,6 +84,7 @@ import {
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
 import { installFileEditorDismissal } from "./fileEditorDismissal";
+import { registerActiveFileCloseHandler } from "./fileCloseShortcut";
 import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import {
@@ -116,8 +128,11 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealTarget: FileRevealTarget | null;
   revealRequestId: number;
+  editorTabBar?: ReactNode;
+  openEditors?: ReactNode;
   pendingSurfaceIds?: ReadonlySet<string>;
   onOpenFile: (relativePath: string, target?: FileRevealTarget) => void;
+  onCloseActiveFile?: () => void;
   onCloseFile?: (surface: Extract<RightPanelSurface, { kind: "file" }>) => void;
   onCloseAllFiles?: () => void;
 }
@@ -992,7 +1007,10 @@ function FilePreviewPanelContent({
   availableEditors,
   revealTarget,
   revealRequestId,
+  editorTabBar,
+  openEditors,
   onOpenFile,
+  onCloseActiveFile,
   pendingSurfaceIds,
   onCloseFile,
   onCloseAllFiles,
@@ -1020,6 +1038,11 @@ function FilePreviewPanelContent({
     environment?.connection.phase === "connected",
   );
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
+
+  useEffect(() => {
+    if (relativePath === null || !onCloseActiveFile) return;
+    return registerActiveFileCloseHandler(onCloseActiveFile);
+  }, [onCloseActiveFile, relativePath]);
   const { containerRef: fileSplitContainerRef, maxExplorerWidth } = useFileExplorerSplitLayout();
   const {
     width: explorerWidth,
@@ -1133,133 +1156,50 @@ function FilePreviewPanelContent({
     })();
   }, [absolutePath, createAssetUrl, environmentHttpBaseUrl, openPreview, threadRef]);
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      {relativePath ? (
-        <div className="surface-subheader gap-2 px-3" data-surface-subheader>
-          <ScrollArea
-            ref={breadcrumbRef}
-            hideScrollbars
-            scrollFade
-            className="min-w-0 flex-1 rounded-none"
-            data-file-breadcrumbs
-          >
-            <div className="flex h-full w-max min-w-full items-center text-xs">
-              {breadcrumbs.map((crumb, index) => (
-                <div
-                  key={crumb.path || "project"}
-                  className="flex min-w-0 shrink-0 items-center"
-                  data-current-file-crumb={crumb.kind === "file"}
-                >
-                  {index > 0 ? (
-                    <ChevronRight className="mx-1 size-3.5 shrink-0 text-muted-foreground/60" />
-                  ) : null}
-                  <span
-                    className={cn(
-                      "max-w-40 truncate",
-                      crumb.kind === "file"
-                        ? "font-medium text-foreground"
-                        : "text-muted-foreground",
-                    )}
-                    title={crumb.path || projectName}
-                  >
-                    {crumb.label}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </ScrollArea>
-          {absolutePath && environmentId === primaryEnvironmentId ? (
-            <OpenInPicker
-              environmentId={environmentId}
-              keybindings={keybindings}
-              availableEditors={availableEditors}
-              openInCwd={absolutePath}
-              compact
-              enableShortcut={false}
-            />
-          ) : null}
-          {isMarkdown ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Toggle
-                    className="shrink-0"
-                    pressed={renderMarkdown}
-                    onPressedChange={(pressed) => {
-                      setMarkdownView({
-                        path: pressed ? relativePath : null,
-                        revealRequestId: pressed ? revealRequestId : null,
-                      });
-                    }}
-                    aria-label={renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
-                    variant="ghost"
-                    size="sm"
-                  >
-                    {renderMarkdown ? <Code2 className="size-3.5" /> : <Eye className="size-3.5" />}
-                  </Toggle>
-                }
-              />
-              <TooltipPopup>
-                {renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
-              </TooltipPopup>
-            </Tooltip>
-          ) : null}
-          {canOpenInBrowser ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Toggle
-                    className="shrink-0"
-                    pressed={false}
-                    onPressedChange={handleOpenInBrowser}
-                    aria-label="Open file in preview browser"
-                    variant="ghost"
-                    size="sm"
-                  >
-                    <Globe2 className="size-3.5" />
-                  </Toggle>
-                }
-              />
-              <TooltipPopup>Open file in preview browser</TooltipPopup>
-            </Tooltip>
-          ) : null}
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Toggle
-                  className="shrink-0"
-                  pressed={explorerOpen}
-                  onPressedChange={toggleExplorer}
-                  aria-label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
-                  variant="ghost"
-                  size="sm"
-                >
-                  <FolderTree className="size-3.5" />
-                </Toggle>
-              }
-            />
-            <TooltipPopup>
-              {explorerOpen ? "Hide file explorer" : "Show file explorer"}
-            </TooltipPopup>
-          </Tooltip>
-        </div>
-      ) : null}
-      {relativePath && fileData?.truncated ? (
-        <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-          Preview limited to the first 1 MB of a {fileData.byteLength.toLocaleString()} byte file.
-        </div>
-      ) : null}
-      {relativePath && fileSnapshot && fileDocument ? (
-        <FileDocumentStatusBanner
-          relativePath={relativePath}
-          snapshot={fileSnapshot}
-          handle={fileDocument}
-          onCompare={() => {
-            void fileDocument.refresh().then(() => setShowConflictComparison(true));
-          }}
+  const editorLocationActions = (
+    <div className="flex shrink-0 items-center gap-0.5">
+      {absolutePath && environmentId === primaryEnvironmentId ? (
+        <OpenInPicker
+          environmentId={environmentId}
+          keybindings={keybindings}
+          availableEditors={availableEditors}
+          openInCwd={absolutePath}
+          compact
+          enableShortcut={false}
         />
       ) : null}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Toggle
+              className="shrink-0"
+              pressed={explorerOpen}
+              onPressedChange={toggleExplorer}
+              aria-label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
+              variant="ghost"
+              size="xs"
+            >
+              {fileExplorerPosition === "left" ? (
+                explorerOpen ? (
+                  <PanelLeftClose className="size-3.5" />
+                ) : (
+                  <PanelLeftOpen className="size-3.5" />
+                )
+              ) : explorerOpen ? (
+                <PanelRightClose className="size-3.5" />
+              ) : (
+                <PanelRightOpen className="size-3.5" />
+              )}
+            </Toggle>
+          }
+        />
+        <TooltipPopup>{explorerOpen ? "Hide file explorer" : "Show file explorer"}</TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
       <div ref={fileSplitContainerRef} className="flex min-h-0 flex-1 overflow-hidden">
         {explorerPaneLayout.showEditorPane ? (
           <div
@@ -1271,6 +1211,114 @@ function FilePreviewPanelContent({
               ["--workspace-editor-background" as string]: workspaceEditorBackground(resolvedTheme),
             }}
           >
+            {editorTabBar}
+            {relativePath ? (
+              <div
+                className="flex h-7 min-h-7 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 sm:h-6 sm:min-h-6"
+                data-surface-subheader
+              >
+                <ScrollArea
+                  ref={breadcrumbRef}
+                  hideScrollbars
+                  scrollFade
+                  className="min-w-0 flex-1 rounded-none"
+                  data-file-breadcrumbs
+                >
+                  <div className="flex h-full w-max min-w-full items-center text-[11px]">
+                    {breadcrumbs.map((crumb, index) => (
+                      <div
+                        key={crumb.path || "project"}
+                        className="flex min-w-0 shrink-0 items-center"
+                        data-current-file-crumb={crumb.kind === "file"}
+                      >
+                        {index > 0 ? (
+                          <ChevronRight className="mx-0.5 size-3 shrink-0 text-muted-foreground/60" />
+                        ) : null}
+                        <span
+                          className={cn(
+                            "max-w-40 truncate",
+                            crumb.kind === "file"
+                              ? "font-medium text-foreground"
+                              : "text-muted-foreground",
+                          )}
+                          title={crumb.path || projectName}
+                        >
+                          {crumb.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+                {isMarkdown ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Toggle
+                          className="shrink-0"
+                          pressed={renderMarkdown}
+                          onPressedChange={(pressed) => {
+                            setMarkdownView({
+                              path: pressed ? relativePath : null,
+                              revealRequestId: pressed ? revealRequestId : null,
+                            });
+                          }}
+                          aria-label={
+                            renderMarkdown ? "Show markdown source" : "Show rendered markdown"
+                          }
+                          variant="ghost"
+                          size="xs"
+                        >
+                          {renderMarkdown ? (
+                            <Code2 className="size-3.5" />
+                          ) : (
+                            <Eye className="size-3.5" />
+                          )}
+                        </Toggle>
+                      }
+                    />
+                    <TooltipPopup>
+                      {renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
+                {canOpenInBrowser ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Toggle
+                          className="shrink-0"
+                          pressed={false}
+                          onPressedChange={handleOpenInBrowser}
+                          aria-label="Open file in preview browser"
+                          variant="ghost"
+                          size="xs"
+                        >
+                          <Globe2 className="size-3.5" />
+                        </Toggle>
+                      }
+                    />
+                    <TooltipPopup>Open file in preview browser</TooltipPopup>
+                  </Tooltip>
+                ) : null}
+                {!explorerOpen ? editorLocationActions : null}
+              </div>
+            ) : null}
+            {relativePath && fileData?.truncated ? (
+              <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                Preview limited to the first 1 MB of a {fileData.byteLength.toLocaleString()} byte
+                file.
+              </div>
+            ) : null}
+            {relativePath && fileSnapshot && fileDocument ? (
+              <FileDocumentStatusBanner
+                relativePath={relativePath}
+                snapshot={fileSnapshot}
+                handle={fileDocument}
+                onCompare={() => {
+                  void fileDocument.refresh().then(() => setShowConflictComparison(true));
+                }}
+              />
+            ) : null}
             {relativePath && assetPreviewKind && absolutePath ? (
               <WorkspaceAssetPreview
                 absolutePath={absolutePath}
@@ -1419,6 +1467,7 @@ function FilePreviewPanelContent({
               environmentId={environmentId}
               cwd={cwd}
               projectName={projectName}
+              layoutMode={layoutMode}
               activeRelativePath={relativePath}
               threadRef={threadRef}
               pendingSurfaceIds={pendingSurfaceIds ?? EMPTY_PENDING_SURFACE_IDS}
@@ -1427,6 +1476,8 @@ function FilePreviewPanelContent({
               onFileExplorerPositionChange={(position) => {
                 updateClientSettings({ fileExplorerPosition: position });
               }}
+              headerActions={relativePath ? editorLocationActions : undefined}
+              openEditors={openEditors}
               {...(onCloseFile && onCloseAllFiles ? { onCloseFile, onCloseAllFiles } : {})}
             />
           </aside>

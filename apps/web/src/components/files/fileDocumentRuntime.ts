@@ -235,6 +235,41 @@ export type RequestFileDocumentCloseDecision = (
   prompt: FileDocumentClosePrompt,
 ) => Promise<FileDocumentCloseDecision>;
 
+/** Own the one-at-a-time close prompt used by any workspace file host. */
+export function useFileDocumentCloseDecisionPrompt(): {
+  readonly prompt: FileDocumentClosePrompt | null;
+  readonly requestDecision: RequestFileDocumentCloseDecision;
+  readonly resolveDecision: (decision: FileDocumentCloseDecision) => void;
+} {
+  const [prompt, setPrompt] = useState<FileDocumentClosePrompt | null>(null);
+  const resolverRef = useRef<((decision: FileDocumentCloseDecision) => void) | null>(null);
+  const requestDecision = useCallback(
+    (nextPrompt: FileDocumentClosePrompt) =>
+      new Promise<FileDocumentCloseDecision>((resolve) => {
+        resolverRef.current?.("cancel");
+        resolverRef.current = resolve;
+        setPrompt(nextPrompt);
+      }),
+    [],
+  );
+  const resolveDecision = useCallback((decision: FileDocumentCloseDecision) => {
+    const resolve = resolverRef.current;
+    resolverRef.current = null;
+    setPrompt(null);
+    resolve?.(decision);
+  }, []);
+
+  useEffect(
+    () => () => {
+      resolverRef.current?.("cancel");
+      resolverRef.current = null;
+    },
+    [],
+  );
+
+  return { prompt, requestDecision, resolveDecision };
+}
+
 const closePreparationByIdentity = new Map<string, Promise<boolean>>();
 
 /**

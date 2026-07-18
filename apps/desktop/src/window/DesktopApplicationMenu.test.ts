@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { DesktopCloseActiveFileOrWindowAction } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -6,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import type * as Electron from "electron";
+import { vi } from "vite-plus/test";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
@@ -15,11 +17,12 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
+import { MENU_ACTION_CHANNEL } from "../ipc/channels.ts";
 
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
   homeDirectory: "/Users/alice",
-  platform: "linux",
+  platform: "darwin",
   processArch: "arm64",
   appVersion: "1.2.3",
   appPath: "/repo",
@@ -92,7 +95,7 @@ const makeElectronMenuLayer = (
   } satisfies ElectronMenu.ElectronMenu["Service"]);
 
 describe("DesktopApplicationMenu", () => {
-  it.effect("installs the native menu and routes Settings through DesktopWindow", () =>
+  it.effect("routes native Settings and Close Window actions", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
       const applicationMenuTemplate =
@@ -119,12 +122,12 @@ describe("DesktopApplicationMenu", () => {
       );
 
       const template = yield* Deferred.await(applicationMenuTemplate);
-      const fileMenu = template.find((item) => item.label === "File");
-      assert.isDefined(fileMenu);
-      if (!Array.isArray(fileMenu.submenu)) {
-        throw new Error("Expected File menu submenu to be an array.");
+      const appMenu = template.find((item) => item.label === "Zrode");
+      assert.isDefined(appMenu);
+      if (!Array.isArray(appMenu.submenu)) {
+        throw new Error("Expected app menu submenu to be an array.");
       }
-      const settingsItem = fileMenu.submenu.find((item) => item.label === "Settings...");
+      const settingsItem = appMenu.submenu.find((item) => item.label === "Settings...");
       assert.isDefined(settingsItem);
       const settingsClick = settingsItem.click;
       if (typeof settingsClick !== "function") {
@@ -133,6 +136,30 @@ describe("DesktopApplicationMenu", () => {
 
       settingsClick({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "open-settings");
+
+      const fileMenu = template.find((item) => item.label === "File");
+      assert.isDefined(fileMenu);
+      if (!Array.isArray(fileMenu.submenu)) {
+        throw new Error("Expected File menu submenu to be an array.");
+      }
+      const closeItem = fileMenu.submenu.find((item) => item.label === "Close Window");
+      assert.isDefined(closeItem);
+      assert.equal(closeItem.accelerator, "CmdOrCtrl+W");
+      if (typeof closeItem.click !== "function") {
+        throw new Error("Expected Close Window menu item to have a click handler.");
+      }
+      const send = vi.fn();
+      closeItem.click(
+        {} as Electron.MenuItem,
+        {
+          isDestroyed: () => false,
+          webContents: { send },
+        } as unknown as Electron.BrowserWindow,
+        {} as KeyboardEvent,
+      );
+      assert.deepEqual(send.mock.calls, [
+        [MENU_ACTION_CHANNEL, DesktopCloseActiveFileOrWindowAction],
+      ]);
     }),
   );
 });

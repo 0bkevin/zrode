@@ -14,6 +14,8 @@ export interface FileBrowserTreeModel {
   scrollToPath(path: string, options?: FileTreeScrollToPathOptions): void;
 }
 
+export type FileTreeBulkFolderAction = "expand" | "collapse";
+
 function isDirectoryHandle(item: FileTreeItemHandle | null): item is FileTreeDirectoryHandle {
   return item?.isDirectory() === true;
 }
@@ -36,6 +38,39 @@ export function shouldRevealActiveFile(input: {
   return (
     input.visible && (input.pathsChanged || input.activePathChanged || !input.previouslyVisible)
   );
+}
+
+/** Expand when at least one known folder is closed; collapse only when every
+ * known folder is already open. This keeps one toolbar control predictable in
+ * partially expanded trees. */
+export function resolveFileTreeBulkFolderAction(input: {
+  readonly directoryPaths: readonly string[];
+  readonly model: FileBrowserTreeModel;
+}): FileTreeBulkFolderAction | null {
+  let foundDirectory = false;
+  for (const directoryPath of input.directoryPaths) {
+    const item = input.model.getItem(directoryPath);
+    if (!isDirectoryHandle(item)) continue;
+    foundDirectory = true;
+    if (!item.isExpanded()) return "expand";
+  }
+  return foundDirectory ? "collapse" : null;
+}
+
+export function toggleAllFileTreeDirectories(input: {
+  readonly directoryPaths: readonly string[];
+  readonly model: FileBrowserTreeModel;
+}): FileTreeBulkFolderAction | null {
+  const action = resolveFileTreeBulkFolderAction(input);
+  if (action === null) return null;
+
+  for (const directoryPath of input.directoryPaths) {
+    const item = input.model.getItem(directoryPath);
+    if (!isDirectoryHandle(item)) continue;
+    if (action === "expand" && !item.isExpanded()) item.expand();
+    if (action === "collapse" && item.isExpanded()) item.collapse();
+  }
+  return action;
 }
 
 /**

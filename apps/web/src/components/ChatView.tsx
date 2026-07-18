@@ -298,9 +298,8 @@ import { useAssetUrls } from "../assets/assetUrls";
 import {
   fileDocumentStore,
   prepareFileDocumentForClose,
-  type FileDocumentCloseDecision,
-  type FileDocumentClosePrompt,
   useFileDocumentBeforeUnloadProtection,
+  useFileDocumentCloseDecisionPrompt,
   useFileDocumentStoreVersion,
 } from "./files/fileDocumentRuntime";
 import { FileDocumentCloseDialog } from "./files/FileDocumentCloseDialog";
@@ -2600,33 +2599,11 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return pending;
   }, [activeProject, activeWorkspaceRoot, fileDocumentStoreVersion]);
-  const [fileDocumentClosePrompt, setFileDocumentClosePrompt] =
-    useState<FileDocumentClosePrompt | null>(null);
-  const fileDocumentCloseResolverRef = useRef<
-    ((decision: FileDocumentCloseDecision) => void) | null
-  >(null);
-  const requestFileDocumentCloseDecision = useCallback(
-    (prompt: FileDocumentClosePrompt) =>
-      new Promise<FileDocumentCloseDecision>((resolve) => {
-        fileDocumentCloseResolverRef.current?.("cancel");
-        fileDocumentCloseResolverRef.current = resolve;
-        setFileDocumentClosePrompt(prompt);
-      }),
-    [],
-  );
-  const resolveFileDocumentCloseDecision = useCallback((decision: FileDocumentCloseDecision) => {
-    const resolve = fileDocumentCloseResolverRef.current;
-    fileDocumentCloseResolverRef.current = null;
-    setFileDocumentClosePrompt(null);
-    resolve?.(decision);
-  }, []);
-  useEffect(
-    () => () => {
-      fileDocumentCloseResolverRef.current?.("cancel");
-      fileDocumentCloseResolverRef.current = null;
-    },
-    [],
-  );
+  const {
+    prompt: fileDocumentClosePrompt,
+    requestDecision: requestFileDocumentCloseDecision,
+    resolveDecision: resolveFileDocumentCloseDecision,
+  } = useFileDocumentCloseDecisionPrompt();
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -3703,6 +3680,11 @@ function ChatViewContent(props: ChatViewProps) {
       syncActivePreviewSurface,
     ],
   );
+  const closeActiveFileSurface = useCallback(() => {
+    if (activeRightPanelSurface?.kind === "file") {
+      closeRightPanelSurface(activeRightPanelSurface);
+    }
+  }, [activeRightPanelSurface, closeRightPanelSurface]);
   const openChatInNewWindow = useCallback(() => {
     if (!activeThreadRef) return;
     void openPaneWindow({
@@ -6698,6 +6680,9 @@ function ChatViewContent(props: ChatViewProps) {
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
           pendingSurfaceIds={pendingFileSurfaceIds}
           onOpenFile={openFileSurface}
+          {...(activeRightPanelSurface.kind === "file"
+            ? { onCloseActiveFile: closeActiveFileSurface }
+            : {})}
           onCloseFile={closeRightPanelSurface}
           onCloseAllFiles={closeAllFileSurfaces}
         />

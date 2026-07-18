@@ -7,6 +7,7 @@ import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings"
 import { isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import ThreadSidebar from "./Sidebar";
+import { useFileCloseShortcutRouter } from "./files/useFileCloseShortcutRouter";
 import { Sidebar, SidebarProvider, SidebarRail, SidebarTrigger, useSidebar } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -54,6 +55,7 @@ function SidebarControl() {
 }
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
+  useFileCloseShortcutRouter();
   const navigate = useNavigate();
   const macosWindowControlsStyle =
     isElectron && isMacPlatform(navigator.platform)

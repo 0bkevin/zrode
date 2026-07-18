@@ -1,3 +1,4 @@
+import { DesktopCloseActiveFileOrWindowAction } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,6 +14,7 @@ import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
+import { MENU_ACTION_CHANNEL } from "../ipc/channels.ts";
 
 export class DesktopApplicationMenuActionError extends Schema.TaggedErrorClass<DesktopApplicationMenuActionError>()(
   "DesktopApplicationMenuActionError",
@@ -127,6 +129,13 @@ export const make = Effect.gen(function* () {
     const settingsClick = () => {
       runMenuEffect("open-settings", dispatchMenuAction("open-settings"));
     };
+    const closeClick: Electron.MenuItemConstructorOptions["click"] = (_menuItem, browserWindow) => {
+      if (!browserWindow || browserWindow.isDestroyed()) return;
+      (browserWindow as Electron.BrowserWindow).webContents.send(
+        MENU_ACTION_CHANNEL,
+        DesktopCloseActiveFileOrWindowAction,
+      );
+    };
     const template: Electron.MenuItemConstructorOptions[] = [];
 
     if (environment.platform === "darwin") {
@@ -170,7 +179,15 @@ export const make = Effect.gen(function* () {
                 },
                 { type: "separator" as const },
               ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
+          ...(environment.platform === "darwin"
+            ? [
+                {
+                  label: "Close Window",
+                  accelerator: "CmdOrCtrl+W",
+                  click: closeClick,
+                },
+              ]
+            : [{ role: "quit" as const }]),
         ],
       },
       { role: "editMenu" },

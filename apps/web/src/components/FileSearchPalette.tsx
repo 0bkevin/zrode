@@ -32,10 +32,16 @@ import { cn } from "~/lib/utils";
 
 const FILE_SEARCH_RESULT_LIMIT = 50;
 
-interface FileSearchProjectContext {
+export interface FileSearchProjectContext {
   readonly threadRef: ScopedThreadRef;
   readonly cwd: string;
   readonly projectTitle: string;
+}
+
+export interface FileSearchPaletteProps {
+  readonly projectContext?: FileSearchProjectContext;
+  readonly openFilePaths?: readonly string[];
+  readonly onOpenFile?: (relativePath: string) => void;
 }
 
 function fileEntryDisplayParts(relativePath: string): {
@@ -72,7 +78,11 @@ export function buildFileSearchItems(input: {
   });
 }
 
-export function FileSearchPalette() {
+export function FileSearchPalette({
+  projectContext: projectContextOverride,
+  openFilePaths,
+  onOpenFile,
+}: FileSearchPaletteProps = {}) {
   const [open, setOpen] = useState(false);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const routeTarget = useParams({
@@ -85,11 +95,12 @@ export function FileSearchPalette() {
     thread ? scopeProjectRef(thread.environmentId, thread.projectId) : null,
   );
   const cwd = thread?.worktreePath ?? project?.workspaceRoot ?? null;
-  const projectContext = useMemo<FileSearchProjectContext | null>(
+  const routeProjectContext = useMemo<FileSearchProjectContext | null>(
     () =>
       threadRef && project && cwd !== null ? { threadRef, cwd, projectTitle: project.title } : null,
     [cwd, project, threadRef],
   );
+  const projectContext = projectContextOverride ?? routeProjectContext;
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -113,7 +124,12 @@ export function FileSearchPalette() {
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
       {open ? (
-        <OpenFileSearchPaletteDialog projectContext={projectContext} setOpen={setOpen} />
+        <OpenFileSearchPaletteDialog
+          projectContext={projectContext}
+          openFilePaths={openFilePaths}
+          onOpenFile={onOpenFile}
+          setOpen={setOpen}
+        />
       ) : null}
     </CommandDialog>
   );
@@ -121,9 +137,11 @@ export function FileSearchPalette() {
 
 function OpenFileSearchPaletteDialog(props: {
   readonly projectContext: FileSearchProjectContext | null;
+  readonly openFilePaths: readonly string[] | undefined;
+  readonly onOpenFile: ((relativePath: string) => void) | undefined;
   readonly setOpen: (open: boolean) => void;
 }) {
-  const { projectContext, setOpen } = props;
+  const { onOpenFile, openFilePaths, projectContext, setOpen } = props;
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -143,10 +161,11 @@ function OpenFileSearchPaletteDialog(props: {
   const openFile = useCallback(
     (relativePath: string) => {
       if (!projectContext) return;
-      useRightPanelStore.getState().openFile(projectContext.threadRef, relativePath);
+      if (onOpenFile) onOpenFile(relativePath);
+      else useRightPanelStore.getState().openFile(projectContext.threadRef, relativePath);
       setOpen(false);
     },
-    [projectContext, setOpen],
+    [onOpenFile, projectContext, setOpen],
   );
 
   const executeItem = useCallback((item: CommandPaletteActionItem) => {
@@ -160,9 +179,11 @@ function OpenFileSearchPaletteDialog(props: {
     }
 
     if (trimmedQuery.length === 0) {
-      const openPaths = (openFileSurfacePaths ?? []).flatMap((surface) =>
-        surface.kind === "file" ? [surface.relativePath] : [],
-      );
+      const openPaths =
+        openFilePaths ??
+        (openFileSurfacePaths ?? []).flatMap((surface) =>
+          surface.kind === "file" ? [surface.relativePath] : [],
+        );
       if (openPaths.length === 0) {
         return [];
       }
@@ -188,7 +209,7 @@ function OpenFileSearchPaletteDialog(props: {
         items: buildFileSearchItems({ relativePaths: filePaths, openFile }),
       },
     ];
-  }, [openFile, openFileSurfacePaths, projectContext, search.entries, trimmedQuery]);
+  }, [openFile, openFilePaths, openFileSurfacePaths, projectContext, search.entries, trimmedQuery]);
 
   const emptyStateMessage = !projectContext
     ? "Open a thread to search its project files."

@@ -1,12 +1,18 @@
-import type { EnvironmentId, FileExplorerPosition, ScopedThreadRef } from "@t3tools/contracts";
+import type {
+  ContextMenuItem,
+  EnvironmentId,
+  FileExplorerPosition,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { Files, PanelLeft, PanelRight, Search } from "lucide-react";
-import { memo, useCallback } from "react";
+import { Files, Search } from "lucide-react";
+import { memo, type MouseEvent, type ReactNode, useCallback } from "react";
 
 import { cn } from "~/lib/utils";
+import { readLocalApi } from "~/localApi";
 import {
   selectThreadRightPanelState,
   type FileRevealTarget,
@@ -17,6 +23,7 @@ import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import FileBrowserPanel from "./FileBrowserPanel";
+import type { FilePreviewLayoutMode } from "./fileExplorerLayout";
 import WorkspaceOpenEditors from "./WorkspaceOpenEditors";
 import WorkspaceSearchView from "./WorkspaceSearchView";
 import { fileDocumentStore } from "./fileDocumentRuntime";
@@ -28,12 +35,15 @@ interface WorkspaceExplorerSidebarProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
+  layoutMode: FilePreviewLayoutMode;
   activeRelativePath: string | null;
   threadRef: ScopedThreadRef;
   pendingSurfaceIds: ReadonlySet<string>;
   onOpenFile: (relativePath: string, target?: FileRevealTarget) => void;
   fileExplorerPosition: FileExplorerPosition;
   onFileExplorerPositionChange: (position: FileExplorerPosition) => void;
+  headerActions?: ReactNode;
+  openEditors?: ReactNode;
   onCloseFile?: (surface: FileSurface) => void;
   onCloseAllFiles?: () => void;
 }
@@ -42,12 +52,15 @@ function WorkspaceExplorerSidebar({
   environmentId,
   cwd,
   projectName,
+  layoutMode,
   activeRelativePath,
   threadRef,
   pendingSurfaceIds,
   onOpenFile,
   fileExplorerPosition,
   onFileExplorerPositionChange,
+  headerActions,
+  openEditors,
   onCloseFile,
   onCloseAllFiles,
 }: WorkspaceExplorerSidebarProps) {
@@ -70,6 +83,27 @@ function WorkspaceExplorerSidebar({
   const showSearch = useCallback(() => {
     useRightPanelStore.getState().showWorkspaceSearch(threadRef);
   }, [threadRef]);
+  const handleExplorerContextMenu = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const api = readLocalApi();
+      if (!api) return;
+      const nextPosition = fileExplorerPosition === "left" ? "right" : "left";
+      const items: readonly ContextMenuItem<"move-explorer">[] = [
+        {
+          id: "move-explorer",
+          label: `Move Explorer to the ${nextPosition}`,
+        },
+      ];
+      void api.contextMenu.show(items, { x: event.clientX, y: event.clientY }).then(
+        (action) => {
+          if (action === "move-explorer") onFileExplorerPositionChange(nextPosition);
+        },
+        () => undefined,
+      );
+    },
+    [fileExplorerPosition, onFileExplorerPositionChange],
+  );
 
   const createFile = useCallback(
     async (relativePath: string) => {
@@ -196,9 +230,13 @@ function WorkspaceExplorerSidebar({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background" data-workspace-sidebar={view}>
       <div className="flex h-9 shrink-0 items-center border-b border-border/60 px-2">
-        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-foreground">
+        <div
+          className="min-w-0 flex-1 cursor-default truncate text-[11px] font-semibold uppercase tracking-wide text-foreground"
+          onContextMenu={handleExplorerContextMenu}
+          title="Right-click for Explorer position"
+        >
           {view === "search" ? "Search" : "Explorer"}
-        </span>
+        </div>
         <div className="flex items-center gap-0.5">
           <div
             className="flex items-center gap-0.5"
@@ -234,21 +272,7 @@ function WorkspaceExplorerSidebar({
               <Search className="size-3.5" />
             </button>
           </div>
-          <button
-            type="button"
-            aria-label={`Move Explorer to the ${fileExplorerPosition === "left" ? "right" : "left"}`}
-            title={`Move Explorer to the ${fileExplorerPosition === "left" ? "right" : "left"}`}
-            className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() =>
-              onFileExplorerPositionChange(fileExplorerPosition === "left" ? "right" : "left")
-            }
-          >
-            {fileExplorerPosition === "left" ? (
-              <PanelRight className="size-3.5" />
-            ) : (
-              <PanelLeft className="size-3.5" />
-            )}
-          </button>
+          {headerActions}
         </div>
       </div>
       {view === "search" ? (
@@ -263,25 +287,26 @@ function WorkspaceExplorerSidebar({
         className={cn("min-h-0 flex-1 flex-col", view === "explorer" ? "flex" : "hidden")}
         aria-hidden={view === "explorer" ? undefined : true}
       >
-        {onCloseFile && onCloseAllFiles ? (
-          <WorkspaceOpenEditors
-            threadRef={threadRef}
-            pendingSurfaceIds={pendingSurfaceIds}
-            onCloseFile={onCloseFile}
-            onCloseAllFiles={onCloseAllFiles}
-          />
-        ) : null}
+        {openEditors ??
+          (onCloseFile && onCloseAllFiles ? (
+            <WorkspaceOpenEditors
+              threadRef={threadRef}
+              pendingSurfaceIds={pendingSurfaceIds}
+              onCloseFile={onCloseFile}
+              onCloseAllFiles={onCloseAllFiles}
+            />
+          ) : null)}
         <FileBrowserPanel
           key={`${environmentId}:${cwd}`}
           environmentId={environmentId}
           cwd={cwd}
           projectName={projectName}
+          layoutMode={layoutMode}
           activeRelativePath={activeRelativePath}
           onOpenFile={(relativePath) => onOpenFile(relativePath)}
           onCreateFile={createFile}
           onCreateDirectory={createFolder}
           onDeleteEntry={permanentlyDeleteEntry}
-          onShowSearch={showSearch}
           visible={view === "explorer"}
         />
       </div>

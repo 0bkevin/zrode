@@ -38,6 +38,26 @@ export interface FileExplorerPaneLayout {
   readonly explorerOnly: boolean;
 }
 
+export interface FileExplorerToolbarLayout {
+  readonly showRefreshInline: boolean;
+  readonly showCollapseInline: boolean;
+}
+
+/**
+ * A dedicated Files window has enough room for the common VS Code-style
+ * Explorer actions. The docked pane keeps the same actions in its overflow
+ * menu so the project name remains readable at the minimum pane width.
+ */
+export function resolveFileExplorerToolbarLayout(
+  mode: FilePreviewLayoutMode,
+): FileExplorerToolbarLayout {
+  const showSecondaryActionsInline = mode === "standalone";
+  return {
+    showRefreshInline: showSecondaryActionsInline,
+    showCollapseInline: showSecondaryActionsInline,
+  };
+}
+
 /**
  * A docked Files surface gives its full width to Explorer until a file opens.
  * A dedicated Files window keeps the editor split visible as useful window
