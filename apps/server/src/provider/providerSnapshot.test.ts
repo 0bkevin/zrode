@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  buildServerProvider,
   isCommandMissingCause,
   providerModelsFromSettings,
   spawnAndCollect,
@@ -51,6 +52,28 @@ describe("providerModelsFromSettings", () => {
         capabilities: OPENCODE_CUSTOM_MODEL_CAPABILITIES,
       },
     ]);
+  });
+});
+
+describe("buildServerProvider", () => {
+  it("does not expose a raw probe response body in provider status", () => {
+    const provider = buildServerProvider({
+      presentation: { displayName: "Codex" },
+      enabled: true,
+      checkedAt: "2026-07-21T00:00:00.000Z",
+      models: [],
+      probe: {
+        installed: true,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message:
+          "status code: 403 Forbidden; content-type=text/html; body=<html>request-id: private</html>",
+      },
+    });
+
+    expect(provider.message).toBe("Codex status check failed: 403 Forbidden.");
+    expect(provider.message).not.toContain("request-id");
   });
 });
 

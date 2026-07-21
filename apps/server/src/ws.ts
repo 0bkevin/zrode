@@ -65,6 +65,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import { clamp } from "effect/Number";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
@@ -1364,7 +1365,15 @@ const makeWsRpcLayer = (
             serverSettings.getSettings.pipe(
               Effect.flatMap((settings) => consumeCodexResetCredit(settings.providers.codex)),
               Effect.catch((error) =>
-                Effect.succeed({ ok: false as const, message: error.message }),
+                Effect.succeed({
+                  ok: false as const,
+                  message:
+                    normalizeProviderErrorMessage(error.message, {
+                      fallback: "Reset request failed.",
+                      requestSubject: "Codex reset request",
+                      maxLength: 240,
+                    }) ?? "Reset request failed.",
+                }),
               ),
             ),
             { "rpc.aggregate": "server" },

@@ -1,4 +1,5 @@
 import type { ServerProvider, ServerProviderVersionAdvisory } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so
@@ -21,6 +22,21 @@ export const PROVIDER_STATUS_STYLES = {
 
 export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
 
+function providerStatusDetail(provider: ServerProvider, fallback: string | null): string | null {
+  if (!provider.message) {
+    return fallback;
+  }
+  const providerName = provider.displayName?.trim() || "Provider";
+  const safeFallback = fallback ?? `${providerName} status could not be verified.`;
+  return (
+    normalizeProviderErrorMessage(provider.message, {
+      fallback: safeFallback,
+      requestSubject: `${providerName} status check`,
+      maxLength: 240,
+    }) ?? safeFallback
+  );
+}
+
 /**
  * Derive the headline + detail copy shown under a provider's name in the
  * settings page. Prefers `provider.message` for server-supplied detail and
@@ -38,45 +54,52 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider.enabled) {
     return {
       headline: "Disabled",
-      detail:
-        provider.message ?? "This provider is installed but disabled for new sessions in Zrode.",
+      detail: providerStatusDetail(
+        provider,
+        "This provider is installed but disabled for new sessions in Zrode.",
+      ),
     };
   }
   if (!provider.installed) {
     return {
       headline: "Not found",
-      detail: provider.message ?? "CLI not detected on PATH.",
+      detail: providerStatusDetail(provider, "CLI not detected on PATH."),
     };
   }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
     return {
       headline: authLabel ? `Authenticated · ${authLabel}` : "Authenticated",
-      detail: provider.message ?? null,
+      detail: providerStatusDetail(provider, null),
     };
   }
   if (provider.auth.status === "unauthenticated") {
     return {
       headline: "Not authenticated",
-      detail: provider.message ?? null,
+      detail: providerStatusDetail(provider, null),
     };
   }
   if (provider.status === "warning") {
     return {
       headline: "Needs attention",
-      detail:
-        provider.message ?? "The provider is installed, but the server could not fully verify it.",
+      detail: providerStatusDetail(
+        provider,
+        "The provider is installed, but the server could not fully verify it.",
+      ),
     };
   }
   if (provider.status === "error") {
     return {
       headline: "Unavailable",
-      detail: provider.message ?? "The provider failed its startup checks.",
+      detail: providerStatusDetail(provider, "The provider failed its startup checks."),
     };
   }
   return {
     headline: "Available",
-    detail: provider.message ?? "Installed and ready, but authentication could not be verified.",
+    detail: providerStatusDetail(
+      provider,
+      "Installed and ready, but authentication could not be verified.",
+    ),
   };
 }
 
@@ -107,7 +130,11 @@ export function getProviderVersionAdvisoryPresentation(
 
   return {
     detail:
-      advisory.message ??
+      normalizeProviderErrorMessage(advisory.message, {
+        fallback: "Provider update information is temporarily unavailable.",
+        requestSubject: "Provider update check",
+        maxLength: 240,
+      }) ??
       (versionLabel
         ? `${label}: install ${versionLabel}.`
         : `${label}: install the latest provider version.`),

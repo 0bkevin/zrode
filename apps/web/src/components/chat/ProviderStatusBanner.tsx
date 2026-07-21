@@ -49,8 +49,11 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
       : `${providerName} provider has limited availability.`;
   const message = isUnauthenticated
     ? "Sign in via the CLI to authenticate again."
-    : (normalizeProviderErrorMessage(status.message, { fallback: fallbackMessage }) ??
-      fallbackMessage);
+    : (normalizeProviderErrorMessage(status.message, {
+        fallback: fallbackMessage,
+        requestSubject: `${providerName} status check`,
+        maxLength: 240,
+      }) ?? fallbackMessage);
 
   const bannerKey = `${status.driver}:${status.status}:${title}:${message}`;
   if (bannerKey === dismissedKey) {

@@ -11,6 +11,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
@@ -248,7 +249,12 @@ export function getProviderUpdateRejectedToastView(
     phase: "failed",
     type: "error",
     title: providerCount === 1 ? "Provider update failed" : "Provider updates failed",
-    description: message,
+    description:
+      normalizeProviderErrorMessage(message, {
+        fallback: "Provider update failed.",
+        requestSubject: "Provider update",
+        maxLength: 240,
+      }) ?? "Provider update failed.",
   };
 }
 
@@ -373,7 +379,13 @@ export function firstFailedProviderUpdateMessage(
     return null;
   }
   const error = squashAtomCommandFailure(failed);
-  return error instanceof Error ? error.message : "Provider update failed.";
+  return error instanceof Error
+    ? (normalizeProviderErrorMessage(error.message, {
+        fallback: "Provider update failed.",
+        requestSubject: "Provider update",
+        maxLength: 240,
+      }) ?? "Provider update failed.")
+    : "Provider update failed.";
 }
 
 function getUpdateFinishedAt(provider: ServerProvider): string | null {
@@ -548,7 +560,13 @@ function getFailedProviderUpdateDescription(providers: ReadonlyArray<ServerProvi
   if (providers.length === 1) {
     const provider = providers[0]!;
     if (provider.updateState?.message) {
-      return provider.updateState.message;
+      return (
+        normalizeProviderErrorMessage(provider.updateState.message, {
+          fallback: "Provider update failed.",
+          requestSubject: "Provider update",
+          maxLength: 240,
+        }) ?? "Provider update failed."
+      );
     }
   }
   return `${formatProviderList(providers)} failed to update. Check provider settings for details.`;
