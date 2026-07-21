@@ -357,13 +357,13 @@ describe("buildCursorProviderSnapshot", () => {
           version: "2026.04.09-f2b0fcd",
           status: "error",
           auth: { status: "unauthenticated" },
-          message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+          message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
         },
         discoveryWarning: cursorAcpDiscoveryFailedMessage,
       }),
     ).toMatchObject({
       status: "error",
-      message: `Cursor Agent is not authenticated. Run \`agent login\` and try again. ${cursorAcpDiscoveryFailedMessage}`,
+      message: `Cursor Agent is not authenticated. Run \`cursor-agent login\` and try again. ${cursorAcpDiscoveryFailedMessage}`,
       models: [
         {
           slug: "claude-sonnet-4-6",
@@ -558,7 +558,7 @@ describe("parseCursorAboutOutput", () => {
       auth: {
         status: "unauthenticated",
       },
-      message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+      message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
     });
   });
 
@@ -579,7 +579,7 @@ describe("parseCursorAboutOutput", () => {
       auth: {
         status: "unauthenticated",
       },
-      message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+      message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
     });
   });
 });
