@@ -132,6 +132,7 @@ const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const DEVIN_DRIVER_KIND = ProviderDriverKind.make("devin");
+const KILOCODE_DRIVER_KIND = ProviderDriverKind.make("kilocode");
 const GITHUB_COPILOT_DRIVER_KIND = ProviderDriverKind.make("githubCopilot");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
@@ -215,6 +216,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
   [DEVIN_DRIVER_KIND]: "Devin",
+  [KILOCODE_DRIVER_KIND]: "Kilo Code",
   [GITHUB_COPILOT_DRIVER_KIND]: "GitHub Copilot",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };

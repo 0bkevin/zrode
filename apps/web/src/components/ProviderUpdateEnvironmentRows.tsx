@@ -1,5 +1,4 @@
-import { CheckIcon } from "lucide-react";
-import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -7,7 +6,6 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 
-import { cn } from "~/lib/utils";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useLocalEnvironmentUpdateGroups } from "./ProviderUpdateLaunchNotification.environments";
@@ -18,14 +16,10 @@ import {
   getProviderUpdateSidebarPillView,
   isTerminalProviderUpdatePhase,
   resolveEnvironmentUpdateRowStatus,
-  type LocalEnvironmentUpdateGroup,
   type LocalProviderUpdateOutcome,
-  type ProviderUpdateRowStatus,
-  type ProviderUpdateRowStatusKind,
   type ProviderUpdateToastView,
 } from "./ProviderUpdateLaunchNotification.logic";
-import { Button } from "./ui/button";
-import { Spinner } from "./ui/spinner";
+import { ProviderUpdateRow } from "./ProviderUpdateRow";
 
 type ProviderUpdateCommandResult = AtomCommandResult<
   { readonly providers: ReadonlyArray<ServerProvider> },
@@ -92,64 +86,6 @@ function toProviderUpdateOutcome(input: {
 // update (npm installs routinely run tens of seconds) is never cut off and left
 // showing a dead, unresponsive Update button.
 const PENDING_EXPIRY_MS = 6 * 60_000;
-
-function rowToneClass(kind: ProviderUpdateRowStatusKind): string {
-  switch (kind) {
-    case "failed":
-      return "text-destructive";
-    case "unchanged":
-      return "text-warning";
-    case "success":
-      return "text-success";
-    default:
-      return "text-muted-foreground";
-  }
-}
-
-function EnvironmentUpdateRow({
-  group,
-  status,
-  onUpdate,
-}: {
-  readonly group: LocalEnvironmentUpdateGroup;
-  readonly status: ProviderUpdateRowStatus;
-  readonly onUpdate: () => void;
-}) {
-  let trailing: ReactNode;
-  switch (status.kind) {
-    case "loading":
-      trailing = <Spinner className="size-4 text-muted-foreground" />;
-      break;
-    case "success":
-      trailing = <CheckIcon aria-hidden="true" className="size-4 text-success" />;
-      break;
-    case "failed":
-    case "unchanged":
-      trailing = (
-        <Button size="xs" variant="outline" onClick={onUpdate}>
-          Retry
-        </Button>
-      );
-      break;
-    default:
-      trailing = (
-        <Button size="xs" onClick={onUpdate}>
-          Update
-        </Button>
-      );
-      break;
-  }
-
-  return (
-    <div className="flex items-center justify-between gap-3 py-0.5">
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate font-medium text-foreground">{group.label}</span>
-        <span className={cn("truncate text-xs", rowToneClass(status.kind))}>{status.text}</span>
-      </div>
-      <div className="shrink-0">{trailing}</div>
-    </div>
-  );
-}
 
 /**
  * The launch popover's body when WSL is present: one row per local environment
@@ -385,10 +321,11 @@ export function ProviderUpdateEnvironmentRows({
   return (
     <div className="mt-0.5 flex flex-col gap-1">
       {rows.map(({ group, status }) => (
-        <EnvironmentUpdateRow
+        <ProviderUpdateRow
           key={group.environmentId}
-          group={group}
+          label={group.label}
           status={status}
+          canUpdate
           onUpdate={() => handleUpdate(group.environmentId)}
         />
       ))}

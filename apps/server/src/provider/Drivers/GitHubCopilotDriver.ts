@@ -25,8 +25,7 @@ import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { gitHubCopilotContinuationIdentity } from "../acp/GitHubCopilotAcpSupport.ts";
 import {
-  makeProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
+  makeSelfUpdateProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
 import {
@@ -39,15 +38,13 @@ const decodeGitHubCopilotSettings = Schema.decodeSync(GitHubCopilotSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("githubCopilot");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: "@github/copilot",
-    updateExecutable: "copilot",
-    updateArgs: ["update"],
-    updateLockKey: "github-copilot-cli",
-  }),
-);
+const UPDATE = makeSelfUpdateProviderMaintenanceResolver({
+  provider: DRIVER_KIND,
+  packageName: "@github/copilot",
+  defaultExecutable: "copilot",
+  updateArgs: ["update"],
+  updateLockKey: "github-copilot-cli",
+});
 
 export type GitHubCopilotDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner

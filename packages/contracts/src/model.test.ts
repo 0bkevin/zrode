@@ -26,3 +26,11 @@ describe("GitHub Copilot model metadata", () => {
     expect(DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[githubCopilot]).toBe("auto");
   });
 });
+
+describe("Kilo Code model metadata", () => {
+  it("declares the provider display name used by shared update surfaces", () => {
+    const kiloCode = ProviderDriverKind.make("kilocode");
+
+    expect(PROVIDER_DISPLAY_NAMES[kiloCode]).toBe("Kilo Code");
+  });
+});

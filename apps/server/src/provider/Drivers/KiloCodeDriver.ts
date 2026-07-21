@@ -28,8 +28,7 @@ import {
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
-  makeProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
+  makeSelfUpdateProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
 import {
@@ -42,15 +41,13 @@ const decodeKiloCodeSettings = Schema.decodeSync(KiloCodeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("kilocode");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: "@kilocode/cli",
-    updateExecutable: "kilo",
-    updateArgs: ["upgrade"],
-    updateLockKey: "kilocode-cli",
-  }),
-);
+const UPDATE = makeSelfUpdateProviderMaintenanceResolver({
+  provider: DRIVER_KIND,
+  packageName: "@kilocode/cli",
+  defaultExecutable: "kilo",
+  updateArgs: ["upgrade"],
+  updateLockKey: "kilocode-cli",
+});
 
 export type KiloCodeDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner

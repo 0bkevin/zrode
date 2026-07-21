@@ -796,7 +796,7 @@ export function getCursorParameterizedModelPickerUnsupportedMessage(input: {
     return undefined;
   }
 
-  return `${reasons.join(". ")}. Run \`agent set-channel lab && agent update\` and use Cursor Agent CLI 2026.04.08 or newer.`;
+  return `${reasons.join(". ")}. Run \`cursor-agent set-channel lab && cursor-agent update\` and use Cursor Agent CLI 2026.04.08 or newer.`;
 }
 
 /**
@@ -838,7 +838,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
         version,
         status: "error",
         auth: { status: "unauthenticated" },
-        message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+        message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
       };
     }
 
@@ -871,7 +871,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
         version,
         status: "error",
         auth: { status: "unauthenticated" },
-        message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+        message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
       };
     }
 
@@ -899,7 +899,8 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
       version: null,
       status: "warning",
       auth: { status: "unknown" },
-      message: "The `agent about` command is unavailable in this version of the Cursor Agent CLI.",
+      message:
+        "The `cursor-agent about` command is unavailable in this version of the Cursor Agent CLI.",
     };
   }
 
@@ -931,7 +932,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
       version,
       status: "error",
       auth: { status: "unauthenticated" },
-      message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+      message: "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
     };
   }
 
@@ -1052,7 +1053,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "Cursor Agent CLI is installed but timed out while running `agent about`.",
+        message: "Cursor Agent CLI is installed but timed out while running `cursor-agent about`.",
       },
     });
   }

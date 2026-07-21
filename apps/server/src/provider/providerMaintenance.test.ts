@@ -14,6 +14,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
   makeProviderMaintenanceCapabilities,
+  makeSelfUpdateProviderMaintenanceResolver,
   makeStaticProviderMaintenanceResolver,
   normalizeCommandPath,
   ProviderVersionCache,
@@ -68,6 +69,13 @@ const staticToolUpdate = makeStaticProviderMaintenanceResolver(
     updateLockKey: "static-tool",
   }),
 );
+const selfUpdatingTool = makeSelfUpdateProviderMaintenanceResolver({
+  provider: driver("selfUpdatingTool"),
+  packageName: "@example/self-updating-tool",
+  defaultExecutable: "self-updating-tool",
+  updateArgs: ["update"],
+  updateLockKey: "self-updating-tool",
+});
 const installedPackageToolProvider: ServerProvider = {
   instanceId: ProviderInstanceId.make("packageTool"),
   driver: driver("packageTool"),
@@ -194,6 +202,24 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         args: ["update"],
 
         lockKey: "static-tool",
+      },
+    });
+  });
+
+  it("runs CLI-owned updates through the configured binary path", () => {
+    expect(
+      selfUpdatingTool.resolve({
+        binaryPath: "/opt/custom tools/self-updating-tool",
+        resolvedCommandPath: "/opt/custom tools/self-updating-tool",
+      }),
+    ).toEqual({
+      provider: driver("selfUpdatingTool"),
+      packageName: "@example/self-updating-tool",
+      update: {
+        command: "/opt/custom tools/self-updating-tool update",
+        executable: "/opt/custom tools/self-updating-tool",
+        args: ["update"],
+        lockKey: "self-updating-tool",
       },
     });
   });
@@ -356,9 +382,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           provider: driver("nativePackageTool"),
           packageName: "@example/native-package-tool",
           update: {
-            command: "native-package-tool update",
+            command: `${nativePackageToolPath} update`,
 
-            executable: "native-package-tool",
+            executable: nativePackageToolPath,
 
             args: ["update"],
 
@@ -393,9 +419,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           provider: driver("scopedPackageTool"),
           packageName: "@example/scoped-package-tool",
           update: {
-            command: "scoped-package-tool upgrade",
+            command: `${scopedPackageToolPath} upgrade`,
 
-            executable: "scoped-package-tool",
+            executable: scopedPackageToolPath,
 
             args: ["upgrade"],
 

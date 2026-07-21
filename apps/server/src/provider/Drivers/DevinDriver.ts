@@ -28,8 +28,7 @@ import {
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
-  makeProviderMaintenanceCapabilities,
-  makeStaticProviderMaintenanceResolver,
+  makeSelfUpdateProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
 import {
@@ -42,15 +41,13 @@ const decodeDevinSettings = Schema.decodeSync(DevinSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("devin");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const UPDATE = makeStaticProviderMaintenanceResolver(
-  makeProviderMaintenanceCapabilities({
-    provider: DRIVER_KIND,
-    packageName: null,
-    updateExecutable: "devin",
-    updateArgs: ["update"],
-    updateLockKey: "devin-cli",
-  }),
-);
+const UPDATE = makeSelfUpdateProviderMaintenanceResolver({
+  provider: DRIVER_KIND,
+  packageName: null,
+  defaultExecutable: "devin",
+  updateArgs: ["update"],
+  updateLockKey: "devin-cli",
+});
 
 export type DevinDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner

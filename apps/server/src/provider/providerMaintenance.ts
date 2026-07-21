@@ -199,6 +199,7 @@ function makeHomebrewProviderMaintenanceCapabilities(
 
 function makeNativeProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
+  executable: string,
 ): ProviderMaintenanceCapabilities | null {
   if (!definition.nativeUpdate) {
     return null;
@@ -207,7 +208,7 @@ function makeNativeProviderMaintenanceCapabilities(
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
-    updateExecutable: definition.nativeUpdate.executable,
+    updateExecutable: executable,
     updateArgs: definition.nativeUpdate.args,
     updateLockKey: definition.nativeUpdate.lockKey,
   });
@@ -287,7 +288,7 @@ export function resolvePackageManagedProviderMaintenance(
       commandPaths.some((commandPath) => nativeUpdate.isCommandPath(commandPath))
     ) {
       return (
-        makeNativeProviderMaintenanceCapabilities(definition) ??
+        makeNativeProviderMaintenanceCapabilities(definition, resolvedCommandPath) ??
         makeNpmGlobalProviderMaintenanceCapabilities(definition)
       );
     }
@@ -331,6 +332,34 @@ export function makeStaticProviderMaintenanceResolver(
 ): ProviderMaintenanceCapabilitiesResolver {
   return {
     resolve: () => capabilities,
+  };
+}
+
+/**
+ * Resolve a CLI-owned self-update command against the same executable that was
+ * configured and probed for the provider. This keeps one-click updates working
+ * for custom/absolute binary paths instead of silently invoking a different
+ * same-named executable from PATH.
+ */
+export function makeSelfUpdateProviderMaintenanceResolver(input: {
+  readonly provider: ProviderDriverKind;
+  readonly packageName: string | null;
+  readonly defaultExecutable: string;
+  readonly updateArgs: ReadonlyArray<string>;
+  readonly updateLockKey: string;
+}): ProviderMaintenanceCapabilitiesResolver {
+  return {
+    resolve: (options) =>
+      makeProviderMaintenanceCapabilities({
+        provider: input.provider,
+        packageName: input.packageName,
+        updateExecutable:
+          nonEmptyString(options?.resolvedCommandPath) ??
+          nonEmptyString(options?.binaryPath) ??
+          input.defaultExecutable,
+        updateArgs: input.updateArgs,
+        updateLockKey: input.updateLockKey,
+      }),
   };
 }
 
