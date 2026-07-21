@@ -1,10 +1,7 @@
 /**
- * Always-visible status button for the chat pane's bottom toolbar. Shows how
- * many local server processes are currently listening (with their combined
- * memory) and opens a popover listing each listener with live CPU/memory
- * usage plus open / copy / stop actions. Data arrives over the shared
- * `subscribeDiscoveredLocalServers` stream, so it stays live without any
- * component-side polling.
+ * Always-visible runtime status button for the chat pane's bottom toolbar.
+ * The popover combines local server controls with live provider and terminal
+ * resource usage for the active thread's environment.
  */
 import {
   isAtomCommandInterrupted,
@@ -27,6 +24,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { openDiscoveredPort } from "~/components/preview/openDiscoveredPort";
+import { formatRuntimeBytes } from "~/components/runtimeResourceFormatting";
+import {
+  RuntimeResourceUsageSections,
+  runtimeTerminalKey,
+} from "~/components/RuntimeResourceUsageStatus";
+import { RuntimeStatusAccordion } from "~/components/RuntimeStatusAccordion";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { useSidebarVisibility } from "~/components/ui/sidebar";
 import { toastManager } from "~/components/ui/toast";
@@ -135,6 +138,16 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
       { key: "external" as const, title: "Other processes", servers: external },
     ].filter((group) => group.servers.length > 0);
   }, [servers, threadRef.threadId]);
+
+  const representedTerminalKeys = useMemo(
+    () =>
+      new Set(
+        servers.flatMap((server) =>
+          server.terminal === null ? [] : [runtimeTerminalKey(server.terminal)],
+        ),
+      ),
+    [servers],
+  );
 
   // One process or Docker container can listen on several ports. Count each
   // owner once and avoid attributing Docker Desktop's shared memory to an
@@ -256,8 +269,8 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
     <Popover>
       <PopoverTrigger
         type="button"
-        aria-label="Show local servers"
-        title="Show local servers"
+        aria-label="Show runtime status"
+        title="Show runtime status"
         className="flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground opacity-80 transition-colors hover:bg-accent hover:text-foreground focus-visible:opacity-100 data-popup-open:bg-accent data-popup-open:text-foreground"
       >
         <StatusDot listening={processCount > 0} />
@@ -267,55 +280,91 @@ export function LocalServersStatusButton({ threadRef }: LocalServersStatusButton
             : `${processCount} ${processCount === 1 ? "server" : "servers"}`}
         </span>
         {!sidebarVisible && totalMemoryBytes != null ? (
-          <span className="tabular-nums">· {formatBytes(totalMemoryBytes)}</span>
+          <span className="tabular-nums">· {formatRuntimeBytes(totalMemoryBytes)}</span>
         ) : null}
       </PopoverTrigger>
-      <PopoverPopup side="top" align="end" className="w-[25rem] max-w-[calc(100vw-1rem)] p-0">
-        {servers.length === 0 ? (
-          <div className="flex flex-col items-center gap-1 px-3 py-3 text-center">
-            <RadioTower className="size-4.5 text-muted-foreground" />
-            <p className="text-sm font-medium text-foreground">No local servers</p>
-          </div>
-        ) : (
-          <div className="flex max-h-96 flex-col">
-            <div className="border-b border-border/50 px-2.5 py-1.5 text-xs font-medium text-foreground">
-              Local servers
+      <PopoverPopup
+        side="top"
+        align="end"
+        alignOffset={16}
+        collisionPadding={16}
+        sideOffset={8}
+        className="w-[25rem] max-w-[calc(100vw-1rem)] overflow-hidden p-0"
+        viewportClassName="!overflow-hidden p-0 [--viewport-inline-padding:--spacing(0)]"
+        style={{
+          maxWidth: "min(100%, calc(100vw - 1rem))",
+          maxHeight: "min(var(--available-height), 28rem, 60dvh)",
+        }}
+      >
+        <div
+          className="flex w-full min-h-0 flex-col overflow-hidden"
+          style={{ maxHeight: "min(var(--available-height), 28rem, 60dvh)" }}
+        >
+          <div className="shrink-0 border-b px-3 py-2.5">
+            <div className="text-sm font-medium text-foreground">Runtime status</div>
+            <div className="text-[10px] leading-4 text-muted-foreground">
+              Local servers and other activity in this environment.
             </div>
-            <div className="flex flex-col gap-1 overflow-y-auto p-1">
-              {groups.map((group) => (
-                <div key={group.key} className="flex flex-col">
-                  {groups.length > 1 ? (
-                    <h3 className="px-2 pb-0.5 pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
-                      {group.title}
-                    </h3>
-                  ) : null}
-                  {group.servers.map((server) => {
-                    const terminal = server.terminal;
-                    const key = stopKey(server);
-                    return (
-                      <LocalServerRow
-                        key={`${server.host}:${server.port}:${server.pid ?? "unknown"}`}
-                        server={server}
-                        resolvedUrl={resolveDiscoveredServerUrl(
-                          threadRef.environmentId,
-                          server.url,
-                        )}
-                        stopState={key === null ? null : (stopStateByKey.get(key) ?? null)}
-                        onOpen={() => openServer(server)}
-                        onStop={() => stopServer(server)}
-                        onOpenTerminal={
-                          group.key === "this-thread" && terminal !== null
-                            ? () => openTerminal(terminal.terminalId)
-                            : null
-                        }
-                      />
-                    );
-                  })}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <RuntimeStatusAccordion
+              icon={<RadioTower className="size-3" />}
+              label="Local servers"
+              count={processCount}
+              summary={[
+                `${servers.length} ${servers.length === 1 ? "port" : "ports"}`,
+                `${processCount} ${processCount === 1 ? "process" : "processes"}`,
+                totalMemoryBytes == null ? null : formatRuntimeBytes(totalMemoryBytes),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            >
+              {servers.length === 0 ? (
+                <div className="px-3 py-3 text-[11px] text-muted-foreground">
+                  No local servers listening
                 </div>
-              ))}
-            </div>
+              ) : (
+                <div className="flex flex-col gap-1 p-1">
+                  {groups.map((group) => (
+                    <div key={group.key} className="flex flex-col">
+                      {groups.length > 1 ? (
+                        <h3 className="px-2 pb-0.5 pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                          {group.title}
+                        </h3>
+                      ) : null}
+                      {group.servers.map((server) => {
+                        const terminal = server.terminal;
+                        const key = stopKey(server);
+                        return (
+                          <LocalServerRow
+                            key={`${server.host}:${server.port}:${server.pid ?? "unknown"}`}
+                            server={server}
+                            resolvedUrl={resolveDiscoveredServerUrl(
+                              threadRef.environmentId,
+                              server.url,
+                            )}
+                            stopState={key === null ? null : (stopStateByKey.get(key) ?? null)}
+                            onOpen={() => openServer(server)}
+                            onStop={() => stopServer(server)}
+                            onOpenTerminal={
+                              group.key === "this-thread" && terminal !== null
+                                ? () => openTerminal(terminal.terminalId)
+                                : null
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </RuntimeStatusAccordion>
+            <RuntimeResourceUsageSections
+              environmentId={threadRef.environmentId}
+              representedTerminalKeys={representedTerminalKeys}
+            />
           </div>
-        )}
+        </div>
       </PopoverPopup>
     </Popover>
   );
@@ -387,7 +436,7 @@ function LocalServerRow({
             </>
           ) : null}
           {server.container == null && server.memoryBytes != null ? (
-            <span className="truncate">· {formatBytes(server.memoryBytes)}</span>
+            <span className="truncate">· {formatRuntimeBytes(server.memoryBytes)}</span>
           ) : null}
         </span>
         {server.cwd != null && server.container == null ? (
@@ -525,16 +574,4 @@ function StatusDot({ listening }: { listening: boolean }) {
       <span className="relative inline-flex size-2 rounded-full bg-success" />
     </span>
   );
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${Math.round(value)} B`;
-  const units = ["KB", "MB", "GB"] as const;
-  let unitIndex = -1;
-  let next = value;
-  do {
-    next /= 1024;
-    unitIndex += 1;
-  } while (next >= 1024 && unitIndex < units.length - 1);
-  return `${next >= 10 ? Math.round(next) : next.toFixed(1)} ${units[unitIndex]}`;
 }
