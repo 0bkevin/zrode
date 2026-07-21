@@ -38,6 +38,7 @@ import type {
   ProviderModelTokenActivityDay,
   ProviderTokenActivityKind,
 } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
@@ -997,6 +998,11 @@ export function CopilotBillingHistoryPanel({
   calendar: CalendarModel;
   tokenScale: (tokens: number) => number;
 }) {
+  const historyMessage = normalizeProviderErrorMessage(history.message, {
+    fallback: "GitHub billing history is temporarily unavailable.",
+    requestSubject: "GitHub billing request",
+    maxLength: 240,
+  });
   const monthKeys = [...new Set(history.days.map((entry) => entry.day.slice(0, 7)))].toSorted();
   const quantityByMonth = new Map<string, { requests: number; aiCredits: number }>();
   for (const entry of history.days) {
@@ -1034,8 +1040,8 @@ export function CopilotBillingHistoryPanel({
   // rows. Prefer rendering those rows with a stale/error note instead of
   // hiding the entire historical view behind the latest status flag.
   if (monthKeys.length === 0 && history.models.length === 0) {
-    return history.message ? (
-      <p className="text-[11px] text-muted-foreground/70">{history.message}</p>
+    return historyMessage ? (
+      <p className="text-[11px] text-muted-foreground/70">{historyMessage}</p>
     ) : null;
   }
 
@@ -1049,8 +1055,8 @@ export function CopilotBillingHistoryPanel({
           Authoritative account ledger. Requests and AI credits are separate from locally recorded
           tokens. Metered usage billed excludes the Copilot plan fee.
         </p>
-        {history.status !== "ok" && history.message ? (
-          <p className="mt-1 text-[10px] text-amber-500/80">{history.message}</p>
+        {history.status !== "ok" && historyMessage ? (
+          <p className="mt-1 text-[10px] text-amber-500/80">{historyMessage}</p>
         ) : null}
       </div>
       {monthKeys.length > 0 ? (

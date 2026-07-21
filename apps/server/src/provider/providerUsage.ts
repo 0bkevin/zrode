@@ -61,6 +61,7 @@ import {
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -137,6 +138,37 @@ const CONSUME_RESET_COOLDOWN_MS = 30_000;
 
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
+const PROVIDER_USAGE_LABELS = {
+  claude: "Claude",
+  codex: "Codex",
+  grok: "Grok",
+  kilocode: "Kilo Code",
+  githubCopilot: "GitHub Copilot",
+} as const satisfies Readonly<Record<ProviderUsageProviderKind, string>>;
+
+function normalizeProviderUsageMessage(
+  provider: ProviderUsageProviderKind,
+  message: string | null,
+): string | null {
+  if (message === null) {
+    return null;
+  }
+  const label = PROVIDER_USAGE_LABELS[provider];
+  const fallback = `${label} usage is temporarily unavailable.`;
+  return (
+    normalizeProviderErrorMessage(message, {
+      fallback,
+      requestSubject: `${label} usage request`,
+      maxLength: 240,
+    }) ?? fallback
+  );
+}
+
+function normalizeProviderUsageSnapshot(snapshot: ProviderUsageSnapshot): ProviderUsageSnapshot {
+  const message = normalizeProviderUsageMessage(snapshot.provider, snapshot.message);
+  return message === snapshot.message ? snapshot : { ...snapshot, message };
+}
+
 function usageSnapshot(
   provider: ProviderUsageProviderKind,
   status: ProviderUsageStatus,
@@ -153,7 +185,7 @@ function usageSnapshot(
     extraUsage: null,
     credits: null,
     resetCredits: null,
-    message,
+    message: normalizeProviderUsageMessage(provider, message),
     updatedAt,
   };
 }
@@ -327,7 +359,7 @@ function providerUsageFetchResult(
   } = {},
 ): ProviderUsageFetchResult {
   return {
-    snapshot,
+    snapshot: normalizeProviderUsageSnapshot(snapshot),
     mainBackoffTtlMs: options.mainBackoffTtlMs ?? null,
     auxiliaryBackoffTtlMs: options.auxiliaryBackoffTtlMs ?? null,
   };
@@ -3081,6 +3113,7 @@ function providerUsageFetchOptionsForTests(input: ProviderUsageFetchResultForTes
 
 /** Exposed for tests. */
 export const __testing = {
+  normalizeProviderUsageSnapshot,
   mergeGitHubBillingRefresh,
   getGitHubCopilotBillingHistory,
   startGitHubCopilotBillingRefresh,

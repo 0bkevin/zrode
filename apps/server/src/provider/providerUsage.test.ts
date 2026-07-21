@@ -1134,6 +1134,48 @@ describe("usageSettingsKey", () => {
   });
 });
 
+describe("provider usage error normalization", () => {
+  const providerLabels = {
+    claude: "Claude",
+    codex: "Codex",
+    grok: "Grok",
+    kilocode: "Kilo Code",
+    githubCopilot: "GitHub Copilot",
+  } as const satisfies Readonly<Record<ProviderUsageSnapshot["provider"], string>>;
+
+  it("removes raw HTTP bodies at the final snapshot boundary for every provider", () => {
+    for (const [provider, label] of Object.entries(providerLabels)) {
+      const normalized = __testing.normalizeProviderUsageSnapshot(
+        snapshot({
+          provider: provider as ProviderUsageSnapshot["provider"],
+          status: "error",
+          message:
+            "GET https://provider.invalid/usage failed: 403 Forbidden; content-type=text/html; body=<html><body>IP: private; request-id: private</body></html>",
+        }),
+      );
+
+      expect(normalized.message).toBe(`${label} usage request failed: 403 Forbidden.`);
+      expect(normalized.message).not.toContain("provider.invalid");
+      expect(normalized.message).not.toContain("request-id");
+    }
+  });
+
+  it("bounds non-response provider errors without changing concise messages", () => {
+    const concise = snapshot({
+      provider: "grok",
+      status: "error",
+      message: "Grok usage is temporarily unavailable.",
+    });
+    expect(__testing.normalizeProviderUsageSnapshot(concise)).toBe(concise);
+
+    const oversized = __testing.normalizeProviderUsageSnapshot(
+      snapshot({ provider: "kilocode", status: "error", message: "x".repeat(1_000) }),
+    );
+    expect(oversized.message).toHaveLength(240);
+    expect(oversized.message?.endsWith("…")).toBe(true);
+  });
+});
+
 describe("selectProviderUsageSnapshotForCache", () => {
   const claudeRateLimited = snapshot({
     provider: "claude",

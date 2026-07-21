@@ -14,6 +14,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
@@ -219,6 +220,11 @@ export function buildServerProvider(input: {
   skills?: ReadonlyArray<ServerProviderSkill>;
   probe: ProviderProbeResult;
 }): ServerProviderDraft {
+  const providerMessage = normalizeProviderErrorMessage(input.probe.message, {
+    fallback: `${input.presentation.displayName} status could not be verified.`,
+    requestSubject: `${input.presentation.displayName} status check`,
+    maxLength: 240,
+  });
   const versionAdvisory = input.driver
     ? createProviderVersionAdvisory({
         driver: input.driver,
@@ -244,7 +250,7 @@ export function buildServerProvider(input: {
     status: input.enabled ? input.probe.status : "disabled",
     auth: input.probe.auth,
     checkedAt: input.checkedAt,
-    ...(input.probe.message ? { message: input.probe.message } : {}),
+    ...(providerMessage ? { message: providerMessage } : {}),
     models: input.models,
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],

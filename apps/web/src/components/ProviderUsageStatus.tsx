@@ -9,6 +9,7 @@ import type {
   ServerProvider,
   ServerProviderUsageResult,
 } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "../localApi";
@@ -164,6 +165,17 @@ function providerDisplayName(provider: AnyUsageProviderKind): string {
     case "githubCopilot":
       return "GitHub Copilot";
   }
+}
+
+export function providerUsageErrorMessage(snapshot: ProviderUsageSnapshot): string {
+  const displayName = providerDisplayName(snapshot.provider);
+  return (
+    normalizeProviderErrorMessage(snapshot.message, {
+      fallback: `${displayName} usage is temporarily unavailable.`,
+      requestSubject: `${displayName} usage request`,
+      maxLength: 240,
+    }) ?? "No usage data available."
+  );
 }
 
 function ProviderUsageIcon({
@@ -328,7 +340,11 @@ function CodexResetCredits({
       setPhase("idle");
       setError(
         result._tag === "Success"
-          ? (result.value.message ?? "Reset failed.")
+          ? (normalizeProviderErrorMessage(result.value.message, {
+              fallback: "Reset failed.",
+              requestSubject: "Codex reset request",
+              maxLength: 240,
+            }) ?? "Reset failed.")
           : "Reset request failed.",
       );
     }
@@ -510,7 +526,7 @@ function ProviderUsagePopoverContent({
         </>
       ) : (
         <div className="text-pretty text-[11px] text-muted-foreground/70">
-          {snapshot.message ?? "No usage data available."}
+          {providerUsageErrorMessage(snapshot)}
         </div>
       )}
     </div>
@@ -951,6 +967,8 @@ export function ProviderUsageStatus() {
           input: { contextKey: liveUsageRequest?.contextKey ?? meteredContext.key },
         }),
   );
+  const displayError =
+    error === null ? null : "Usage data could not be loaded from this environment.";
   const nowMs = useRelativeTimeTick(30_000);
   const threadTarget = useActiveThreadUsageProvider(environmentId);
   const threadProvider = threadTarget.provider;
@@ -1057,7 +1075,7 @@ export function ProviderUsageStatus() {
         <PendingProviderUsagePill
           provider={pinnedMetered}
           showLabel
-          error={error}
+          error={displayError}
           isPending={isPending}
           refresh={requestRefresh}
           onOpenChange={handleLiveUsageOpenChange}
@@ -1084,7 +1102,7 @@ export function ProviderUsageStatus() {
             key={provider}
             provider={provider}
             showLabel={meteredProviders.length === 1}
-            error={error}
+            error={displayError}
             isPending={isPending}
             refresh={requestRefresh}
             onOpenChange={handleLiveUsageOpenChange}

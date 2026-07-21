@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   compactProviderUsageCreditBalance,
   compactProviderUsagePercent,
+  providerUsageErrorMessage,
 } from "./ProviderUsageStatus";
 
 function usageWindow(usedPercent: number): ProviderUsageWindow {
@@ -100,5 +101,21 @@ describe("compactProviderUsageCreditBalance", () => {
         }),
       ),
     ).toBe("$0.00");
+  });
+});
+
+describe("providerUsageErrorMessage", () => {
+  it("defends against raw response bodies from older remote servers", () => {
+    const message = providerUsageErrorMessage(
+      usageSnapshot({
+        provider: "githubCopilot",
+        status: "error",
+        message:
+          'request failed: 502 Bad Gateway; content-type=application/json; body={"request_id":"private"}',
+      }),
+    );
+
+    expect(message).toBe("GitHub Copilot usage request failed: 502 Bad Gateway.");
+    expect(message).not.toContain("request_id");
   });
 });

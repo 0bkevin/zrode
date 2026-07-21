@@ -1,4 +1,5 @@
 import { type ProviderInstanceId } from "@t3tools/contracts";
+import { normalizeProviderErrorMessage } from "@t3tools/shared/providerError";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -21,7 +22,11 @@ function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   }
   const kind =
     entry.status === "error" ? "Unavailable" : entry.status === "warning" ? "Limited" : "Not ready";
-  const msg = entry.snapshot.message?.trim();
+  const msg = normalizeProviderErrorMessage(entry.snapshot.message, {
+    fallback: `${label} status could not be verified.`,
+    requestSubject: `${label} status check`,
+    maxLength: 240,
+  });
   return msg ? `${label} — ${kind}. ${msg}` : `${label} — ${kind}.`;
 }
 

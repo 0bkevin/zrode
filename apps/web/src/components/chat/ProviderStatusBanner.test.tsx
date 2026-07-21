@@ -32,7 +32,7 @@ describe("ProviderStatusBanner", () => {
       />,
     );
 
-    expect(markup).toContain("Provider request failed: 502 Bad Gateway.");
+    expect(markup).toContain("OpenCode status check failed: 502 Bad Gateway.");
     expect(markup).not.toContain("&lt;!doctype html&gt;");
     expect(markup).not.toContain("private");
   });

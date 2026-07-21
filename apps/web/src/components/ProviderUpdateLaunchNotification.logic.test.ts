@@ -464,6 +464,15 @@ describe("provider update launch notification logic", () => {
     });
   });
 
+  it("does not expose raw response bodies from provider update failures", () => {
+    expect(
+      getProviderUpdateRejectedToastView(
+        1,
+        "request failed: 502 Bad Gateway; content-type=text/html; body=<html>private</html>",
+      ).description,
+    ).toBe("Provider update failed: 502 Bad Gateway.");
+  });
+
   it("collects only attempted provider snapshots from update responses", () => {
     const codex = provider({ driver: driver("codex") });
     const cursor = provider({ driver: driver("cursor") });

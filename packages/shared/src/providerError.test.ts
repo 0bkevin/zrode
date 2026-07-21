@@ -31,6 +31,45 @@ describe("normalizeProviderErrorMessage", () => {
     ).toBe("OpenCode request failed: 502 Bad Gateway.");
   });
 
+  it("strips an HTML response body included after HTTP response metadata", () => {
+    expect(
+      normalizeProviderErrorMessage(
+        "failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 403 Forbidden; content-type=text/html; charset=UTF-8; body=<html><body>IP: private; Ray ID: private</body></html>",
+        {
+          fallback: "Failed to fetch Codex usage.",
+          requestSubject: "Codex usage request",
+        },
+      ),
+    ).toBe("Codex usage request failed: 403 Forbidden.");
+  });
+
+  it("does not expose non-HTML response bodies or malformed markup", () => {
+    expect(
+      normalizeProviderErrorMessage(
+        'request failed: 502 Bad Gateway; content-type=application/json; body={"token":"private"}',
+        { requestSubject: "Provider usage request" },
+      ),
+    ).toBe("Provider usage request failed: 502 Bad Gateway.");
+    expect(
+      normalizeProviderErrorMessage("response body=<script>private diagnostic</script>", {
+        fallback: "Usage data could not be loaded.",
+      }),
+    ).toBe("Usage data could not be loaded.");
+    expect(
+      normalizeProviderErrorMessage(
+        "request failed: 403 Forbidden Ray ID private; body=<html>private</html>",
+        { requestSubject: "Provider usage request" },
+      ),
+    ).toBe("Provider usage request failed: 403.");
+  });
+
+  it("compacts and bounds ordinary provider errors", () => {
+    expect(normalizeProviderErrorMessage("First line\n\nSecond line")).toBe(
+      "First line Second line",
+    );
+    expect(normalizeProviderErrorMessage("0123456789", { maxLength: 6 })).toBe("01234…");
+  });
+
   it("does not expose a bare HTML document", () => {
     expect(
       normalizeProviderErrorMessage("<!DOCTYPE html><html>private response</html>", {
