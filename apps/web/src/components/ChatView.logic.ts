@@ -679,6 +679,7 @@ export async function waitForSettledTurnAssistantText(
 export interface LocalDispatchSnapshot {
   startedAt: string;
   preparingWorktree: boolean;
+  messageId: MessageId | null;
   latestTurnTurnId: TurnId | null;
   latestTurnRequestedAt: string | null;
   latestTurnStartedAt: string | null;
@@ -689,13 +690,14 @@ export interface LocalDispatchSnapshot {
 
 export function createLocalDispatchSnapshot(
   activeThread: Thread | undefined,
-  options?: { preparingWorktree?: boolean },
+  options?: { preparingWorktree?: boolean; messageId?: MessageId },
 ): LocalDispatchSnapshot {
   const latestTurn = activeThread?.latestTurn ?? null;
   const session = activeThread?.session ?? null;
   return {
     startedAt: new Date().toISOString(),
     preparingWorktree: Boolean(options?.preparingWorktree),
+    messageId: options?.messageId ?? null,
     latestTurnTurnId: latestTurn?.turnId ?? null,
     latestTurnRequestedAt: latestTurn?.requestedAt ?? null,
     latestTurnStartedAt: latestTurn?.startedAt ?? null,
@@ -710,6 +712,7 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   phase: SessionPhase;
   latestTurn: Thread["latestTurn"] | null;
   session: Thread["session"] | null;
+  activities: Thread["activities"];
   hasPendingApproval: boolean;
   hasPendingUserInput: boolean;
   threadError: string | null | undefined;
@@ -723,6 +726,18 @@ export function hasServerAcknowledgedLocalDispatch(input: {
 
   const latestTurn = input.latestTurn ?? null;
   const session = input.session ?? null;
+  const matchingProviderFailure =
+    input.localDispatch.messageId !== null &&
+    input.activities.some((activity) => {
+      if (activity.kind !== "provider.turn.start.failed") {
+        return false;
+      }
+      const payload = isRecord(activity.payload) ? activity.payload : null;
+      return payload?.messageId === input.localDispatch?.messageId;
+    });
+  if (matchingProviderFailure) {
+    return true;
+  }
   const latestTurnChanged =
     input.localDispatch.latestTurnTurnId !== (latestTurn?.turnId ?? null) ||
     input.localDispatch.latestTurnRequestedAt !== (latestTurn?.requestedAt ?? null) ||
@@ -746,9 +761,16 @@ export function hasServerAcknowledgedLocalDispatch(input: {
     return true;
   }
 
-  return (
-    latestTurnChanged ||
-    input.localDispatch.sessionStatus !== (session?.status ?? null) ||
-    input.localDispatch.sessionUpdatedAt !== (session?.updatedAt ?? null)
-  );
+  const providerFailureChanged =
+    input.localDispatch.messageId === null &&
+    session?.lastError !== null &&
+    session?.lastError !== undefined &&
+    (input.localDispatch.sessionStatus !== (session?.status ?? null) ||
+      input.localDispatch.sessionUpdatedAt !== (session?.updatedAt ?? null));
+
+  // Session startup commonly transitions through starting -> ready before the
+  // provider accepts turn/start. That intermediate update must not clear the
+  // optimistic Working state; only a real turn lifecycle change or an explicit
+  // provider failure acknowledges this local dispatch.
+  return latestTurnChanged || providerFailureChanged;
 }

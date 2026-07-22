@@ -86,11 +86,11 @@ export const makeDrainableWorker = <A, E, R>(
  * retain their source order. Concurrency is bounded so a burst spanning many
  * keys cannot create unbounded active work.
  */
-export const makePartitionedDrainableWorker = <A, K, E = never>(options: {
+export const makePartitionedDrainableWorker = <A, K, E = never, R = never>(options: {
   readonly concurrency: number;
   readonly key: (item: A) => K;
-  readonly process: (item: A) => Effect.Effect<void, E>;
-}): Effect.Effect<PartitionedDrainableWorker<A>, never, Scope.Scope> =>
+  readonly process: (item: A) => Effect.Effect<void, E, R>;
+}): Effect.Effect<PartitionedDrainableWorker<A>, never, Scope.Scope | R> =>
   Effect.gen(function* () {
     type SchedulerMessage =
       | { readonly kind: "item"; readonly key: K; readonly item: A }
