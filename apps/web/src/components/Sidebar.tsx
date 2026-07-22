@@ -158,7 +158,6 @@ import { Input } from "./ui/input";
 import {
   Menu,
   MenuGroup,
-  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,

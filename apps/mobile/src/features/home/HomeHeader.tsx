@@ -8,7 +8,6 @@ import { useCallback, useRef } from "react";
 import { Platform } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
 
-import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
@@ -26,7 +25,6 @@ import {
 } from "./home-list-options";
 
 export type HomeHeaderEnvironment = HomeListFilterMenuEnvironment;
-const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
 export function HomeHeader(props: {
   readonly environments: ReadonlyArray<HomeHeaderEnvironment>;

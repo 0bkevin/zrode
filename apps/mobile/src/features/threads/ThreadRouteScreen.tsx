@@ -9,10 +9,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import * as Option from "effect/Option";
 import { EnvironmentId, ThreadId, type ProjectScript } from "@t3tools/contracts";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
-import { Platform, Pressable, ScrollView, Text as RNText, View } from "react-native";
+import { Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceState } from "../../state/workspace";
-import { useThemeColor } from "../../lib/useThemeColor";
 import { useEnvironmentQuery } from "../../state/query";
 import { dismissGitActionResult, useGitActionProgress } from "../../state/use-vcs-action-state";
 import { vcsEnvironment } from "../../state/vcs";
@@ -20,7 +19,6 @@ import { vcsEnvironment } from "../../state/vcs";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { scopedThreadKey } from "../../lib/scopedEntities";
-import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { connectionTone } from "../connection/connectionTone";
 
 import {
@@ -69,7 +67,6 @@ import {
   ThreadInspectorContentStack,
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
-import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 
 interface ThreadInspectorSelection {
   readonly routeThreadIdentity: string | null;
@@ -279,7 +276,6 @@ function ThreadRouteContent(
   );
 
   /* ─── Native header theming ──────────────────────────────────────── */
-  const foregroundColor = String(useThemeColor("--color-foreground"));
   const usesNativeHeaderGlass = Platform.OS === "ios";
   const headerSubtitle = [
     selectedThreadProject?.title ?? null,
