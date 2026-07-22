@@ -281,6 +281,7 @@ describe("ProviderCommandReactor", () => {
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly sendTurn?: ProviderServiceShape["sendTurn"];
+    readonly interruptTurn?: ProviderServiceShape["interruptTurn"];
     readonly checkpointOperations?: string[];
     readonly checkpointCaptureFailure?: boolean;
   }) {
@@ -368,7 +369,9 @@ describe("ProviderCommandReactor", () => {
         ),
       ),
     );
-    const interruptTurn = vi.fn((_: unknown) => Effect.void);
+    const interruptTurn = vi.fn<ProviderServiceShape["interruptTurn"]>(
+      input?.interruptTurn ?? (() => Effect.void),
+    );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((input: unknown) =>
@@ -2071,6 +2074,87 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  effectIt.effect("does not let a wedged provider command block another thread", () =>
+    Effect.gen(function* () {
+      let releaseBlockedInterrupt: (() => void) | undefined;
+      const blockedInterrupt = new Promise<void>((resolve) => {
+        releaseBlockedInterrupt = resolve;
+      });
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          interruptTurn: (input) =>
+            input.threadId === ThreadId.make("thread-1")
+              ? Effect.promise(() => blockedInterrupt)
+              : Effect.void,
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      const secondThreadId = ThreadId.make("thread-2");
+
+      try {
+        yield* harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-create-2"),
+          threadId: secondThreadId,
+          projectId: asProjectId("project-1"),
+          title: "Second thread",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5-codex"),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-running-blocked-interrupt"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-blocked-interrupt"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("cmd-turn-interrupt-blocked"),
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-blocked-interrupt"),
+          createdAt: now,
+        });
+        yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 1));
+
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-unrelated"),
+          threadId: secondThreadId,
+          message: {
+            messageId: asMessageId("user-message-unrelated"),
+            role: "user",
+            text: "This thread must still start",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+
+        yield* Effect.promise(() =>
+          waitFor(() =>
+            harness.sendTurn.mock.calls.some(([input]) => input.threadId === secondThreadId),
+          ),
+        );
+      } finally {
+        releaseBlockedInterrupt?.();
+      }
+    }),
+  );
+
   effectIt.effect("interrupts a turn that finishes starting after Stop was requested", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";
@@ -2361,6 +2445,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.session.set",
@@ -2379,6 +2464,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.approval.respond",
@@ -2402,6 +2488,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.session.set",
@@ -2420,6 +2507,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
@@ -2456,6 +2544,7 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
+    // oxlint-disable-next-line zrode/no-manual-effect-runtime-in-tests -- This legacy async harness owns a shared reactor runtime for the whole test.
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.session.set",
@@ -2679,6 +2768,7 @@ describe("ProviderCommandReactor", () => {
         });
 
         yield* Effect.promise(() => waitFor(() => harness.stopSession.mock.calls.length === 1));
+        yield* Effect.promise(() => harness.drain());
         const readModel = yield* Effect.promise(() => harness.readModel());
         const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
         expect(thread?.session).not.toBeNull();

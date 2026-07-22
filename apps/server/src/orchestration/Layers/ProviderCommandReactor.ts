@@ -27,7 +27,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makePartitionedDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { captureTurnBaseline } from "../../checkpointing/TurnBaseline.ts";
@@ -1372,7 +1372,14 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  // Provider control operations can wait on external processes and transports.
+  // Keep commands ordered within a thread, but never let one wedged provider
+  // session prevent unrelated threads from starting or stopping work.
+  const worker = yield* makePartitionedDrainableWorker({
+    concurrency: 8,
+    key: (event: ProviderIntentEvent) => event.payload.threadId,
+    process: processDomainEventSafely,
+  });
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {

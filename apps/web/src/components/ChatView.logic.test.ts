@@ -736,6 +736,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         phase: "ready",
         latestTurn: completedTurn,
         session: readySession,
+        activities: [],
         hasPendingApproval: false,
         hasPendingUserInput: false,
         threadError: null,
@@ -761,11 +762,92 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         phase: "ready",
         latestTurn: newerTurn,
         session: { ...readySession, updatedAt: newerTurn.completedAt },
+        activities: [],
         hasPendingApproval: false,
         hasPendingUserInput: false,
         threadError: null,
       }),
     ).toBe(true);
+  });
+
+  it("does not acknowledge session readiness before a turn starts", () => {
+    const localDispatch = createLocalDispatchSnapshot(makeThread());
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "ready",
+        latestTurn: null,
+        session: readySession,
+        activities: [],
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("acknowledges a provider failure before a turn starts", () => {
+    const localDispatch = createLocalDispatchSnapshot(makeThread());
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "ready",
+        latestTurn: null,
+        session: {
+          ...readySession,
+          lastError: "Provider rejected turn/start",
+          updatedAt: "2026-03-29T00:01:00.000Z",
+        },
+        activities: [],
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("acknowledges a matching turn-start failure before a session exists", () => {
+    const localDispatch = createLocalDispatchSnapshot(makeThread(), {
+      messageId: userMessageId,
+    });
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "ready",
+        latestTurn: null,
+        session: null,
+        activities: [makeTurnStartFailureActivity()],
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat an older message's provider failure as an acknowledgement", () => {
+    const localDispatch = createLocalDispatchSnapshot(makeThread(), {
+      messageId: MessageId.make("message-current"),
+    });
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "ready",
+        latestTurn: null,
+        session: {
+          ...readySession,
+          lastError: "An older turn failed",
+          updatedAt: "2026-03-29T00:01:00.000Z",
+        },
+        activities: [makeTurnStartFailureActivity()],
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(false);
   });
 
   it("waits for the matching running turn before acknowledging", () => {
@@ -791,6 +873,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
           status: "running",
           activeTurnId: TurnId.make("turn-other"),
         },
+        activities: [],
         hasPendingApproval: false,
         hasPendingUserInput: false,
         threadError: null,
@@ -806,6 +889,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
           status: "running",
           activeTurnId: runningTurn.turnId,
         },
+        activities: [],
         hasPendingApproval: false,
         hasPendingUserInput: false,
         threadError: null,
@@ -820,6 +904,7 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
       phase: "ready" as const,
       latestTurn: null,
       session: null,
+      activities: [],
       hasPendingApproval: false,
       hasPendingUserInput: false,
       threadError: null,
