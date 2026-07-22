@@ -766,18 +766,22 @@ const TimelineMinimap = memo(function TimelineMinimap({
   }
 
   const safeBottomInset = Math.max(0, Math.ceil(bottomInset));
+  const minimapVerticalInset = 12;
 
   return (
     <div
       className={cn(
-        "group/minimap pointer-events-auto absolute top-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        "group/minimap pointer-events-auto absolute left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
       )}
       data-testid="timeline-minimap"
       data-persistent-gutter={hasPersistentGutter ? "true" : "false"}
-      style={{ bottom: safeBottomInset }}
+      style={{
+        top: minimapVerticalInset,
+        bottom: safeBottomInset + minimapVerticalInset,
+      }}
     >
       <div className="relative h-full w-full select-none">
         <button
@@ -818,7 +822,10 @@ const TimelineMinimap = memo(function TimelineMinimap({
           onMouseDown={(event) => {
             event.preventDefault();
           }}
-          style={{ height: resolveTimelineMinimapHeightStyle(items.length) }}
+          style={{
+            height: resolveTimelineMinimapHeightStyle(items.length),
+            maxHeight: "100%",
+          }}
           type="button"
         >
           <div className="absolute top-0 left-3 h-full w-px bg-border/15" />

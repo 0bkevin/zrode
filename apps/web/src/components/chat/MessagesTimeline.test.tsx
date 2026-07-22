@@ -266,6 +266,33 @@ describe("MessagesTimeline", () => {
     expect(resolveTimelineMinimapHasPersistentGutter(864)).toBe(true);
   });
 
+  it("bounds the minimap rail to the visible timeline above the composer", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const timelineEntries = Array.from({ length: 101 }, (_, index) => {
+      const entry = buildUserTimelineEntry(`Prompt ${index + 1}.`);
+      return {
+        ...entry,
+        id: `entry-${index + 1}`,
+        message: {
+          ...entry.message,
+          id: MessageId.make(`message-${index + 1}`),
+        },
+      };
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        contentInsetEndAdjustment={400}
+        timelineEntries={timelineEntries}
+      />,
+    );
+
+    expect(markup).toContain('data-testid="timeline-minimap"');
+    expect(markup).toContain("top:12px;bottom:412px");
+    expect(markup).toContain("height:min(800px, calc(100vh - 18rem))");
+    expect(markup).toContain("max-height:100%");
+  });
+
   it("anchors a sent attachment message using its measured height", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const onAnchorReady = vi.fn();
