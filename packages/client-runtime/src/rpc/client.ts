@@ -1,9 +1,10 @@
 import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
-import type * as Duration from "effect/Duration";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -11,6 +12,9 @@ import { RpcClientError } from "effect/unstable/rpc";
 
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
+import type { RpcSession } from "./session.ts";
+
+const IDEMPOTENT_REQUEST_RECONNECT_TIMEOUT = Duration.minutes(1);
 
 export class EnvironmentRpcUnavailableError extends Schema.TaggedErrorClass<EnvironmentRpcUnavailableError>()(
   "EnvironmentRpcUnavailableError",
@@ -105,15 +109,14 @@ const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
   );
 });
 
-export const request = Effect.fn("EnvironmentRpc.request")(function* <
+const invokeRequest = Effect.fn("EnvironmentRpc.invokeRequest")(function* <
   TTag extends EnvironmentUnaryRpcTag,
->(tag: TTag, input: EnvironmentRpcInput<TTag>) {
-  const supervisor = yield* EnvironmentSupervisor;
-  yield* Effect.annotateCurrentSpan({
-    "environment.id": supervisor.target.environmentId,
-    "rpc.method": tag,
-  });
-  const session = yield* currentSession();
+>(
+  supervisor: EnvironmentSupervisor["Service"],
+  session: RpcSession,
+  tag: TTag,
+  input: EnvironmentRpcInput<TTag>,
+) {
   const observer = yield* EnvironmentRpcRequestObserver;
   const method = session.client[tag] as (
     input: EnvironmentRpcInput<TTag>,
@@ -123,6 +126,123 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
     method: tag,
   });
   return yield* method(input).pipe(Effect.ensuring(completeObservation));
+});
+
+const unavailableError = (
+  supervisor: EnvironmentSupervisor["Service"],
+  message = `${supervisor.target.label} is not connected.`,
+) =>
+  new EnvironmentRpcUnavailableError({
+    environmentId: supervisor.target.environmentId,
+    message,
+  });
+
+const awaitSessionAfter = Effect.fn("EnvironmentRpc.awaitSessionAfter")(function* (
+  supervisor: EnvironmentSupervisor["Service"],
+  previous: RpcSession | undefined,
+) {
+  const current = yield* SubscriptionRef.get(supervisor.session);
+  if (Option.isSome(current) && current.value !== previous) {
+    return current.value;
+  }
+  const currentState = yield* SubscriptionRef.get(supervisor.state);
+  if (currentState.phase === "blocked") {
+    return yield* unavailableError(
+      supervisor,
+      currentState.lastFailure?.message ?? `${supervisor.target.label} connection is blocked.`,
+    );
+  }
+
+  const nextSession = SubscriptionRef.changes(supervisor.session).pipe(
+    Stream.filterMap((candidate) =>
+      Option.isSome(candidate) && candidate.value !== previous
+        ? Result.succeed(candidate.value)
+        : Result.failVoid,
+    ),
+    Stream.runHead,
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.interrupt,
+        onSome: Effect.succeed,
+      }),
+    ),
+  );
+  const blocked = SubscriptionRef.changes(supervisor.state).pipe(
+    Stream.filter((state) => state.phase === "blocked"),
+    Stream.runHead,
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.interrupt,
+        onSome: (state) =>
+          Effect.fail(
+            unavailableError(
+              supervisor,
+              state.lastFailure?.message ?? `${supervisor.target.label} connection is blocked.`,
+            ),
+          ),
+      }),
+    ),
+  );
+  return yield* Effect.raceFirst(nextSession, blocked);
+});
+
+export const request = Effect.fn("EnvironmentRpc.request")(function* <
+  TTag extends EnvironmentUnaryRpcTag,
+>(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+  const supervisor = yield* EnvironmentSupervisor;
+  yield* Effect.annotateCurrentSpan({
+    "environment.id": supervisor.target.environmentId,
+    "rpc.method": tag,
+  });
+  const session = yield* currentSession();
+  return yield* invokeRequest(supervisor, session, tag, input);
+});
+
+/**
+ * Runs an idempotent unary request across transient connection loss.
+ *
+ * The same input is retried only after the supervisor installs a new session,
+ * so callers must provide a server-side idempotency key. The wait is bounded
+ * to keep permanent outages and blocked credentials visible to the user.
+ */
+export const requestIdempotent = Effect.fn("EnvironmentRpc.requestIdempotent")(function* <
+  TTag extends EnvironmentUnaryRpcTag,
+>(tag: TTag, input: EnvironmentRpcInput<TTag>) {
+  const supervisor = yield* EnvironmentSupervisor;
+  yield* Effect.annotateCurrentSpan({
+    "environment.id": supervisor.target.environmentId,
+    "rpc.method": tag,
+  });
+  yield* supervisor.connect;
+
+  const attempt = Effect.gen(function* () {
+    let previous: RpcSession | undefined;
+    for (;;) {
+      const session = yield* awaitSessionAfter(supervisor, previous);
+      const result = yield* Effect.result(invokeRequest(supervisor, session, tag, input));
+      if (Result.isSuccess(result)) {
+        return result.success;
+      }
+      if (!isRpcClientError(result.failure)) {
+        return yield* Effect.fail(result.failure);
+      }
+      previous = session;
+      yield* supervisor.retryNow;
+    }
+  });
+
+  return yield* attempt.pipe(
+    Effect.timeoutOrElse({
+      duration: IDEMPOTENT_REQUEST_RECONNECT_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          unavailableError(
+            supervisor,
+            `${supervisor.target.label} did not reconnect in time to send the command.`,
+          ),
+        ),
+    }),
+  );
 });
 
 export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(

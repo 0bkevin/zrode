@@ -55,6 +55,7 @@ import Migration0040 from "./Migrations/040_ProviderTokenAccountingCorrections.t
 import Migration0041 from "./Migrations/041_ProviderGrokTokenIdentity.ts";
 import Migration0042 from "./Migrations/042_OpenCodeRecordedCloudCosts.ts";
 import Migration0043 from "./Migrations/043_GitHubCopilotTokenHistory.ts";
+import Migration0044 from "./Migrations/044_OrchestrationEventTypeSequenceIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -109,6 +110,7 @@ export const migrationEntries = [
   [41, "ProviderGrokTokenIdentity", Migration0041],
   [42, "OpenCodeRecordedCloudCosts", Migration0042],
   [43, "GitHubCopilotTokenHistory", Migration0043],
+  [44, "OrchestrationEventTypeSequenceIndex", Migration0044],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -100,16 +100,22 @@ const make = Effect.gen(function* () {
     const requests = new Map<string, SessionHistoryImportRequestedEvent>();
     const completedRequestEventIds = new Set<string>();
     const deletedProjectIds = new Set<string>();
-    yield* Stream.runForEach(orchestrationEngine.readEvents(0), (event) =>
-      Effect.sync(() => {
-        if (event.type === "project.session-history-import-requested") {
-          requests.set(event.eventId, event);
-        } else if (event.type === "project.session-history-import-completed") {
-          completedRequestEventIds.add(event.payload.requestEventId);
-        } else if (event.type === "project.deleted") {
-          deletedProjectIds.add(event.payload.projectId);
-        }
-      }),
+    yield* Stream.runForEach(
+      orchestrationEngine.readEvents(0, [
+        "project.session-history-import-requested",
+        "project.session-history-import-completed",
+        "project.deleted",
+      ]),
+      (event) =>
+        Effect.sync(() => {
+          if (event.type === "project.session-history-import-requested") {
+            requests.set(event.eventId, event);
+          } else if (event.type === "project.session-history-import-completed") {
+            completedRequestEventIds.add(event.payload.requestEventId);
+          } else if (event.type === "project.deleted") {
+            deletedProjectIds.add(event.payload.projectId);
+          }
+        }),
     );
     for (const [eventId, event] of requests) {
       if (completedRequestEventIds.has(eventId)) continue;

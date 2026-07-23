@@ -11,9 +11,12 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import { RpcClientError } from "effect/unstable/rpc";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -99,6 +102,74 @@ describe("environment commands", () => {
           createdAt: "2026-06-06T00:00:00.000Z",
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("reuses the same command identity when dispatch retries after reconnect", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const firstClient = {
+        [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command: ClientOrchestrationCommand) => {
+          dispatched.push(command);
+          return Effect.fail(
+            new RpcClientError.RpcClientError({
+              reason: new RpcClientError.RpcClientDefect({
+                message: "socket closed before dispatch response",
+                cause: new Error("socket closed"),
+              }),
+            }),
+          );
+        },
+      } as unknown as WsRpcProtocolClient;
+      const secondClient = {
+        [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command: ClientOrchestrationCommand) =>
+          Effect.sync(() => {
+            dispatched.push(command);
+            return { sequence: 42 };
+          }),
+      } as unknown as WsRpcProtocolClient;
+      const firstSession: RpcSession.RpcSession = {
+        client: firstClient,
+        initialConfig: Effect.never,
+        ready: Effect.void,
+        probe: Effect.void,
+        closed: Effect.never,
+      };
+      const secondSession: RpcSession.RpcSession = {
+        ...firstSession,
+        client: secondClient,
+      };
+      const activeSession = yield* SubscriptionRef.make(Option.some(firstSession));
+      const retryCount = yield* Ref.make(0);
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+        session: activeSession,
+        prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Ref.update(retryCount, (count) => count + 1),
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+
+      const resultFiber = yield* createProject({
+        projectId: ProjectId.make("project-reconnect"),
+        title: "Reconnect project",
+        workspaceRoot: "/workspace/reconnect",
+        createdAt: "2026-06-06T00:00:00.000Z",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      for (let attempt = 0; attempt < 100 && dispatched.length < 1; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      yield* SubscriptionRef.set(activeSession, Option.some(secondSession));
+
+      expect(yield* Fiber.join(resultFiber)).toEqual({ sequence: 42 });
+      expect(dispatched).toHaveLength(2);
+      expect(dispatched[1]).toEqual(dispatched[0]);
+      expect(dispatched[0]?.commandId).toBe("00000000-0000-4000-8000-000000000000");
+      expect(yield* Ref.get(retryCount)).toBe(1);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 

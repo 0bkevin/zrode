@@ -1110,31 +1110,33 @@ const make = Effect.gen(function* () {
       string,
       Extract<OrchestrationEvent, { type: "thread.activity-appended" }>
     >();
-    yield* Stream.runForEach(orchestrationEngine.readEvents(0), (event) =>
-      Effect.sync(() => {
-        if (isTurnCompletionActivityEvent(event)) {
-          const turnId = event.payload.activity.turnId;
-          if (turnId === null) {
+    yield* Stream.runForEach(
+      orchestrationEngine.readEvents(0, ["thread.activity-appended", "thread.turn-quiesced"]),
+      (event) =>
+        Effect.sync(() => {
+          if (isTurnCompletionActivityEvent(event)) {
+            const turnId = event.payload.activity.turnId;
+            if (turnId === null) {
+              return;
+            }
+            pendingTurnCompletions.set(
+              turnCompletionKey({
+                threadId: event.payload.threadId,
+                turnId,
+              }),
+              event,
+            );
             return;
           }
-          pendingTurnCompletions.set(
-            turnCompletionKey({
-              threadId: event.payload.threadId,
-              turnId,
-            }),
-            event,
-          );
-          return;
-        }
-        if (event.type === "thread.turn-quiesced") {
-          pendingTurnCompletions.delete(
-            turnCompletionKey({
-              threadId: event.payload.threadId,
-              turnId: event.payload.turnId,
-            }),
-          );
-        }
-      }),
+          if (event.type === "thread.turn-quiesced") {
+            pendingTurnCompletions.delete(
+              turnCompletionKey({
+                threadId: event.payload.threadId,
+                turnId: event.payload.turnId,
+              }),
+            );
+          }
+        }),
     ).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("checkpoint reactor failed to rebuild pending turn completions", {

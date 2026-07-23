@@ -11,6 +11,7 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
@@ -18,6 +19,7 @@ import { RpcClientError } from "effect/unstable/rpc";
 
 import {
   AVAILABLE_CONNECTION_STATE,
+  ConnectionBlockedError,
   PrimaryConnectionTarget,
   type PreparedConnection,
   type SupervisorConnectionState,
@@ -25,7 +27,13 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { EnvironmentRpcRequestObserver, request, runStream, subscribe } from "./client.ts";
+import {
+  EnvironmentRpcRequestObserver,
+  request,
+  requestIdempotent,
+  runStream,
+  subscribe,
+} from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -108,6 +116,128 @@ describe("environment RPC", () => {
         `start:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
         `finish:${TARGET.environmentId}:${WS_METHODS.cloudGetRelayClientStatus}`,
       ]);
+    }),
+  );
+
+  it.effect("retries an idempotent request on the next session after transport loss", () =>
+    Effect.gen(function* () {
+      const attempts: string[] = [];
+      const firstClient = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => {
+          attempts.push("first");
+          return Effect.fail(
+            new RpcClientError.RpcClientError({
+              reason: new RpcClientError.RpcClientDefect({
+                message: "socket closed before the response arrived",
+                cause: new Error("socket closed"),
+              }),
+            }),
+          );
+        },
+      } as unknown as WsRpcProtocolClient;
+      const secondClient = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => {
+          attempts.push("second");
+          return Effect.succeed({ status: "available" as const, version: "2026.6.0" });
+        },
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, retryCount, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+
+      const resultFiber = yield* requestIdempotent(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      for (let attempt = 0; attempt < 100 && attempts.length < 1; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      yield* SubscriptionRef.set(activeSession, Option.some(session(secondClient)));
+
+      expect(yield* Fiber.join(resultFiber)).toEqual({
+        status: "available",
+        version: "2026.6.0",
+      });
+      expect(attempts).toEqual(["first", "second"]);
+      expect(yield* Ref.get(retryCount)).toBe(1);
+    }),
+  );
+
+  it.effect("waits through a short unavailable window before sending an idempotent request", () =>
+    Effect.gen(function* () {
+      const attempts: string[] = [];
+      const client = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () => {
+          attempts.push("connected");
+          return Effect.succeed({ status: "available" as const, version: "2026.6.0" });
+        },
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+
+      const resultFiber = yield* requestIdempotent(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      expect(attempts).toEqual([]);
+
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      expect(yield* Fiber.join(resultFiber)).toEqual({
+        status: "available",
+        version: "2026.6.0",
+      });
+      expect(attempts).toEqual(["connected"]);
+    }),
+  );
+
+  it.effect("bounds the wait when an idempotent request cannot reconnect", () =>
+    Effect.gen(function* () {
+      const { supervisor } = yield* makeHarness();
+      const resultFiber = yield* requestIdempotent(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.result,
+        Effect.forkChild,
+      );
+
+      yield* TestClock.adjust("59 seconds");
+      expect(resultFiber.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust("1 second");
+
+      const result = yield* Fiber.join(resultFiber);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe("EnvironmentRpcUnavailableError");
+        expect(result.failure.message).toContain("did not reconnect in time");
+      }
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("fails immediately when reconnect is blocked by configuration", () =>
+    Effect.gen(function* () {
+      const { supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(supervisor.state, {
+        desired: true,
+        network: "online",
+        phase: "blocked",
+        stage: null,
+        attempt: 1,
+        generation: 0,
+        lastFailure: new ConnectionBlockedError({
+          reason: "authentication",
+          detail: "The saved credential is invalid.",
+        }),
+        retryAt: null,
+      });
+
+      const result = yield* requestIdempotent(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.result,
+      );
+
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure._tag).toBe("EnvironmentRpcUnavailableError");
+        expect(result.failure.message).toBe("The saved credential is invalid.");
+      }
     }),
   );
 

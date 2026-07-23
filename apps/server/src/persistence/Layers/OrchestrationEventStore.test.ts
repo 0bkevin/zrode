@@ -120,4 +120,74 @@ layer("OrchestrationEventStore", (it) => {
       }
     }),
   );
+
+  it.effect("paginates filtered replay without decoding unrelated event payloads", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          ${"evt-store-filtered-invalid"},
+          ${"thread"},
+          ${"thread-filtered-invalid"},
+          ${0},
+          ${"thread.message-sent"},
+          ${now},
+          ${"provider"},
+          ${"{"},
+          ${"{}"}
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE event_numbers(value) AS (
+          VALUES (1)
+          UNION ALL
+          SELECT value + 1 FROM event_numbers WHERE value < 520
+        )
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        SELECT
+          'evt-store-filtered-' || value,
+          'project',
+          'project-filtered',
+          value,
+          'project.deleted',
+          ${now},
+          'server',
+          '{"projectId":"project-filtered","deletedAt":"2026-01-01T00:00:00.000Z"}',
+          '{}'
+        FROM event_numbers
+      `;
+
+      const replayed = yield* Stream.runCollect(
+        eventStore.readFromSequence(0, 510, ["project.deleted"]),
+      ).pipe(Effect.map((chunk) => Array.from(chunk)));
+
+      assert.equal(replayed.length, 510);
+      assert.equal(replayed[0]?.type, "project.deleted");
+      assert.equal(replayed[509]!.sequence - replayed[0]!.sequence, 509);
+    }),
+  );
 });

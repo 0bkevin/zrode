@@ -210,17 +210,25 @@ const make = Effect.gen(function* () {
       Stream.runForEach(orchestrationEngine.streamDomainEvents, enqueueRelevantEvent),
     );
 
-    yield* Stream.runForEach(eventStore.readFromSequence(0), (event) => {
-      switch (event.type) {
-        case "thread.turn-start-requested":
-        case "thread.turn-quiesced":
-        case "thread.session-set":
-        case "thread.deleted":
-          applyLifecycleEvent(event);
-          break;
-      }
-      return Effect.void;
-    }).pipe(
+    yield* Stream.runForEach(
+      eventStore.readFromSequence(0, Number.MAX_SAFE_INTEGER, [
+        "thread.turn-start-requested",
+        "thread.turn-quiesced",
+        "thread.session-set",
+        "thread.deleted",
+      ]),
+      (event) => {
+        switch (event.type) {
+          case "thread.turn-start-requested":
+          case "thread.turn-quiesced":
+          case "thread.session-set":
+          case "thread.deleted":
+            applyLifecycleEvent(event);
+            break;
+        }
+        return Effect.void;
+      },
+    ).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("queued turn reactor failed to rebuild durable state", {
           cause: Cause.pretty(cause),
