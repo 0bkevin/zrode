@@ -14,7 +14,8 @@ import {
   localEnvironmentUpdateNotificationKey,
 } from "./ProviderUpdateLaunchNotification.logic";
 import { ProviderUpdatePrimaryNotification } from "./ProviderUpdatePrimaryNotification";
-import { stackedThreadToast, toastManager } from "./ui/toast";
+import { providerUpdateToast } from "./ProviderUpdateToast";
+import { toastManager } from "./ui/toast";
 
 /**
  * True when a desktop-local secondary backend (the parallel WSL backend) is
@@ -158,30 +159,23 @@ function ProviderUpdateEnvironmentsNotification() {
     };
 
     const toastId = toastManager.add(
-      stackedThreadToast({
+      providerUpdateToast({
         type: "warning",
         title: getProviderUpdateInitialToastView({
           updateProviders: candidateUnion,
           oneClickProviders: candidateUnion,
         }).title,
-        description: (
+        details: (
           <ProviderUpdateEnvironmentRows
             onInteract={() => {
               hasInteractedRef.current = true;
             }}
           />
         ),
-        timeout: 0,
-        actionProps: {
-          children: "Settings",
-          onClick: openProviderSettings,
-        },
-        actionVariant: "outline",
-        data: {
-          hideCopyButton: true,
-          leadingIcon: <DownloadIcon aria-hidden="true" className="size-4 text-success" />,
-          onClose: dismissPrompt,
-        },
+        detailCount: candidateUnion.length,
+        leadingIcon: <DownloadIcon aria-hidden="true" className="size-4 text-success" />,
+        onClose: dismissPrompt,
+        onOpenSettings: openProviderSettings,
       }),
     );
     activeToastRef.current = { toastId, key: notificationKey };
