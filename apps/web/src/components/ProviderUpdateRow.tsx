@@ -9,6 +9,8 @@ import type {
 import { Button } from "./ui/button";
 import { Spinner } from "./ui/spinner";
 
+const ROW_ACTION_CLASS_NAME = "h-6 px-2 text-[11px] shadow-none";
+
 function rowToneClass(kind: ProviderUpdateRowStatusKind): string {
   switch (kind) {
     case "failed":
@@ -46,22 +48,32 @@ export function ProviderUpdateRow({
     case "failed":
     case "unchanged":
       trailing = canUpdate ? (
-        <Button size="xs" variant="outline" onClick={onUpdate}>
+        <Button className={ROW_ACTION_CLASS_NAME} size="xs" variant="outline" onClick={onUpdate}>
           Retry
         </Button>
       ) : (
-        <Button size="xs" variant="outline" onClick={onOpenSettings}>
+        <Button
+          className={ROW_ACTION_CLASS_NAME}
+          size="xs"
+          variant="outline"
+          onClick={onOpenSettings}
+        >
           Settings
         </Button>
       );
       break;
     default:
       trailing = canUpdate ? (
-        <Button size="xs" onClick={onUpdate}>
+        <Button className={ROW_ACTION_CLASS_NAME} size="xs" onClick={onUpdate}>
           Update
         </Button>
       ) : (
-        <Button size="xs" variant="outline" onClick={onOpenSettings}>
+        <Button
+          className={ROW_ACTION_CLASS_NAME}
+          size="xs"
+          variant="outline"
+          onClick={onOpenSettings}
+        >
           Settings
         </Button>
       );
@@ -69,10 +81,14 @@ export function ProviderUpdateRow({
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 py-0.5">
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate font-medium text-foreground">{label}</span>
-        <span className={cn("truncate text-xs", rowToneClass(status.kind))}>{status.text}</span>
+    <div className="flex min-h-7 items-center justify-between gap-2 py-px">
+      <div className="flex min-w-0 items-baseline gap-1.5">
+        <span className="max-w-24 shrink-0 truncate text-xs font-medium leading-4 text-foreground">
+          {label}
+        </span>
+        <span className={cn("truncate text-[10px] leading-3.5", rowToneClass(status.kind))}>
+          {status.text}
+        </span>
       </div>
       <div className="shrink-0">{trailing}</div>
     </div>

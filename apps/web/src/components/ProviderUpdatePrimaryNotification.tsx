@@ -15,7 +15,8 @@ import {
   providerUpdateNotificationKey,
 } from "./ProviderUpdateLaunchNotification.logic";
 import { ProviderUpdateProviderRows } from "./ProviderUpdateProviderRows";
-import { stackedThreadToast, toastManager } from "./ui/toast";
+import { providerUpdateToast } from "./ProviderUpdateToast";
+import { toastManager } from "./ui/toast";
 
 const seenProviderUpdateNotificationKeys = new Set<string>();
 type ProviderUpdateToastId = ReturnType<typeof toastManager.add>;
@@ -141,10 +142,10 @@ export function ProviderUpdatePrimaryNotification() {
     };
 
     toastId = toastManager.add(
-      stackedThreadToast({
+      providerUpdateToast({
         type: initialView.type,
         title: initialView.title,
-        description: primaryEnvironment ? (
+        details: primaryEnvironment ? (
           <ProviderUpdateProviderRows
             candidates={updateProviders}
             environmentId={primaryEnvironment.environmentId}
@@ -156,20 +157,13 @@ export function ProviderUpdatePrimaryNotification() {
         ) : (
           initialView.description
         ),
-        timeout: 0,
-        actionProps: {
-          children: "Settings",
-          onClick: openSettings,
-        },
-        actionVariant: "outline",
-        data: {
-          leadingIcon:
-            updateProviders.length === 1 ? (
-              <ProviderUpdateToastIcon provider={updateProviders[0]!.driver} />
-            ) : undefined,
-          hideCopyButton: true,
-          onClose: dismissPrompt,
-        },
+        detailCount: updateProviders.length,
+        leadingIcon:
+          updateProviders.length === 1 ? (
+            <ProviderUpdateToastIcon provider={updateProviders[0]!.driver} />
+          ) : undefined,
+        onClose: dismissPrompt,
+        onOpenSettings: openSettings,
       }),
     );
     activeToastRef.current = { key: notificationKey, toastId };

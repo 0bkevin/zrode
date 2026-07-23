@@ -64,7 +64,7 @@ export type ThreadToastData = {
   expandableLabels?: { expand?: string; collapse?: string };
   /** When set with `expandableContent`, the summary + label act as one text disclosure (no separate chevron row). */
   expandableDescriptionTrigger?: boolean;
-  actionLayout?: "inline" | "stacked-end";
+  actionLayout?: "inline" | "inline-top" | "stacked-end";
   actionVariant?:
     | "default"
     | "destructive"
@@ -282,6 +282,7 @@ type ToastIconComponent = (typeof TOAST_ICONS)[keyof typeof TOAST_ICONS];
 interface ToastBodyDescriptor {
   readonly Icon: ToastIconComponent | null | undefined;
   readonly stackedActionLayout: boolean;
+  readonly topAlignedActionLayout: boolean;
   readonly actionVariant: NonNullable<ThreadToastData["actionVariant"]>;
   readonly secondaryActionVariant: NonNullable<ThreadToastData["secondaryActionVariant"]>;
   readonly copyErrorText: string | null;
@@ -298,6 +299,8 @@ function deriveToastBodyDescriptor(toast: {
   const Icon = toast.type ? TOAST_ICONS[toast.type as keyof typeof TOAST_ICONS] : null;
   const stackedActionLayout =
     toast.actionProps !== undefined && toast.data?.actionLayout === "stacked-end";
+  const topAlignedActionLayout =
+    toast.actionProps !== undefined && toast.data?.actionLayout === "inline-top";
   const actionVariant: NonNullable<ThreadToastData["actionVariant"]> =
     toast.data?.actionVariant ?? "default";
   const secondaryActionVariant: NonNullable<ThreadToastData["secondaryActionVariant"]> =
@@ -317,6 +320,7 @@ function deriveToastBodyDescriptor(toast: {
   return {
     Icon,
     stackedActionLayout,
+    topAlignedActionLayout,
     actionVariant,
     secondaryActionVariant,
     copyErrorText,
@@ -597,7 +601,8 @@ function Toasts({ position }: { position: ToastPosition }) {
             visibleToastLayout.items.length,
           );
           const bodyDescriptor = deriveToastBodyDescriptor(toast);
-          const { stackedActionLayout, inlineContentEndPad } = bodyDescriptor;
+          const { stackedActionLayout, topAlignedActionLayout, inlineContentEndPad } =
+            bodyDescriptor;
 
           return (
             <Toast.Root
@@ -695,7 +700,11 @@ function Toasts({ position }: { position: ToastPosition }) {
                   "pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm transition-opacity duration-250 [overflow-x:clip] data-expanded:opacity-100",
                   stackedActionLayout
                     ? "flex flex-col gap-2 py-2.5 pr-3.5"
-                    : cn("py-3", "flex items-center justify-between gap-1.5", inlineContentEndPad),
+                    : cn(
+                        "flex justify-between gap-1.5 py-3",
+                        topAlignedActionLayout ? "items-start" : "items-center",
+                        inlineContentEndPad,
+                      ),
                   hideCollapsedContent &&
                     "not-data-expanded:pointer-events-none not-data-expanded:opacity-0",
                 )}
@@ -739,7 +748,8 @@ function AnchoredToasts() {
             const tooltipStyle = toast.data?.tooltipStyle ?? false;
             const positionerProps = toast.positionerProps;
             const bodyDescriptor = deriveToastBodyDescriptor(toast);
-            const { stackedActionLayout, inlineContentEndPad } = bodyDescriptor;
+            const { stackedActionLayout, topAlignedActionLayout, inlineContentEndPad } =
+              bodyDescriptor;
 
             if (!positionerProps?.anchor) {
               return null;
@@ -794,8 +804,8 @@ function AnchoredToasts() {
                           stackedActionLayout
                             ? "flex flex-col gap-2 py-2.5 pr-3.5"
                             : cn(
-                                "py-3",
-                                "flex items-center justify-between gap-1.5",
+                                "flex justify-between gap-1.5 py-3",
+                                topAlignedActionLayout ? "items-start" : "items-center",
                                 inlineContentEndPad,
                               ),
                         )}
