@@ -1,5 +1,6 @@
 import type { ProjectId, ProviderDriverKind } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import type * as Effect from "effect/Effect";
 
 export interface ProviderSessionHistoryImportInput {
@@ -9,8 +10,22 @@ export interface ProviderSessionHistoryImportInput {
   readonly requestedAt: string;
 }
 
+export interface ProviderSessionHistoryImportFailure {
+  readonly provider: ProviderDriverKind;
+  readonly detail: string;
+}
+
+export class ProviderSessionHistoryImportError extends Data.TaggedError(
+  "ProviderSessionHistoryImportError",
+)<{
+  readonly projectId: ProjectId;
+  readonly failures: ReadonlyArray<ProviderSessionHistoryImportFailure>;
+}> {}
+
 export interface ProviderSessionHistoryImporterShape {
-  readonly importProjectHistory: (input: ProviderSessionHistoryImportInput) => Effect.Effect<void>;
+  readonly importProjectHistory: (
+    input: ProviderSessionHistoryImportInput,
+  ) => Effect.Effect<void, ProviderSessionHistoryImportError>;
 }
 
 export class ProviderSessionHistoryImporter extends Context.Service<

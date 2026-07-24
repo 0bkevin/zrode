@@ -8,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   DEFAULT_MODEL,
+  defaultInstanceIdForDriver,
   type DesktopWslState,
   type EnvironmentId,
   type FilesystemBrowseResult,
@@ -26,10 +27,10 @@ import {
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowUpIcon,
-  ChevronDownIcon,
   CornerLeftUpIcon,
   FolderIcon,
   FolderPlusIcon,
+  HistoryIcon,
   LinkIcon,
   MessageSquareIcon,
   SettingsIcon,
@@ -127,8 +128,8 @@ import {
 } from "./ui/command";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsible";
 import { Kbd, KbdGroup } from "./ui/kbd";
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Switch } from "./ui/switch";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -217,6 +218,8 @@ const HISTORY_IMPORT_OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 const HISTORY_IMPORT_CURSOR_PROVIDER = ProviderDriverKind.make("cursor");
 const HISTORY_IMPORT_DEVIN_PROVIDER = ProviderDriverKind.make("devin");
 const HISTORY_IMPORT_GROK_PROVIDER = ProviderDriverKind.make("grok");
+const HISTORY_IMPORT_KILOCODE_PROVIDER = ProviderDriverKind.make("kilocode");
+const HISTORY_IMPORT_GITHUB_COPILOT_PROVIDER = ProviderDriverKind.make("githubCopilot");
 
 const ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS: ReadonlyArray<{
   readonly provider: ProviderDriverKind;
@@ -229,7 +232,17 @@ const ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS: ReadonlyArray<{
   { provider: HISTORY_IMPORT_CURSOR_PROVIDER, label: "Cursor", supported: false },
   { provider: HISTORY_IMPORT_DEVIN_PROVIDER, label: "Devin", supported: false },
   { provider: HISTORY_IMPORT_GROK_PROVIDER, label: "Grok", supported: false },
+  { provider: HISTORY_IMPORT_KILOCODE_PROVIDER, label: "Kilo Code", supported: false },
+  {
+    provider: HISTORY_IMPORT_GITHUB_COPILOT_PROVIDER,
+    label: "GitHub Copilot",
+    supported: false,
+  },
 ];
+const UNSUPPORTED_HISTORY_IMPORT_PROVIDER_LABELS =
+  ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS.filter((option) => !option.supported)
+    .map((option) => option.label)
+    .join(", ");
 
 const DEFAULT_ADD_PROJECT_HISTORY_IMPORT_PROVIDERS: ReadonlyArray<ProviderDriverKind> = [
   HISTORY_IMPORT_CODEX_PROVIDER,
@@ -242,6 +255,10 @@ function isHistoryImportProviderEnabled(
   provider: ProviderDriverKind,
 ): boolean {
   if (settings === null) return false;
+  const explicitDefaultInstance = settings.providerInstances[defaultInstanceIdForDriver(provider)];
+  if (explicitDefaultInstance !== undefined) {
+    return explicitDefaultInstance.driver === provider && (explicitDefaultInstance.enabled ?? true);
+  }
   if (provider === HISTORY_IMPORT_CODEX_PROVIDER) return settings.providers.codex.enabled;
   if (provider === HISTORY_IMPORT_CLAUDE_PROVIDER) return settings.providers.claudeAgent.enabled;
   if (provider === HISTORY_IMPORT_OPENCODE_PROVIDER) return settings.providers.opencode.enabled;
@@ -252,9 +269,9 @@ function historyImportProviderDisabledReason(
   settings: ServerSettings | null,
   option: (typeof ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS)[number],
 ): string | null {
-  if (!option.supported) return "Unavailable";
-  if (settings === null) return "Unavailable";
-  if (!isHistoryImportProviderEnabled(settings, option.provider)) return "Disabled";
+  if (!option.supported) return "History import not supported yet";
+  if (settings === null) return "Checking availability…";
+  if (!isHistoryImportProviderEnabled(settings, option.provider)) return "Disabled in settings";
   return null;
 }
 
@@ -549,7 +566,6 @@ function OpenCommandPaletteDialog(props: {
   const [isPickingProjectFolder, setIsPickingProjectFolder] = useState(false);
   const [addProjectCloneFlow, setAddProjectCloneFlow] = useState<AddProjectCloneFlow | null>(null);
   const [addProjectImportSessionHistory, setAddProjectImportSessionHistory] = useState(false);
-  const [addProjectImportAdvancedOpen, setAddProjectImportAdvancedOpen] = useState(false);
   const [addProjectHistoryImportProviders, setAddProjectHistoryImportProviders] = useState<
     ReadonlyArray<ProviderDriverKind>
   >(DEFAULT_ADD_PROJECT_HISTORY_IMPORT_PROVIDERS);
@@ -626,6 +642,27 @@ function OpenCommandPaletteDialog(props: {
   const hasSelectedAddProjectHistoryImportProviders = addProjectHistoryImportProviderRows.some(
     (row) => row.checked,
   );
+  const selectedAddProjectHistoryImportProviderLabels = addProjectHistoryImportProviderRows
+    .filter((row) => row.checked)
+    .map((row) => row.label);
+
+  function setAddProjectHistoryProviderChecked(
+    provider: ProviderDriverKind,
+    checked: boolean,
+  ): void {
+    const nextProviders = checked
+      ? addProjectHistoryImportProviders.includes(provider)
+        ? addProjectHistoryImportProviders
+        : [...addProjectHistoryImportProviders, provider]
+      : addProjectHistoryImportProviders.filter((candidate) => candidate !== provider);
+    const hasAnySelectedProvider = addProjectHistoryImportProviderRows.some(
+      (row) => row.selectable && nextProviders.includes(row.provider),
+    );
+    setAddProjectHistoryImportProviders(nextProviders);
+    if (!hasAnySelectedProvider) {
+      setAddProjectImportSessionHistory(false);
+    }
+  }
   // A desktop-local secondary backend (today: the WSL backend). The picker is
   // available against these too — the desktop dispatches pickFolder into the
   // backend's filesystem when routed by its instance id.
@@ -847,7 +884,6 @@ function OpenCommandPaletteDialog(props: {
       setAddProjectEnvironmentId(environmentId);
       setAddProjectCloneFlow(null);
       setAddProjectImportSessionHistory(false);
-      setAddProjectImportAdvancedOpen(false);
       setAddProjectHistoryImportProviders(DEFAULT_ADD_PROJECT_HISTORY_IMPORT_PROVIDERS);
       pushPaletteView({
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
@@ -862,7 +898,6 @@ function OpenCommandPaletteDialog(props: {
     (environmentId: EnvironmentId, source: AddProjectRemoteSource): void => {
       setAddProjectEnvironmentId(environmentId);
       setAddProjectImportSessionHistory(false);
-      setAddProjectImportAdvancedOpen(false);
       setAddProjectHistoryImportProviders(DEFAULT_ADD_PROJECT_HISTORY_IMPORT_PROVIDERS);
       setAddProjectCloneFlow({ step: "repository", environmentId, source });
       pushPaletteView({
@@ -1288,6 +1323,20 @@ function OpenCommandPaletteDialog(props: {
         return;
       }
 
+      if (sessionHistoryImportProviders.length > 0) {
+        const selectedLabels = ADD_PROJECT_HISTORY_IMPORT_PROVIDER_OPTIONS.filter((option) =>
+          sessionHistoryImportProviders.includes(option.provider),
+        ).map((option) => option.label);
+        toastManager.add(
+          stackedThreadToast({
+            type: "loading",
+            title: "Importing existing sessions",
+            description: `${selectedLabels.join(", ")} history is being imported in the background. Matching sessions will appear under the project as they are found.`,
+            timeout: 8_000,
+          }),
+        );
+      }
+
       const navigationResult = await settlePromise(() =>
         handleNewThread(scopeProjectRef(input.environmentId, projectId)),
       );
@@ -1558,7 +1607,6 @@ function OpenCommandPaletteDialog(props: {
       : undefined;
   const showAddProjectHistoryImportControl =
     canSubmitBrowsePath &&
-    !hasHighlightedBrowseItem &&
     resolvedAddProjectDispatchPath.length > 0 &&
     existingAddProjectForResolvedPath === undefined;
   const submitActionLabel = isCloneDestinationStep
@@ -1963,6 +2011,128 @@ function OpenCommandPaletteDialog(props: {
                     : {})}
           />
         </CommandPanel>
+        {showAddProjectHistoryImportControl ? (
+          <section
+            aria-labelledby="add-project-session-import-title"
+            className="border-t border-border/70 bg-muted/15 px-4 py-2.5"
+            data-testid="add-project-session-import"
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <HistoryIcon className="size-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3
+                  id="add-project-session-import-title"
+                  className="font-medium text-foreground text-sm"
+                >
+                  Import existing sessions
+                </h3>
+                <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+                  <span className="truncate">
+                    {addProjectImportSessionHistory
+                      ? `${selectedAddProjectHistoryImportProviderLabels.join(", ")} · all matching sessions`
+                      : hasSelectableAddProjectHistoryImportProviders
+                        ? "Bring matching local provider history into this project"
+                        : browseEnvironmentSettings === null
+                          ? "Checking available providers…"
+                          : "No supported providers are enabled"}
+                  </span>
+                  {addProjectImportSessionHistory ? (
+                    <Popover>
+                      <PopoverTrigger
+                        className="shrink-0 font-medium text-foreground/80 underline-offset-4 hover:underline"
+                        aria-label="Choose providers to import"
+                      >
+                        Choose
+                      </PopoverTrigger>
+                      <PopoverPopup
+                        align="end"
+                        className="w-72"
+                        side="top"
+                        sideOffset={8}
+                        viewportClassName="p-3"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="font-medium text-sm">Import from</div>
+                            <div className="text-muted-foreground text-xs">
+                              Select one or more providers.
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="shrink-0 text-muted-foreground text-xs underline-offset-4 hover:text-foreground hover:underline"
+                            onClick={() => {
+                              setOpen(false);
+                              void navigate({ to: "/settings/providers" });
+                            }}
+                          >
+                            Settings
+                          </button>
+                        </div>
+                        <div className="mt-3 grid gap-1">
+                          {addProjectHistoryImportProviderRows
+                            .filter((row) => row.supported)
+                            .map((row) => (
+                              <label
+                                key={row.provider}
+                                className={cn(
+                                  "flex min-h-9 items-center gap-2.5 rounded-md px-2 py-1.5",
+                                  row.selectable
+                                    ? "cursor-pointer hover:bg-accent/60"
+                                    : "cursor-not-allowed text-muted-foreground/60",
+                                )}
+                                data-slot="label"
+                              >
+                                <Checkbox
+                                  checked={row.checked}
+                                  disabled={!row.selectable}
+                                  onCheckedChange={(checked) => {
+                                    setAddProjectHistoryProviderChecked(
+                                      row.provider,
+                                      Boolean(checked),
+                                    );
+                                  }}
+                                  aria-label={`Import ${row.label} session history`}
+                                />
+                                <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
+                                  <span className="font-medium text-xs">{row.label}</span>
+                                  <span className="truncate text-[11px] text-muted-foreground">
+                                    {row.disabledReason ?? "Ready"}
+                                  </span>
+                                </span>
+                              </label>
+                            ))}
+                        </div>
+                        <p className="mt-2 border-t pt-2 text-[11px] text-muted-foreground">
+                          History import is not supported yet for{" "}
+                          {UNSUPPORTED_HISTORY_IMPORT_PROVIDER_LABELS}. Import stays local and runs
+                          after the project is added.
+                        </p>
+                      </PopoverPopup>
+                    </Popover>
+                  ) : null}
+                </div>
+              </div>
+              <Switch
+                checked={
+                  addProjectImportSessionHistory && hasSelectedAddProjectHistoryImportProviders
+                }
+                disabled={!hasSelectableAddProjectHistoryImportProviders}
+                onCheckedChange={(checked) => {
+                  const nextChecked =
+                    Boolean(checked) && hasSelectableAddProjectHistoryImportProviders;
+                  if (nextChecked && !hasSelectedAddProjectHistoryImportProviders) {
+                    setAddProjectHistoryImportProviders(selectableAddProjectHistoryImportProviders);
+                  }
+                  setAddProjectImportSessionHistory(nextChecked);
+                }}
+                aria-label="Import existing provider sessions"
+              />
+            </div>
+          </section>
+        ) : null}
         <CommandFooter className="gap-3 max-sm:flex-col max-sm:items-start">
           <div className="flex items-center gap-3">
             <KbdGroup className="items-center gap-1.5">
@@ -1998,100 +2168,6 @@ function OpenCommandPaletteDialog(props: {
               <span className={cn("text-muted-foreground/80")}>Close</span>
             </KbdGroup>
           </div>
-          {showAddProjectHistoryImportControl ? (
-            <div className="flex min-w-64 flex-col gap-2 text-xs">
-              <label className="flex items-center gap-2 text-muted-foreground/80" data-slot="label">
-                <Switch
-                  checked={
-                    addProjectImportSessionHistory && hasSelectedAddProjectHistoryImportProviders
-                  }
-                  disabled={!hasSelectableAddProjectHistoryImportProviders}
-                  onCheckedChange={(checked) => {
-                    const nextChecked =
-                      Boolean(checked) && hasSelectableAddProjectHistoryImportProviders;
-                    if (nextChecked && !hasSelectedAddProjectHistoryImportProviders) {
-                      setAddProjectHistoryImportProviders(
-                        selectableAddProjectHistoryImportProviders,
-                      );
-                    }
-                    setAddProjectImportSessionHistory(nextChecked);
-                    if (!nextChecked) {
-                      setAddProjectImportAdvancedOpen(false);
-                    }
-                  }}
-                  aria-label="Import project session history"
-                />
-                <span>Import project session history</span>
-              </label>
-              {addProjectImportSessionHistory ? (
-                <Collapsible
-                  open={addProjectImportAdvancedOpen}
-                  onOpenChange={setAddProjectImportAdvancedOpen}
-                >
-                  <CollapsibleTrigger className="flex w-full items-center gap-1.5 text-muted-foreground/80 hover:text-foreground">
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-3.5 shrink-0 transition-transform",
-                        addProjectImportAdvancedOpen ? "rotate-180" : "",
-                      )}
-                    />
-                    <span>Advanced import</span>
-                  </CollapsibleTrigger>
-                  <CollapsiblePanel>
-                    <div className="mt-2 grid gap-1.5 rounded-md border border-border/60 bg-background/80 p-2">
-                      {addProjectHistoryImportProviderRows.map((row) => (
-                        <label
-                          key={row.provider}
-                          className={cn(
-                            "flex items-center justify-between gap-3",
-                            row.selectable
-                              ? "text-foreground"
-                              : "cursor-not-allowed text-muted-foreground/60",
-                          )}
-                          data-slot="label"
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            <Checkbox
-                              checked={row.checked}
-                              disabled={!row.selectable}
-                              onCheckedChange={(checked) => {
-                                const nextChecked = Boolean(checked);
-                                const nextProviders = nextChecked
-                                  ? addProjectHistoryImportProviders.includes(row.provider)
-                                    ? addProjectHistoryImportProviders
-                                    : [...addProjectHistoryImportProviders, row.provider]
-                                  : addProjectHistoryImportProviders.filter(
-                                      (provider) => provider !== row.provider,
-                                    );
-                                const hasAnySelectedProvider =
-                                  addProjectHistoryImportProviderRows.some(
-                                    (providerRow) =>
-                                      providerRow.selectable &&
-                                      nextProviders.includes(providerRow.provider),
-                                  );
-                                setAddProjectHistoryImportProviders(nextProviders);
-                                if (!hasAnySelectedProvider) {
-                                  setAddProjectImportSessionHistory(false);
-                                  setAddProjectImportAdvancedOpen(false);
-                                }
-                              }}
-                              aria-label={`Import ${row.label} session history`}
-                            />
-                            <span className="truncate">{row.label}</span>
-                          </span>
-                          {row.disabledReason ? (
-                            <span className="shrink-0 text-muted-foreground/70">
-                              {row.disabledReason}
-                            </span>
-                          ) : null}
-                        </label>
-                      ))}
-                    </div>
-                  </CollapsiblePanel>
-                </Collapsible>
-              ) : null}
-            </div>
-          ) : null}
           {canOpenProjectFromFileManager ? (
             <Button
               variant="ghost"
