@@ -59,6 +59,7 @@ import Migration0043 from "./Migrations/043_GitHubCopilotTokenHistory.ts";
 import Migration0044 from "./Migrations/044_OrchestrationEventTypeSequenceIndex.ts";
 import Migration0045 from "./Migrations/045_OrchestrationActivityKindSequenceIndex.ts";
 import Migration0046 from "./Migrations/046_ArchiveRetiredTitleGenerationEvents.ts";
+import Migration0047 from "./Migrations/047_ProviderTokenFileCursors.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -116,6 +117,7 @@ export const migrationEntries = [
   [44, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[44], Migration0044],
   [45, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[45], Migration0045],
   [46, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[46], Migration0046],
+  [47, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[47], Migration0047],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
