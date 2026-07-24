@@ -36,6 +36,7 @@ import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
+import { formatPathTailForDisplay } from "~/pathDisplay";
 import { useDiscoveredServerSnapshot } from "~/portDiscoveryState";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -441,7 +442,7 @@ function LocalServerRow({
         </span>
         {server.cwd != null && server.container == null ? (
           <span className="truncate text-[11px] text-muted-foreground/60" title={server.cwd}>
-            {server.cwd}
+            {formatPathTailForDisplay(server.cwd)}
           </span>
         ) : null}
       </button>

@@ -7,6 +7,7 @@ import type {
 import * as Option from "effect/Option";
 
 import { cn } from "~/lib/utils";
+import { formatPathTailForDisplay } from "~/pathDisplay";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { formatRuntimeBytes, formatRuntimeCpu } from "./runtimeResourceFormatting";
@@ -57,7 +58,14 @@ function ProviderResourceRow({ usage }: { readonly usage: ProviderRuntimeResourc
   const { session } = usage;
   const status = providerStatus(session.status);
   const label = session.providerInstanceId ?? session.provider;
-  const detail = ["Agent", session.model, session.cwd].filter(Boolean).join(" · ");
+  const detail = [
+    "Agent",
+    session.model,
+    session.cwd ? formatPathTailForDisplay(session.cwd) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const fullDetail = ["Agent", session.model, session.cwd].filter(Boolean).join(" · ");
   return (
     <div className="flex items-center gap-2.5 px-3 py-2">
       <span className={cn("size-2 shrink-0 rounded-full", status.dotClassName)} aria-hidden />
@@ -66,7 +74,7 @@ function ProviderResourceRow({ usage }: { readonly usage: ProviderRuntimeResourc
           <span className="truncate text-xs font-medium text-foreground">{label}</span>
           <span className="shrink-0 text-[10px] text-muted-foreground/60">{status.label}</span>
         </div>
-        <div className="truncate text-[10px] text-muted-foreground/55" title={detail}>
+        <div className="truncate text-[10px] text-muted-foreground/55" title={fullDetail}>
           {detail || session.threadId}
         </div>
       </div>
@@ -93,7 +101,8 @@ function terminalStatus(usage: TerminalRuntimeResourceUsage): {
 
 function TerminalResourceRow({ usage }: { readonly usage: TerminalRuntimeResourceUsage }) {
   const status = terminalStatus(usage);
-  const detail = ["Terminal task", usage.terminal.cwd].join(" · ");
+  const detail = ["Terminal task", formatPathTailForDisplay(usage.terminal.cwd)].join(" · ");
+  const fullDetail = ["Terminal task", usage.terminal.cwd].join(" · ");
   return (
     <div className="flex items-center gap-2.5 px-3 py-2">
       <span className={cn("size-2 shrink-0 rounded-full", status.dotClassName)} aria-hidden />
@@ -104,7 +113,7 @@ function TerminalResourceRow({ usage }: { readonly usage: TerminalRuntimeResourc
           </span>
           <span className="shrink-0 text-[10px] text-muted-foreground/60">{status.label}</span>
         </div>
-        <div className="truncate text-[10px] text-muted-foreground/55" title={detail}>
+        <div className="truncate text-[10px] text-muted-foreground/55" title={fullDetail}>
           {detail}
         </div>
       </div>
