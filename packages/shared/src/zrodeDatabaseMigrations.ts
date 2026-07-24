@@ -51,6 +51,7 @@ export const ZRODE_DATABASE_MIGRATION_NAMES_BY_ID = {
   44: "OrchestrationEventTypeSequenceIndex",
   45: "OrchestrationActivityKindSequenceIndex",
   46: "ArchiveRetiredTitleGenerationEvents",
+  47: "ProviderTokenFileCursors",
 } as const;
 
 export type ZrodeDatabaseMigrationId = keyof typeof ZRODE_DATABASE_MIGRATION_NAMES_BY_ID;

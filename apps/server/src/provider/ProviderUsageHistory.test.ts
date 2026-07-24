@@ -671,6 +671,7 @@ function claudeLine(input: {
   readonly isSidechain?: boolean;
   readonly model?: string;
   readonly costUsd?: number;
+  readonly padding?: string;
 }): string {
   return JSON.stringify({
     type: "assistant",
@@ -678,6 +679,7 @@ function claudeLine(input: {
     requestId: input.requestId,
     isSidechain: input.isSidechain,
     costUSD: input.costUsd,
+    padding: input.padding,
     message: {
       id: input.messageId,
       model: input.model ?? "claude-sonnet-5",
@@ -728,6 +730,29 @@ function openCodeWalDatabaseMessage(): string {
   });
 }
 
+function nestedOpenCodeDatabaseMessage(): string {
+  return JSON.stringify({
+    role: "assistant",
+    providerID: "opencode-go",
+    modelID: "gpt-5.4",
+    cost: 0.005,
+    tokens: { total: 75, input: 70, output: 5 },
+  });
+}
+
+function grokModelLine(pid: number, model: string): string {
+  return JSON.stringify({ pid, msg: "model changed", ctx: { model } });
+}
+
+function grokInferenceLine(pid: number, timestamp: string, tokens: number): string {
+  return JSON.stringify({
+    pid,
+    ts: timestamp,
+    msg: "shell.turn.inference_done",
+    ctx: { prompt_tokens: tokens, completion_tokens: 0 },
+  });
+}
+
 describe("token log scanning (integration)", () => {
   it.live(
     "scans temp homes, rescans appended files, and dedupes replays",
@@ -748,14 +773,27 @@ describe("token log scanning (integration)", () => {
         yield* fs.makeDirectory(claudeProject, { recursive: true });
         yield* fs.makeDirectory(codexSessions, { recursive: true });
         const claudeFile = path.join(claudeProject, "session-a.jsonl");
+        const claudeCrFile = path.join(claudeProject, "session-cr.jsonl");
+        const claudePartialFile = path.join(claudeProject, "session-partial.jsonl");
         const codexFile = path.join(codexSessions, "rollout-x.jsonl");
         // OpenCode resolves its store from XDG_DATA_HOME; point it at the temp
         // root and restore afterwards so no real machine data is scanned.
         process.env.XDG_DATA_HOME = root;
         process.env.GROK_HOME = path.join(root, "grok-home");
+        const grokLogs = path.join(process.env.GROK_HOME, "logs");
+        yield* fs.makeDirectory(grokLogs, { recursive: true });
+        const grokFile = path.join(grokLogs, "unified.jsonl");
         const opencodeMessages = path.join(root, "opencode", "storage", "message", "ses_1");
         yield* fs.makeDirectory(opencodeMessages, { recursive: true });
         const opencodeDbPath = path.join(root, "opencode", "opencode.db");
+        const nestedOpenCodeDbPath = path.join(
+          root,
+          "opencode",
+          "channels",
+          "nightly",
+          "opencode-nightly.db",
+        );
+        yield* fs.makeDirectory(path.dirname(nestedOpenCodeDbPath), { recursive: true });
         const dbPath = path.join(root, "history.sqlite");
 
         const settings: ServerSettings = {
@@ -767,7 +805,7 @@ describe("token log scanning (integration)", () => {
               homePath: claudeHome,
             },
             codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, homePath: codexHome },
-            grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: false },
+            grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: true },
             opencode: { ...DEFAULT_SERVER_SETTINGS.providers.opencode, enabled: true },
           },
         };
@@ -826,12 +864,63 @@ describe("token log scanning (integration)", () => {
               model: "<synthetic>",
               costUsd: 0.1,
             }),
-            "",
+            // Crosses the filesystem stream's 64 KiB chunk boundary and has
+            // no trailing newline. The optimized chunk parser must retain the
+            // exact split-lines behavior for both cases.
+            claudeLine({
+              messageId: "msg_chunked",
+              requestId: "req_chunked",
+              timestamp: t2,
+              tokens: 5,
+              padding: "x".repeat(70_000),
+            }),
           ].join("\n"),
         );
         yield* fs.writeFileString(
+          claudeCrFile,
+          [
+            claudeLine({
+              messageId: "msg_cr_1",
+              requestId: "req_cr_1",
+              timestamp: t2,
+              tokens: 5,
+            }),
+            claudeLine({
+              messageId: "msg_cr_2",
+              requestId: "req_cr_2",
+              timestamp: t2,
+              tokens: 7,
+            }),
+          ].join("\r"),
+        );
+        const completedPartialClaudeLine = claudeLine({
+          messageId: "msg_partial",
+          requestId: "req_partial",
+          timestamp: t2,
+          tokens: 9,
+        });
+        const partialClaudeSplit = completedPartialClaudeLine.length - 12;
+        yield* fs.writeFileString(
+          claudePartialFile,
+          completedPartialClaudeLine.slice(0, partialClaudeSplit),
+        );
+        const codexBatchLines = Array.from({ length: 70 }, (_, index) =>
+          codexLine({
+            timestamp: DateTime.formatIso(
+              DateTime.makeUnsafe(nowMs - 2 * 60 * 60_000 + (index + 1) * 1_000),
+            ),
+            tokens: index + 1,
+          }),
+        );
+        yield* fs.writeFileString(
           codexFile,
-          `${codexTurnContext()}\n${codexLine({ timestamp: t1, tokens: 500 })}\n`,
+          [codexTurnContext(), codexLine({ timestamp: t1, tokens: 500 }), ...codexBatchLines].join(
+            "\n",
+          ),
+        );
+        yield* fs.writeFileString(
+          grokFile,
+          `${grokModelLine(42, "grok-4.3")}\n${grokInferenceLine(42, t1, 10)}`,
         );
         yield* fs.writeFileString(
           path.join(opencodeMessages, "msg_o1.json"),
@@ -852,44 +941,94 @@ describe("token log scanning (integration)", () => {
             .prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
             .run("msg_db", nowMs - 80 * 60_000, openCodeHostedDatabaseMessage());
           opencodeDatabase = database;
+          const nestedDatabase = new NodeSqlite.DatabaseSync(nestedOpenCodeDbPath);
+          try {
+            nestedDatabase.exec(
+              "CREATE TABLE message (id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, data TEXT NOT NULL)",
+            );
+            nestedDatabase
+              .prepare("INSERT INTO message (id, time_created, data) VALUES (?, ?, ?)")
+              .run("msg_nested_db", nowMs - 75 * 60_000, nestedOpenCodeDatabaseMessage());
+          } finally {
+            nestedDatabase.close();
+          }
         });
 
+        const streamOffsets = new Map<string, number>();
+        const trackingFileSystem = {
+          ...fs,
+          stream: (
+            filePath: string,
+            options?: Parameters<typeof fs.stream>[1],
+          ): ReturnType<typeof fs.stream> => {
+            streamOffsets.set(filePath, Number(options?.offset ?? 0));
+            return fs.stream(filePath, options);
+          },
+        };
         let seedLegacyRows = true;
-        const runScan = Effect.gen(function* () {
-          yield* runMigrations();
-          if (seedLegacyRows) {
-            const sql = yield* SqlClient.SqlClient;
-            yield* sql`
+        const runScan = (rescan: boolean) =>
+          Effect.gen(function* () {
+            yield* runMigrations();
+            if (seedLegacyRows) {
+              const sql = yield* SqlClient.SqlClient;
+              yield* sql`
               INSERT INTO provider_token_entries (
                 provider, entry_key, sampled_epoch_ms, tokens
               ) VALUES ('claude', 'msg_1:req_1', ${nowMs}, 100)
             `;
-            yield* sql`
+              yield* sql`
               INSERT INTO provider_token_entries (
                 provider, entry_key, sampled_epoch_ms, tokens
               ) VALUES ('codex', 'rollout-x.jsonl:2', ${nowMs}, 500)
             `;
-            seedLegacyRows = false;
-          }
-          const history = yield* make;
-          let result = yield* history.readHistory({ days: 400, rescan: true }, settings);
-          for (let i = 0; i < 300; i += 1) {
-            if (!result.isBackfilling && result.lastScanAt !== null) break;
-            yield* Effect.sleep(100);
-            result = yield* history.readHistory({ days: 400 }, settings);
-          }
-          return result;
-        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+              seedLegacyRows = false;
+            }
+            const history = yield* make;
+            let result = yield* history.readHistory(
+              rescan ? { days: 400, rescan: true } : { days: 400 },
+              settings,
+            );
+            for (let i = 0; i < 300; i += 1) {
+              if (!result.isBackfilling && result.lastScanAt !== null) break;
+              yield* Effect.sleep(100);
+              result = yield* history.readHistory({ days: 400 }, settings);
+            }
+            const sql = yield* SqlClient.SqlClient;
+            const checkpoints = yield* sql<{
+              readonly path: string;
+              readonly parse_offset_bytes: number;
+              readonly size_bytes: number;
+              readonly parse_state_json: string | null;
+            }>`
+              SELECT path, parse_offset_bytes, size_bytes, parse_state_json
+              FROM provider_token_files
+              WHERE path IN (${claudeFile}, ${codexFile}, ${grokFile})
+              ORDER BY path
+            `;
+            return { result, checkpoints };
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, trackingFileSystem),
+            Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+          );
 
         const total = (provider: string, result: ServerProviderUsageHistoryResult): number =>
           result.tokenActivity
             .filter((entry) => entry.provider === provider)
             .reduce((sum, entry) => sum + entry.tokens, 0);
 
-        const first = yield* runScan;
-        assert.strictEqual(total("claude", first), 445);
-        assert.strictEqual(total("codex", first), 500);
-        assert.strictEqual(total("opencode", first), 1_000);
+        const firstScan = yield* runScan(true);
+        const first = firstScan.result;
+        assert.strictEqual(total("claude", first), 462);
+        assert.strictEqual(total("codex", first), 2_985);
+        assert.strictEqual(total("grok", first), 10);
+        assert.strictEqual(total("opencode", first), 1_075);
+        for (const checkpoint of firstScan.checkpoints) {
+          assert.isAbove(checkpoint.parse_offset_bytes, 0);
+          assert.isBelow(checkpoint.parse_offset_bytes, checkpoint.size_bytes);
+          if (checkpoint.path === codexFile || checkpoint.path === grokFile) {
+            assert.isString(checkpoint.parse_state_json);
+          }
+        }
         assert.deepStrictEqual(
           [
             ...new Map(
@@ -898,11 +1037,16 @@ describe("token log scanning (integration)", () => {
                 [entry.provider, entry.model],
               ]),
             ).values(),
-          ],
+          ].toSorted(([leftProvider, leftModel], [rightProvider, rightModel]) => {
+            const left = `${leftProvider}\0${leftModel}`;
+            const right = `${rightProvider}\0${rightModel}`;
+            return left < right ? -1 : left > right ? 1 : 0;
+          }),
           [
             ["claude", "Unattributed"],
             ["claude", "claude-sonnet-5"],
             ["codex", "gpt-5.4"],
+            ["grok", "grok-4.3"],
             ["opencode", "opencode-go/gpt-5.4"],
             ["opencode", "opencode/glm-5"],
           ],
@@ -920,7 +1064,7 @@ describe("token log scanning (integration)", () => {
         const existing = yield* fs.readFileString(claudeFile);
         yield* fs.writeFileString(
           claudeFile,
-          existing +
+          `${existing}\n` +
             [
               // A richer replay can correct token counts without erasing the
               // authoritative cost carried by the earlier duplicate.
@@ -929,6 +1073,18 @@ describe("token log scanning (integration)", () => {
               "",
             ].join("\n"),
         );
+        yield* fs.writeFileString(
+          claudePartialFile,
+          completedPartialClaudeLine.slice(partialClaudeSplit),
+          { flag: "a" },
+        );
+        const existingCodex = yield* fs.readFileString(codexFile);
+        yield* fs.writeFileString(
+          codexFile,
+          `${existingCodex}\n${codexLine({ timestamp: t2, tokens: 71 })}`,
+        );
+        const existingGrok = yield* fs.readFileString(grokFile);
+        yield* fs.writeFileString(grokFile, `${existingGrok}\n${grokInferenceLine(42, t2, 11)}`);
         yield* fs.writeFileString(
           path.join(opencodeMessages, "msg_o2.json"),
           opencodeMessage("msg_o2", 200),
@@ -940,11 +1096,29 @@ describe("token log scanning (integration)", () => {
             .run("msg_db_wal", nowMs - 40 * 60_000, openCodeWalDatabaseMessage());
         });
 
-        const second = yield* runScan;
-        assert.strictEqual(total("claude", second), 496);
-        assert.strictEqual(total("codex", second), 500);
+        streamOffsets.clear();
+        const secondScan = yield* runScan(false);
+        const second = secondScan.result;
+        const firstCheckpointByPath = new Map(
+          firstScan.checkpoints.map((checkpoint) => [checkpoint.path, checkpoint]),
+        );
+        assert.strictEqual(
+          streamOffsets.get(claudeFile),
+          firstCheckpointByPath.get(claudeFile)?.parse_offset_bytes,
+        );
+        assert.strictEqual(
+          streamOffsets.get(codexFile),
+          firstCheckpointByPath.get(codexFile)?.parse_offset_bytes,
+        );
+        assert.strictEqual(
+          streamOffsets.get(grokFile),
+          firstCheckpointByPath.get(grokFile)?.parse_offset_bytes,
+        );
+        assert.strictEqual(total("claude", second), 522);
+        assert.strictEqual(total("codex", second), 3_056);
+        assert.strictEqual(total("grok", second), 21);
         // Includes a completed legacy message and a WAL-only database insert.
-        assert.strictEqual(total("opencode", second), 1_350);
+        assert.strictEqual(total("opencode", second), 1_425);
         assert.strictEqual(
           second.modelActivity.find(
             (entry) =>
@@ -954,6 +1128,46 @@ describe("token log scanning (integration)", () => {
           )?.recordedCostUsd,
           0.2,
         );
+
+        const secondCodex = yield* fs.readFileString(codexFile);
+        yield* fs.writeFileString(
+          codexFile,
+          `${secondCodex}\n${codexLine({ timestamp: t2, tokens: 72 })}`,
+        );
+        yield* Effect.sync(() => {
+          const database = new NodeSqlite.DatabaseSync(dbPath);
+          try {
+            database
+              .prepare(
+                "UPDATE provider_token_files SET parse_state_json = 'corrupt' WHERE path = ?",
+              )
+              .run(codexFile);
+          } finally {
+            database.close();
+          }
+        });
+        streamOffsets.clear();
+        const recovered = (yield* runScan(false)).result;
+        assert.strictEqual(streamOffsets.get(codexFile), 0);
+        assert.strictEqual(total("codex", recovered), 3_128);
+
+        // A rotated log can regrow beyond the previous size. Its inode is the
+        // distinguishing signal: resuming the old cursor would skip the new
+        // prefix and restore parser state belonging to a different rollout.
+        const rotatedCodexFile = `${codexFile}.replacement`;
+        const recoveredCodex = yield* fs.readFileString(codexFile);
+        yield* fs.writeFileString(
+          rotatedCodexFile,
+          `${" ".repeat(recoveredCodex.length + 100)}\n${codexTurnContext()}\n${codexLine({
+            timestamp: t2,
+            tokens: 73,
+          })}`,
+        );
+        yield* fs.rename(rotatedCodexFile, codexFile);
+        streamOffsets.clear();
+        const rotated = (yield* runScan(false)).result;
+        assert.strictEqual(streamOffsets.get(codexFile), 0);
+        assert.strictEqual(total("codex", rotated), 3_201);
 
         opencodeDatabase?.close();
         opencodeDatabase = null;

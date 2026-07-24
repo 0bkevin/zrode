@@ -64,6 +64,12 @@ const TOKEN_SYNC_MIN_INTERVAL_MS = 30 * 60_000;
 const TOKEN_SYNC_FORCE_MIN_INTERVAL_MS = 15_000;
 /** How many log files are read concurrently during a scan. */
 const TOKEN_SYNC_FILE_CONCURRENCY = 2;
+/** Metadata reads are small and independent; bound them well above file parsing. */
+const TOKEN_SYNC_STAT_CONCURRENCY = 32;
+/** Stay below SQLite's historical 999-variable limit (14 columns × 64 rows). */
+const TOKEN_ENTRY_INSERT_BATCH_SIZE = 64;
+/** Bound single-column cleanup statements well below SQLite's variable limit. */
+const TOKEN_ENTRY_DELETE_BATCH_SIZE = 500;
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -785,6 +791,148 @@ function makeGrokParseState(): GrokParseState {
   return { modelByPid: new Map() };
 }
 
+const TOKEN_PARSE_STATE_VERSION = 1;
+
+interface TokenParseStateEnvelope {
+  readonly version: number;
+  readonly provider: "codex" | "grok";
+  readonly state: unknown;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nullableString(value: unknown): string | null | undefined {
+  return value === null || typeof value === "string" ? value : undefined;
+}
+
+function nullableFiniteNumber(value: unknown): number | null | undefined {
+  return value === null || (typeof value === "number" && Number.isFinite(value))
+    ? value
+    : undefined;
+}
+
+function restoreRawCodexUsage(value: unknown): RawCodexUsage | null | undefined {
+  if (value === null) return null;
+  if (!isUnknownRecord(value)) return undefined;
+  const keys = ["input", "cached", "cacheWrite", "output", "reasoning", "total"] as const;
+  if (
+    keys.some(
+      (key) => typeof value[key] !== "number" || !Number.isFinite(value[key]) || value[key] < 0,
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    input: value.input as number,
+    cached: value.cached as number,
+    cacheWrite: value.cacheWrite as number,
+    output: value.output as number,
+    reasoning: value.reasoning as number,
+    total: value.total as number,
+  };
+}
+
+function restoreCodexParseState(value: unknown): CodexParseState | null {
+  if (!isUnknownRecord(value)) return null;
+  const sessionId = nullableString(value.sessionId);
+  const currentModel = nullableString(value.currentModel);
+  const previousTotals = restoreRawCodexUsage(value.previousTotals);
+  if (
+    sessionId === undefined ||
+    currentModel === undefined ||
+    previousTotals === undefined ||
+    typeof value.isFast !== "boolean" ||
+    typeof value.sawSessionMeta !== "boolean"
+  ) {
+    return null;
+  }
+  let replayGate: CodexReplayGate | null;
+  if (value.replayGate === null) {
+    replayGate = null;
+  } else if (isUnknownRecord(value.replayGate)) {
+    const createdAtSeconds = nullableFiniteNumber(value.replayGate.createdAtSeconds);
+    if (createdAtSeconds === undefined) return null;
+    replayGate = { createdAtSeconds };
+  } else {
+    return null;
+  }
+  return {
+    sessionId,
+    currentModel,
+    previousTotals,
+    isFast: value.isFast,
+    sawSessionMeta: value.sawSessionMeta,
+    replayGate,
+  };
+}
+
+function restoreGrokParseState(value: unknown): GrokParseState | null {
+  if (!isUnknownRecord(value) || !Array.isArray(value.modelByPid)) return null;
+  const modelByPid = new Map<number, string>();
+  for (const entry of value.modelByPid) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "number" ||
+      !Number.isSafeInteger(entry[0]) ||
+      entry[0] < 0 ||
+      typeof entry[1] !== "string"
+    ) {
+      return null;
+    }
+    modelByPid.set(entry[0], entry[1]);
+  }
+  return { modelByPid };
+}
+
+function restoreTokenParseState(
+  provider: ProviderTokenActivityKind,
+  stateJson: string | null,
+): CodexParseState | GrokParseState | null {
+  if (provider !== "codex" && provider !== "grok") return null;
+  if (stateJson === null) return null;
+  let envelope: TokenParseStateEnvelope;
+  try {
+    envelope = JSON.parse(stateJson) as TokenParseStateEnvelope;
+  } catch {
+    return null;
+  }
+  if (
+    !isUnknownRecord(envelope) ||
+    envelope.version !== TOKEN_PARSE_STATE_VERSION ||
+    envelope.provider !== provider
+  ) {
+    return null;
+  }
+  return provider === "codex"
+    ? restoreCodexParseState(envelope.state)
+    : restoreGrokParseState(envelope.state);
+}
+
+function serializeTokenParseState(
+  provider: ProviderTokenActivityKind,
+  codexState: CodexParseState | null,
+  grokState: GrokParseState | null,
+): string | null {
+  if (provider === "codex" && codexState !== null) {
+    return JSON.stringify({
+      version: TOKEN_PARSE_STATE_VERSION,
+      provider,
+      state: codexState,
+    } satisfies TokenParseStateEnvelope);
+  }
+  if (provider === "grok" && grokState !== null) {
+    return JSON.stringify({
+      version: TOKEN_PARSE_STATE_VERSION,
+      provider,
+      state: { modelByPid: [...grokState.modelByPid] },
+    } satisfies TokenParseStateEnvelope);
+  }
+  return null;
+}
+
 function grokModelFromEvent(message: string, context: Record<string, unknown>): string | null {
   switch (message) {
     case "model changed":
@@ -984,6 +1132,53 @@ interface TokenLogSource {
   readonly accepts?: (filename: string) => boolean;
 }
 
+interface TokenEntryInsertRow extends Record<string, unknown> {
+  readonly provider: ProviderTokenActivityKind;
+  readonly entry_key: string;
+  readonly sampled_epoch_ms: number;
+  readonly tokens: number;
+  readonly model: string | null;
+  readonly input_tokens: number;
+  readonly cached_input_tokens: number;
+  readonly cache_write_tokens: number;
+  readonly cache_write_1h_tokens: number;
+  readonly output_tokens: number;
+  readonly recorded_cost_usd: number | null;
+  readonly is_fast: number;
+  readonly dedup_priority: number;
+  readonly uses_long_context: number;
+}
+
+interface TokenFileFingerprint {
+  readonly mtimeMs: number;
+  readonly sizeBytes: number;
+  readonly identity: string | null;
+}
+
+interface TokenFileParseCheckpoint {
+  readonly offsetBytes: number;
+  readonly stateJson: string | null;
+}
+
+interface ParsedTokenSource {
+  readonly entries: ReadonlyArray<ParsedTokenEntry>;
+  readonly checkpoint: TokenFileParseCheckpoint;
+}
+
+interface TokenFileParseInput {
+  readonly offsetBytes: number;
+  readonly stateJson: string | null;
+}
+
+interface KnownTokenFile {
+  readonly path: string;
+  readonly mtime_ms: number;
+  readonly size_bytes: number;
+  readonly parse_offset_bytes: number;
+  readonly parse_state_json: string | null;
+  readonly file_identity: string | null;
+}
+
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const fs = yield* FileSystem.FileSystem;
@@ -1082,11 +1277,11 @@ export const make = Effect.gen(function* () {
           recorded_cost_usd IS NOT NULL,
           day
         ORDER BY
-          day ASC,
-          provider ASC,
-          model ASC,
-          is_fast ASC,
-          uses_long_context ASC,
+          3 ASC,
+          1 ASC,
+          2 ASC,
+          11 ASC,
+          12 ASC,
           recorded_cost_usd IS NOT NULL ASC
       `,
   });
@@ -1223,7 +1418,13 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed((): Array<string> => []),
     );
 
-  const parseSourceFile = (source: TokenLogSource, filePath: string, retentionCutoffMs: number) =>
+  const parseSourceFile = (
+    source: TokenLogSource,
+    filePath: string,
+    retentionCutoffMs: number,
+    fingerprint: TokenFileFingerprint,
+    parseInput: TokenFileParseInput,
+  ) =>
     Effect.gen(function* () {
       const entries: ParsedTokenEntry[] = [];
       if (source.format === "message-json") {
@@ -1231,7 +1432,10 @@ export const make = Effect.gen(function* () {
         const content = yield* fs.readFileString(filePath);
         const parsed = parseOpenCodeMessageFile(content);
         if (parsed !== null) entries.push(parsed);
-        return entries;
+        return {
+          entries,
+          checkpoint: { offsetBytes: fingerprint.sizeBytes, stateJson: null },
+        } satisfies ParsedTokenSource;
       }
       if (source.format === "opencode-sqlite") {
         const rows = yield* Effect.try({
@@ -1245,46 +1449,203 @@ export const make = Effect.gen(function* () {
           });
           if (parsed !== null) entries.push(parsed);
         }
-        return entries;
+        return {
+          entries,
+          checkpoint: { offsetBytes: fingerprint.sizeBytes, stateJson: null },
+        } satisfies ParsedTokenSource;
       }
-      const codexState = source.provider === "codex" ? makeCodexParseState() : null;
-      const grokState = source.provider === "grok" ? makeGrokParseState() : null;
-      // Stream line-by-line so multi-megabyte transcripts never sit in
-      // memory whole; only the (small) parsed entries are collected.
-      yield* fs.stream(filePath).pipe(
-        Stream.decodeText,
-        Stream.splitLines,
-        Stream.runForEach((line) =>
-          Effect.sync(() => {
-            if (source.provider === "claude") {
-              entries.push(...parseClaudeTranscriptEntries(line));
-            } else if (source.provider === "codex" && codexState !== null) {
-              const parsed = parseCodexRolloutLineWithState(line, codexState);
-              if (parsed !== null) entries.push(parsed);
-            } else if (source.provider === "grok" && grokState !== null) {
-              const parsed = parseGrokLogLine(line, grokState);
-              if (parsed !== null) entries.push(parsed);
-            } else if (source.format === "github-copilot-jsonl") {
-              entries.push(...parseGitHubCopilotEventLine(line));
-            }
-          }),
-        ),
-      );
-      return entries;
+
+      const restoredState = restoreTokenParseState(source.provider, parseInput.stateJson);
+      let offsetBytes = parseInput.offsetBytes;
+      let codexState: CodexParseState | null = null;
+      let grokState: GrokParseState | null = null;
+      if (source.provider === "codex") {
+        if (offsetBytes > 0 && restoredState !== null) {
+          codexState = restoredState as CodexParseState;
+        } else {
+          offsetBytes = 0;
+          codexState = makeCodexParseState();
+        }
+      } else if (source.provider === "grok") {
+        if (offsetBytes > 0 && restoredState !== null) {
+          grokState = restoredState as GrokParseState;
+        } else {
+          offsetBytes = 0;
+          grokState = makeGrokParseState();
+        }
+      }
+
+      const parseLine = (line: string) => {
+        if (source.provider === "claude") {
+          entries.push(...parseClaudeTranscriptEntries(line));
+        } else if (source.provider === "codex" && codexState !== null) {
+          const parsed = parseCodexRolloutLineWithState(line, codexState);
+          if (parsed !== null) entries.push(parsed);
+        } else if (source.provider === "grok" && grokState !== null) {
+          const parsed = parseGrokLogLine(line, grokState);
+          if (parsed !== null) entries.push(parsed);
+        } else if (source.format === "github-copilot-jsonl") {
+          entries.push(...parseGitHubCopilotEventLine(line));
+        }
+      };
+
+      const decoder = new TextDecoder();
+      let lineFragments: Uint8Array[] = [];
+      let lineStartOffset = offsetBytes;
+      let consumedBytes = 0;
+      let skipLeadingLf = false;
+      const decodeLine = (tail: Uint8Array): string => {
+        if (lineFragments.length === 0) return decoder.decode(tail);
+        const byteLength =
+          lineFragments.reduce((total, fragment) => total + fragment.byteLength, 0) +
+          tail.byteLength;
+        const line = new Uint8Array(byteLength);
+        let writeOffset = 0;
+        for (const fragment of lineFragments) {
+          line.set(fragment, writeOffset);
+          writeOffset += fragment.byteLength;
+        }
+        line.set(tail, writeOffset);
+        return decoder.decode(line);
+      };
+
+      // Work in bytes so the persisted cursor is exact even when UTF-8 code
+      // points cross filesystem chunks. CR, LF, and CRLF retain the complete
+      // Stream.splitLines delimiter behavior. The stream is bounded to the
+      // fingerprinted size: appends racing this read remain visible to the next
+      // scan instead of advancing the checkpoint beyond parsed state.
+      yield* fs
+        .stream(filePath, {
+          offset: offsetBytes,
+          bytesToRead: fingerprint.sizeBytes - offsetBytes,
+        })
+        .pipe(
+          Stream.runForEach((chunk) =>
+            Effect.sync(() => {
+              const chunkStartOffset = offsetBytes + consumedBytes;
+              let segmentStart = 0;
+              let index = 0;
+              if (skipLeadingLf) {
+                skipLeadingLf = false;
+                if (chunk[0] === 0x0a) {
+                  segmentStart = 1;
+                  index = 1;
+                  lineStartOffset = chunkStartOffset + 1;
+                }
+              }
+
+              for (; index < chunk.length; index += 1) {
+                const byte = chunk[index];
+                if (byte !== 0x0a && byte !== 0x0d) continue;
+                const tail = chunk.subarray(segmentStart, index);
+                parseLine(decodeLine(tail));
+                lineFragments = [];
+
+                if (byte === 0x0d) {
+                  if (index + 1 < chunk.length && chunk[index + 1] === 0x0a) {
+                    index += 1;
+                  } else if (index + 1 === chunk.length) {
+                    skipLeadingLf = true;
+                  }
+                }
+                segmentStart = index + 1;
+                lineStartOffset = chunkStartOffset + segmentStart;
+              }
+              if (segmentStart < chunk.length) {
+                lineFragments.push(chunk.subarray(segmentStart));
+              }
+              consumedBytes += chunk.byteLength;
+            }),
+          ),
+        );
+
+      const hasUnterminatedTail = lineFragments.length > 0;
+      const checkpoint = {
+        offsetBytes: hasUnterminatedTail ? lineStartOffset : fingerprint.sizeBytes,
+        stateJson: serializeTokenParseState(source.provider, codexState, grokState),
+      } satisfies TokenFileParseCheckpoint;
+      if (hasUnterminatedTail) {
+        // Count a complete final record now, but checkpoint before it. If it
+        // was only a concurrent partial write, the next append completes and
+        // replays the whole line; stable event keys absorb a valid replay.
+        parseLine(decodeLine(new Uint8Array()));
+      }
+
+      return { entries, checkpoint } satisfies ParsedTokenSource;
     });
 
-  const scanFile = (source: TokenLogSource, filePath: string, retentionCutoffMs: number) =>
+  const toInsertRow = (source: TokenLogSource, entry: ParsedTokenEntry): TokenEntryInsertRow => ({
+    provider: entry.provider ?? source.provider,
+    entry_key: entry.entryKey,
+    sampled_epoch_ms: entry.epochMs,
+    tokens: entry.tokens,
+    model: entry.model,
+    input_tokens: entry.inputTokens,
+    cached_input_tokens: entry.cachedInputTokens,
+    cache_write_tokens: entry.cacheWriteTokens,
+    cache_write_1h_tokens: entry.cacheWrite1hTokens,
+    output_tokens: entry.outputTokens,
+    recorded_cost_usd: entry.recordedCostUsd,
+    is_fast: entry.isFast ? 1 : 0,
+    dedup_priority: entry.dedupPriority,
+    uses_long_context: entry.usesLongContext ? 1 : 0,
+  });
+
+  const upsertTokenEntries = (rows: ReadonlyArray<TokenEntryInsertRow>) =>
     Effect.gen(function* () {
-      // Stat *before* reading: bytes appended while we read stay newer than
-      // the recorded state, so the next scan re-parses them (INSERT OR
-      // IGNORE absorbs the overlap) instead of skipping them forever.
-      const info = yield* fs.stat(filePath);
-      const mtimeMs = Option.match(info.mtime, {
-        onNone: () => 0,
-        onSome: (mtime) => mtime.getTime(),
-      });
-      const parsed = yield* parseSourceFile(source, filePath, retentionCutoffMs);
-      const entries = parsed.filter((entry) => entry.epochMs >= retentionCutoffMs);
+      for (let offset = 0; offset < rows.length; offset += TOKEN_ENTRY_INSERT_BATCH_SIZE) {
+        const batch = rows.slice(offset, offset + TOKEN_ENTRY_INSERT_BATCH_SIZE);
+        yield* sql`
+          INSERT INTO provider_token_entries ${sql.insert(batch)}
+          ON CONFLICT (provider, entry_key) DO UPDATE SET
+            sampled_epoch_ms = excluded.sampled_epoch_ms,
+            tokens = excluded.tokens,
+            model = excluded.model,
+            input_tokens = excluded.input_tokens,
+            cached_input_tokens = excluded.cached_input_tokens,
+            cache_write_tokens = excluded.cache_write_tokens,
+            cache_write_1h_tokens = excluded.cache_write_1h_tokens,
+            output_tokens = excluded.output_tokens,
+            recorded_cost_usd = COALESCE(
+              excluded.recorded_cost_usd,
+              provider_token_entries.recorded_cost_usd
+            ),
+            is_fast = excluded.is_fast,
+            dedup_priority = excluded.dedup_priority,
+            uses_long_context = excluded.uses_long_context
+          WHERE excluded.dedup_priority >= provider_token_entries.dedup_priority
+        `;
+      }
+    });
+
+  const deleteClaudeEntryKeys = (entryKeys: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      for (let offset = 0; offset < entryKeys.length; offset += TOKEN_ENTRY_DELETE_BATCH_SIZE) {
+        const batch = entryKeys.slice(offset, offset + TOKEN_ENTRY_DELETE_BATCH_SIZE);
+        yield* sql`
+          DELETE FROM provider_token_entries
+          WHERE provider = 'claude'
+            AND ${sql.in("entry_key", batch)}
+        `;
+      }
+    });
+
+  const scanFile = (
+    source: TokenLogSource,
+    filePath: string,
+    fingerprint: TokenFileFingerprint,
+    retentionCutoffMs: number,
+    parseInput: TokenFileParseInput,
+  ) =>
+    Effect.gen(function* () {
+      const parsed = yield* parseSourceFile(
+        source,
+        filePath,
+        retentionCutoffMs,
+        fingerprint,
+        parseInput,
+      );
+      const entries = parsed.entries.filter((entry) => entry.epochMs >= retentionCutoffMs);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           if (source.provider === "codex") {
@@ -1298,100 +1659,78 @@ export const make = Effect.gen(function* () {
                 AND substr(entry_key, ${suffixStart}) NOT GLOB '*[^0-9]*'
             `;
           }
-          for (const entry of entries) {
-            const entryProvider = entry.provider ?? source.provider;
-            const claudeDedup = source.provider === "claude" ? entry.claudeDedup : undefined;
-            if (claudeDedup?.isSidechain === true) {
-              const requestPrefix = claudeRequestEntryPrefix(claudeDedup.groupKey);
-              const legacyRequestKey = `${claudeDedup.groupKey}:${claudeDedup.requestId}`;
-              const parents = yield* sql<{ readonly present: number }>`
-                SELECT 1 AS present
-                FROM provider_token_entries
-                WHERE provider = 'claude'
-                  AND (
-                    substr(entry_key, 1, ${requestPrefix.length}) = ${requestPrefix}
-                    OR entry_key = ${claudeDedup.groupKey}
-                    OR entry_key = ${legacyRequestKey}
-                  )
-                LIMIT 1
-              `;
-              if (parents.length > 0) continue;
-            } else if (claudeDedup !== undefined) {
-              // A real parent always supersedes any sidechain replay for the
-              // same logical message/advisor request, regardless of scan order.
-              yield* sql`
-                DELETE FROM provider_token_entries
-                WHERE provider = 'claude'
-                  AND entry_key = ${claudeSidechainEntryKey(claudeDedup.groupKey)}
-              `;
+          if (source.provider !== "claude") {
+            yield* upsertTokenEntries(entries.map((entry) => toInsertRow(source, entry)));
+          } else {
+            // A real parent wins over a sidechain regardless of scan order.
+            // Resolve parents present in this file in memory, consult persisted
+            // parents only for the remaining sidechains, then perform the
+            // independent writes and legacy cleanup in bounded SQL batches.
+            const parentGroupKeys = new Set(
+              entries.flatMap((entry) =>
+                entry.claudeDedup !== undefined && !entry.claudeDedup.isSidechain
+                  ? [entry.claudeDedup.groupKey]
+                  : [],
+              ),
+            );
+            const eligibleEntries: ParsedTokenEntry[] = [];
+            for (const entry of entries) {
+              const claudeDedup = entry.claudeDedup;
+              if (claudeDedup?.isSidechain === true) {
+                if (parentGroupKeys.has(claudeDedup.groupKey)) continue;
+                const requestPrefix = claudeRequestEntryPrefix(claudeDedup.groupKey);
+                const legacyRequestKey = `${claudeDedup.groupKey}:${claudeDedup.requestId}`;
+                const parents = yield* sql<{ readonly present: number }>`
+                  SELECT 1 AS present
+                  FROM provider_token_entries
+                  WHERE provider = 'claude'
+                    AND (
+                      substr(entry_key, 1, ${requestPrefix.length}) = ${requestPrefix}
+                      OR entry_key = ${claudeDedup.groupKey}
+                      OR entry_key = ${legacyRequestKey}
+                    )
+                  LIMIT 1
+                `;
+                if (parents.length > 0) continue;
+              }
+              eligibleEntries.push(entry);
             }
-            yield* sql`
-              INSERT INTO provider_token_entries (
-                provider,
-                entry_key,
-                sampled_epoch_ms,
-                tokens,
-                model,
-                input_tokens,
-                cached_input_tokens,
-                cache_write_tokens,
-                cache_write_1h_tokens,
-                output_tokens,
-                recorded_cost_usd,
-                is_fast,
-                dedup_priority,
-                uses_long_context
-              )
-              VALUES (
-                ${entryProvider},
-                ${entry.entryKey},
-                ${entry.epochMs},
-                ${entry.tokens},
-                ${entry.model},
-                ${entry.inputTokens},
-                ${entry.cachedInputTokens},
-                ${entry.cacheWriteTokens},
-                ${entry.cacheWrite1hTokens},
-                ${entry.outputTokens},
-                ${entry.recordedCostUsd},
-                ${entry.isFast ? 1 : 0},
-                ${entry.dedupPriority},
-                ${entry.usesLongContext ? 1 : 0}
-              )
-              ON CONFLICT (provider, entry_key) DO UPDATE SET
-                sampled_epoch_ms = excluded.sampled_epoch_ms,
-                tokens = excluded.tokens,
-                model = excluded.model,
-                input_tokens = excluded.input_tokens,
-                cached_input_tokens = excluded.cached_input_tokens,
-                cache_write_tokens = excluded.cache_write_tokens,
-                cache_write_1h_tokens = excluded.cache_write_1h_tokens,
-                output_tokens = excluded.output_tokens,
-                recorded_cost_usd = COALESCE(
-                  excluded.recorded_cost_usd,
-                  provider_token_entries.recorded_cost_usd
-                ),
-                is_fast = excluded.is_fast,
-                dedup_priority = excluded.dedup_priority,
-                uses_long_context = excluded.uses_long_context
-              WHERE excluded.dedup_priority >= provider_token_entries.dedup_priority
-            `;
-            if (claudeDedup !== undefined && !claudeDedup.isSidechain) {
-              const legacyRequestKey = `${claudeDedup.groupKey}:${claudeDedup.requestId}`;
-              yield* sql`
-                DELETE FROM provider_token_entries
-                WHERE provider = 'claude'
-                  AND (
-                    entry_key = ${claudeDedup.groupKey}
-                    OR entry_key = ${legacyRequestKey}
-                  )
-              `;
-            }
+            yield* upsertTokenEntries(eligibleEntries.map((entry) => toInsertRow(source, entry)));
+            yield* deleteClaudeEntryKeys(
+              [...parentGroupKeys].map((groupKey) => claudeSidechainEntryKey(groupKey)),
+            );
+            yield* deleteClaudeEntryKeys(
+              entries.flatMap((entry) => {
+                const claudeDedup = entry.claudeDedup;
+                return claudeDedup !== undefined && !claudeDedup.isSidechain
+                  ? [claudeDedup.groupKey, `${claudeDedup.groupKey}:${claudeDedup.requestId}`]
+                  : [];
+              }),
+            );
           }
           yield* sql`
-            INSERT INTO provider_token_files (path, mtime_ms, size_bytes)
-            VALUES (${filePath}, ${mtimeMs}, ${Number(info.size)})
-            ON CONFLICT (path) DO UPDATE SET mtime_ms = excluded.mtime_ms, size_bytes = excluded.size_bytes
+            INSERT INTO provider_token_files (
+              path,
+              mtime_ms,
+              size_bytes,
+              parse_offset_bytes,
+              parse_state_json,
+              file_identity
+            )
+            VALUES (
+              ${filePath},
+              ${fingerprint.mtimeMs},
+              ${fingerprint.sizeBytes},
+              ${parsed.checkpoint.offsetBytes},
+              ${parsed.checkpoint.stateJson},
+              ${fingerprint.identity}
+            )
+            ON CONFLICT (path) DO UPDATE SET
+              mtime_ms = excluded.mtime_ms,
+              size_bytes = excluded.size_bytes,
+              parse_offset_bytes = excluded.parse_offset_bytes,
+              parse_state_json = excluded.parse_state_json,
+              file_identity = excluded.file_identity
           `;
         }),
       );
@@ -1403,52 +1742,117 @@ export const make = Effect.gen(function* () {
       const retentionCutoffMs = nowMs - USAGE_HISTORY_RETENTION_DAYS * DAY_MS;
       const sources = yield* resolveLogSources(settings);
 
-      const knownFiles = yield* sql<{
-        readonly path: string;
-        readonly mtime_ms: number;
-        readonly size_bytes: number;
-      }>`SELECT path, mtime_ms, size_bytes FROM provider_token_files`;
+      const knownFiles = yield* sql<KnownTokenFile>`
+        SELECT
+          path,
+          mtime_ms,
+          size_bytes,
+          parse_offset_bytes,
+          parse_state_json,
+          file_identity
+        FROM provider_token_files
+      `;
       const knownByPath = new Map(knownFiles.map((row) => [row.path, row]));
 
       const seenPaths = new Set<string>();
       let scannedCount = 0;
       for (const source of sources) {
         const files = yield* listSourceFiles(source);
-        const changed: string[] = [];
         for (const filePath of files) {
           seenPaths.add(filePath);
+        }
+
+        // Large histories contain thousands of independent files. Serial stat
+        // calls made even a no-op scan scale with filesystem round trips.
+        const fingerprints = yield* Effect.forEach(
+          files,
+          (filePath) =>
+            fs.stat(filePath).pipe(
+              Effect.map((info) => ({
+                filePath,
+                fingerprint: {
+                  mtimeMs: Option.match(info.mtime, {
+                    onNone: () => 0,
+                    onSome: (mtime) => mtime.getTime(),
+                  }),
+                  sizeBytes: Number(info.size),
+                  identity: Option.match(info.ino, {
+                    onNone: () =>
+                      Option.match(info.birthtime, {
+                        onNone: () => null,
+                        onSome: (birthtime) => `birth:${info.dev}:${birthtime.getTime()}`,
+                      }),
+                    onSome: (ino) => `inode:${info.dev}:${ino}`,
+                  }),
+                },
+              })),
+              Effect.option,
+            ),
+          { concurrency: TOKEN_SYNC_STAT_CONCURRENCY },
+        );
+        const changed: Array<{
+          readonly filePath: string;
+          readonly fingerprint: TokenFileFingerprint;
+          readonly parseInput: TokenFileParseInput;
+        }> = [];
+        for (const candidate of fingerprints) {
+          if (Option.isNone(candidate)) continue;
+          const { filePath, fingerprint } = candidate.value;
           const known = knownByPath.get(filePath);
-          const info = yield* fs.stat(filePath).pipe(Effect.option);
-          if (Option.isNone(info)) continue;
-          const mtimeMs = Option.match(info.value.mtime, {
-            onNone: () => 0,
-            onSome: (mtime) => mtime.getTime(),
-          });
           // OpenCode writes current messages through SQLite WAL. The main DB
           // fingerprint can remain unchanged until checkpoint, so query the
           // small set of DBs on every sync. A user-forced rescan likewise
           // bypasses fingerprints for every source.
           if (source.format === "opencode-sqlite") {
-            changed.push(filePath);
+            changed.push({
+              ...candidate.value,
+              parseInput: { offsetBytes: 0, stateJson: null },
+            });
             continue;
           }
           // A non-database file whose newest write predates the retention
           // window cannot contain in-window entries it has not contributed.
-          if (mtimeMs < retentionCutoffMs) continue;
+          if (fingerprint.mtimeMs < retentionCutoffMs) continue;
           if (
             !force &&
             known &&
-            known.mtime_ms === mtimeMs &&
-            known.size_bytes === Number(info.value.size)
+            known.mtime_ms === fingerprint.mtimeMs &&
+            known.size_bytes === fingerprint.sizeBytes
           ) {
             continue;
           }
-          changed.push(filePath);
+          const supportsTailParsing =
+            source.format === "jsonl" || source.format === "github-copilot-jsonl";
+          const checkpointIsValid =
+            known !== undefined &&
+            known.parse_offset_bytes >= 0 &&
+            known.parse_offset_bytes <= known.size_bytes &&
+            known.parse_offset_bytes <= fingerprint.sizeBytes &&
+            (source.provider !== "codex" && source.provider !== "grok"
+              ? true
+              : restoreTokenParseState(source.provider, known.parse_state_json) !== null);
+          const isAppend =
+            !force &&
+            supportsTailParsing &&
+            known !== undefined &&
+            fingerprint.sizeBytes > known.size_bytes &&
+            fingerprint.identity !== null &&
+            fingerprint.identity === known.file_identity &&
+            checkpointIsValid;
+          changed.push({
+            ...candidate.value,
+            parseInput: isAppend
+              ? {
+                  offsetBytes: known.parse_offset_bytes,
+                  stateJson: known.parse_state_json,
+                }
+              : { offsetBytes: 0, stateJson: null },
+          });
         }
         yield* Effect.forEach(
           changed,
-          (filePath) =>
-            scanFile(source, filePath, retentionCutoffMs).pipe(
+          ({ filePath, fingerprint, parseInput }) =>
+            scanFile(source, filePath, fingerprint, retentionCutoffMs, parseInput).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to scan provider token log", { filePath, cause }),
               ),
