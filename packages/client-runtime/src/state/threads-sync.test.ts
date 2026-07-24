@@ -113,6 +113,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   readonly cached?: OrchestrationThread;
   readonly completionMarker?: boolean;
   readonly snapshotLoadResult?: ThreadSnapshotLoadResult;
+  readonly snapshotLoadResults?: ReadonlyArray<ThreadSnapshotLoadResult>;
 }) {
   const inputs = yield* Queue.unbounded<TestThreadInput>();
   const observed = yield* Queue.unbounded<EnvironmentThreadState>();
@@ -186,8 +187,14 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
       ThreadSnapshotLoader,
       ThreadSnapshotLoader.of({
         load: () =>
-          Ref.update(snapshotLoadCount, (count) => count + 1).pipe(
-            Effect.as(options?.snapshotLoadResult ?? { kind: "unavailable" as const }),
+          Ref.updateAndGet(snapshotLoadCount, (count) => count + 1).pipe(
+            Effect.map((loadCount) => {
+              const results = options?.snapshotLoadResults;
+              return (
+                results?.[Math.min(loadCount - 1, results.length - 1)] ??
+                options?.snapshotLoadResult ?? { kind: "unavailable" as const }
+              );
+            }),
           ),
       }),
     ),
@@ -410,29 +417,99 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("parks a terminal HTTP-missing thread without opening a retrying socket stream", () =>
+  it.effect("falls back to the socket when a newly created thread is not in HTTP yet", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         completionMarker: true,
         snapshotLoadResult: { kind: "missing" },
       });
-      const missing = yield* awaitThreadState(
-        harness.observed,
-        (value) => value.status === "deleted",
-      );
-
-      expect(Option.isNone(missing.data)).toBe(true);
-      expect(yield* Ref.get(harness.snapshotLoadCount)).toBe(1);
-      expect(yield* Ref.get(harness.subscriptionCount)).toBe(0);
-
-      yield* TestClock.adjust("2 seconds");
-      yield* harness.replaceSession;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) === 1) {
+          break;
+        }
         yield* Effect.yieldNow;
       }
 
       expect(yield* Ref.get(harness.snapshotLoadCount)).toBe(1);
-      expect(yield* Ref.get(harness.subscriptionCount)).toBe(0);
+      expect(yield* Ref.get(harness.subscriptionCount)).toBe(1);
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
+      expect(yield* Ref.get(harness.lastRequestCompletionMarker)).toBe(true);
+
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* Queue.offer(harness.inputs, synchronized());
+      const recovered = yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isSome(value.data),
+      );
+
+      expect(Option.getOrThrow(recovered.data)).toEqual(BASE_THREAD);
+      expect(yield* Ref.get(harness.removedThreads)).toEqual([]);
+    }),
+  );
+
+  it.effect("recovers without reload when both initial snapshot lookups race thread creation", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        completionMarker: true,
+        snapshotLoadResults: [
+          { kind: "missing" },
+          {
+            kind: "found",
+            snapshot: {
+              snapshotSequence: CACHED_SNAPSHOT_SEQUENCE,
+              thread: BASE_THREAD,
+            },
+          },
+        ],
+      });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) === 1) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      // The socket can observe the same lagging detail projection as HTTP.
+      // Its expected failure must drive a fresh bootstrap attempt.
+      yield* Queue.offer(harness.inputs, new Error("thread not found yet"));
+      yield* awaitThreadState(harness.observed, (value) => Option.isSome(value.error));
+      yield* TestClock.adjust("250 millis");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) === 2) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      expect(yield* Ref.get(harness.snapshotLoadCount)).toBe(2);
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+
+      yield* Queue.offer(harness.inputs, synchronized());
+      const recovered = yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isSome(value.data),
+      );
+
+      expect(Option.getOrThrow(recovered.data)).toEqual(BASE_THREAD);
+      expect(Option.isNone(recovered.error)).toBe(true);
+    }),
+  );
+
+  it.effect("keeps an authoritative live deletion terminal across session replacement", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* Queue.offer(harness.inputs, deleted());
+      yield* awaitThreadState(harness.observed, (value) => value.status === "deleted");
+
+      expect(yield* Ref.get(harness.subscriptionCount)).toBe(1);
+      yield* harness.replaceSession;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      expect(yield* Ref.get(harness.subscriptionCount)).toBe(1);
+      expect(yield* Ref.get(harness.snapshotLoadCount)).toBe(0);
     }),
   );
 

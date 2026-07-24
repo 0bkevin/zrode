@@ -105,6 +105,7 @@ describe("buildTurnStartParams", () => {
       sandboxPolicy: {
         type: "dangerFullAccess",
       },
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -147,6 +148,7 @@ describe("buildTurnStartParams", () => {
       sandboxPolicy: {
         type: "workspaceWrite",
       },
+      summary: "auto",
       input: [
         {
           type: "text",
@@ -184,6 +186,7 @@ describe("buildTurnStartParams", () => {
       sandboxPolicy: {
         type: "readOnly",
       },
+      summary: "auto",
       input: [
         {
           type: "text",

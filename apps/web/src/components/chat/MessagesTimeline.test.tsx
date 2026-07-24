@@ -227,6 +227,35 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders the authoritative streaming assistant text directly", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        timelineEntries={[
+          {
+            id: "assistant-streaming-entry",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("assistant-streaming"),
+              role: "assistant",
+              text: "STREAMING-AUTHORITATIVE-TEXT",
+              turnId: TurnId.make("turn-streaming"),
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("STREAMING-AUTHORITATIVE-TEXT");
+  });
+
   it("uses strict LegendList isAtEnd when deciding whether the live edge is visible", async () => {
     const {
       resolveTimelineIsAtEnd,
@@ -484,6 +513,39 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Context compacted");
     expect(markup).toContain("Work Log");
+  });
+
+  it("keeps thinking output visible and expanded in the timeline", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        timelineEntries={[
+          {
+            id: "reasoning:thread-1:item-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "reasoning:thread-1:item-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Thinking",
+              detail: "Inspecting the live event path.",
+              tone: "thinking",
+              streaming: false,
+              sourceActivityKind: "reasoning.updated",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Thinking");
+    expect(markup).toContain("Inspecting the live event path.");
+    expect(markup).toContain('aria-label="Toggle thinking details"');
+    expect(markup).not.toContain("1 tool call");
+    expect(markup.match(/>Thinking</g)).toHaveLength(1);
   });
 
   it("renders retry control for retryable turn-start failures", async () => {

@@ -56,6 +56,19 @@ describe("ClientSettings nerd stats", () => {
   });
 });
 
+describe("ServerSettings assistant output", () => {
+  it("streams assistant output by default", () => {
+    expect(decodeServerSettings({}).enableAssistantStreaming).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.enableAssistantStreaming).toBe(true);
+  });
+
+  it("preserves an explicit buffered-output preference", () => {
+    expect(decodeServerSettings({ enableAssistantStreaming: false }).enableAssistantStreaming).toBe(
+      false,
+    );
+  });
+});
+
 describe("ClientSettings file explorer position", () => {
   it("defaults the file explorer to the right", () => {
     expect(decodeClientSettings({}).fileExplorerPosition).toBe("right");

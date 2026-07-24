@@ -767,6 +767,31 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("derives streamed reasoning activities as visible thinking output", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "reasoning:thread-1:item-1",
+        kind: "reasoning.updated",
+        tone: "info",
+        summary: "Thinking",
+        payload: {
+          detail: "Inspecting the live event path.",
+          streamKind: "reasoning_summary_text",
+          streaming: true,
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      id: "reasoning:thread-1:item-1",
+      label: "Thinking",
+      detail: "Inspecting the live event path.",
+      tone: "thinking",
+      streaming: true,
+      sourceActivityKind: "reasoning.updated",
+    });
+  });
+
   it("uses payload summary as label for task entries when available", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

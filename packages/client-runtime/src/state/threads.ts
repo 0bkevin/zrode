@@ -390,14 +390,14 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             ),
           );
           const httpSnapshot = yield* snapshotLoader.load(prepared, threadId);
-          if (httpSnapshot.kind === "missing") {
-            yield* setDeleted();
-            return yield* Effect.never;
-          }
           if (httpSnapshot.kind === "found") {
             yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.snapshot });
             current = yield* SubscriptionRef.get(state);
           }
+          // A missing HTTP projection is not authoritative during thread
+          // creation: the live shell event can arrive before the async detail
+          // projection. Fall through without a cursor so the socket can load
+          // the snapshot (or retry until the projection catches up).
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);

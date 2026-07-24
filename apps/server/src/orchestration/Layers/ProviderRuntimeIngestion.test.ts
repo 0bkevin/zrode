@@ -52,7 +52,12 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
-  return ServerSettingsService.layerTest(overrides);
+  // Most ingestion tests exercise the buffered compatibility path. Production
+  // defaults to streaming; tests opt into that path explicitly where relevant.
+  return ServerSettingsService.layerTest({
+    enableAssistantStreaming: false,
+    ...overrides,
+  });
 }
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
@@ -869,6 +874,153 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(message?.text).toBe("hello world");
     expect(message?.streaming).toBe(false);
+  });
+
+  it("projects reasoning deltas as one live thinking activity and prefers summaries", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-raw"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "raw provider reasoning",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-summary-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        streamKind: "reasoning_summary_text",
+        delta: "Checking the ",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-summary-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        streamKind: "reasoning_summary_text",
+        delta: "stream path.",
+      },
+    });
+
+    const streamingThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity: ProviderRuntimeTestActivity) => {
+        if (activity.id !== "reasoning:thread-1:item-reasoning") return false;
+        const payload =
+          activity.payload && typeof activity.payload === "object"
+            ? (activity.payload as Record<string, unknown>)
+            : {};
+        return payload.detail === "Checking the stream path." && payload.streaming === true;
+      }),
+    );
+    expect(
+      streamingThread.activities.filter(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "reasoning:thread-1:item-reasoning",
+      ),
+    ).toHaveLength(1);
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-reasoning-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+        detail: "raw completion detail",
+      },
+    });
+
+    const completedThread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity: ProviderRuntimeTestActivity) => {
+        if (
+          activity.id !== "reasoning:thread-1:item-reasoning" ||
+          activity.kind !== "reasoning.completed"
+        ) {
+          return false;
+        }
+        const payload =
+          activity.payload && typeof activity.payload === "object"
+            ? (activity.payload as Record<string, unknown>)
+            : {};
+        return payload.streaming === false;
+      }),
+    );
+    const reasoningActivity = completedThread.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "reasoning:thread-1:item-reasoning",
+    );
+    expect(reasoningActivity?.payload).toMatchObject({
+      detail: "Checking the stream path.",
+      streamKind: "reasoning_summary_text",
+      streaming: false,
+    });
+  });
+
+  it("does not persist an empty thinking activity when the provider emits no reasoning text", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-reasoning-empty-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-empty"),
+      itemId: asItemId("item-reasoning-empty"),
+      payload: {
+        itemType: "reasoning",
+        status: "inProgress",
+        title: "Reasoning",
+      },
+    });
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-reasoning-empty-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-empty"),
+      itemId: asItemId("item-reasoning-empty"),
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+      },
+    });
+
+    await harness.drain();
+    const completedThread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === "thread-1",
+    );
+    expect(
+      completedThread?.activities.filter(
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "reasoning:thread-1:item-reasoning-empty",
+      ),
+    ).toHaveLength(0);
   });
 
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {

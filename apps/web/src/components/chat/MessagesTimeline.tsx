@@ -68,7 +68,6 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesTree } from "./ChangedFilesTree";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
-import { StreamingAssistantMarkdown } from "./StreamingAssistantMarkdown";
 import type { AssistantNerdStats } from "./messageNerdStats";
 import {
   computeIncrementalMessagesTimelineRows,
@@ -1121,8 +1120,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <StreamingAssistantMarkdown
-          key={row.message.id}
+        <ChatMarkdown
           text={messageText}
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
@@ -1328,21 +1326,29 @@ const WorkGroupSection = memo(function WorkGroupSection({
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
   const nonEmptyEntries = useMemo(
-    () => groupedEntries.filter((entry) => !workEntryIndicatesToolNeutralStatus(entry)),
+    () =>
+      groupedEntries.filter(
+        (entry) => entry.tone === "thinking" || !workEntryIndicatesToolNeutralStatus(entry),
+      ),
     [groupedEntries],
   );
-  const onlyToolEntries = nonEmptyEntries.every((entry) => workLogEntryIsToolLike(entry));
-  const groupLabel = onlyToolEntries
-    ? nonEmptyEntries.length === 1
-      ? "1 tool call"
-      : `${nonEmptyEntries.length} tool calls`
-    : "Work Log";
+  const onlyThinkingEntries = nonEmptyEntries.every((entry) => entry.tone === "thinking");
+  const onlyToolEntries = nonEmptyEntries.every(
+    (entry) => entry.tone !== "thinking" && workLogEntryIsToolLike(entry),
+  );
+  const groupLabel = onlyThinkingEntries
+    ? "Thinking"
+    : onlyToolEntries
+      ? nonEmptyEntries.length === 1
+        ? "1 tool call"
+        : `${nonEmptyEntries.length} tool calls`
+      : "Work Log";
 
   if (nonEmptyEntries.length === 0) return null;
 
   return (
     <section className="-mx-1 space-y-0.5 px-1 py-0.5" aria-label={groupLabel}>
-      {!onlyToolEntries && (
+      {!onlyToolEntries && !onlyThinkingEntries && (
         <p className="px-0.5 pb-0.5 font-medium text-[11px] text-muted-foreground/65">
           {groupLabel}
         </p>
@@ -2141,7 +2147,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const { workEntry, workspaceRoot } = props;
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
-  const [expanded, setExpanded] = useState(false);
+  const isThinking = workEntry.tone === "thinking";
+  const [expanded, setExpanded] = useState(isThinking);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
@@ -2176,10 +2183,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       ? "font-medium text-destructive"
       : "font-medium text-foreground/82";
   const turnSettled = !activity.activeTurnInProgress;
-  const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
+  const showNeutralIndicator =
+    !isThinking && !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
   const showSuccessIndicator =
-    workEntryIndicatesToolSuccess(workEntry) ||
-    (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+    !isThinking &&
+    (workEntryIndicatesToolSuccess(workEntry) ||
+      (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry)));
   const retryMessageId = resolveRetryableTurnStartFailureMessageId(
     workEntry,
     ctx.retryableFailedTurnTargetsByActivityId,
@@ -2190,7 +2199,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     ? {
         role: "button" as const,
         tabIndex: 0 as const,
-        "aria-label": displayText,
+        "aria-label": isThinking ? "Toggle thinking details" : displayText,
         onClick: () => setExpanded((v) => !v),
         onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -2242,7 +2251,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               ) : null}
             </span>
             <span className="flex size-4 shrink-0 items-center justify-center">
-              {showFailedIndicator ? (
+              {isThinking && workEntry.streaming && activity.activeTurnInProgress ? (
+                <span
+                  className="size-1.5 rounded-full bg-muted-foreground/55 animate-pulse"
+                  aria-label="Thinking in progress"
+                />
+              ) : showFailedIndicator ? (
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -2317,13 +2331,26 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       </div>
       {expanded && canExpand && expandedBody ? (
         <div
-          className="mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5"
+          className={cn(
+            "mt-1 ms-7 cursor-default border-s border-border/45 ps-3 pt-0.5",
+            isThinking && "max-h-72 overflow-y-auto pe-2 opacity-80",
+          )}
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
-          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
-            {expandedBody}
-          </pre>
+          {isThinking ? (
+            <ChatMarkdown
+              text={expandedBody}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              isStreaming={Boolean(workEntry.streaming && activity.activeTurnInProgress)}
+              skills={ctx.skills}
+            />
+          ) : (
+            <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+              {expandedBody}
+            </pre>
+          )}
         </div>
       ) : null}
     </div>

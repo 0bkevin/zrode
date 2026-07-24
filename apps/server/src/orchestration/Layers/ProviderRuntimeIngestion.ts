@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   type OrchestrationMessage,
@@ -54,8 +55,17 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
+const REASONING_STREAM_BY_KEY_CACHE_CAPACITY = 10_000;
+const REASONING_STREAM_BY_KEY_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+const MAX_REASONING_PRESENTATION_CHARS = 64_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.ZRODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+
+interface ReasoningStreamState {
+  readonly text: string;
+  readonly createdAt: string;
+  readonly streamKind: "reasoning_text" | "reasoning_summary_text";
+}
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -196,6 +206,25 @@ function proposedPlanIdFromEvent(event: ProviderRuntimeEvent, threadId: ThreadId
     return `plan:${threadId}:item:${event.itemId}`;
   }
   return `plan:${threadId}:event:${event.eventId}`;
+}
+
+function reasoningStreamKey(event: ProviderRuntimeEvent, threadId: ThreadId): string {
+  return `${threadId}:${event.itemId ?? event.turnId ?? "unscoped"}`;
+}
+
+function reasoningActivityId(event: ProviderRuntimeEvent, threadId: ThreadId): EventId {
+  return EventId.make(`reasoning:${reasoningStreamKey(event, threadId)}`);
+}
+
+function appendReasoningPresentationText(current: string, delta: string): string {
+  if (current.length >= MAX_REASONING_PRESENTATION_CHARS) {
+    return current;
+  }
+  const next = `${current}${delta}`;
+  if (next.length <= MAX_REASONING_PRESENTATION_CHARS) {
+    return next;
+  }
+  return `${next.slice(0, MAX_REASONING_PRESENTATION_CHARS)}\n\n[Thinking output truncated]`;
 }
 
 function assistantSegmentBaseKeyFromEvent(event: ProviderRuntimeEvent): string {
@@ -742,6 +771,13 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
 
+  const reasoningStreamByKey = yield* Cache.make<string, ReasoningStreamState>({
+    capacity: REASONING_STREAM_BY_KEY_CACHE_CAPACITY,
+    timeToLive: REASONING_STREAM_BY_KEY_TTL,
+    lookup: () =>
+      Effect.die(new Error("reasoning stream state must be initialized before it is read")),
+  });
+
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
       .getThreadDetailById(threadId)
@@ -1166,6 +1202,7 @@ const make = Effect.gen(function* () {
       const turnKeys = Array.from(yield* Cache.keys(turnMessageIdsByTurnKey));
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
+      const reasoningStreamKeys = Array.from(yield* Cache.keys(reasoningStreamByKey));
       yield* Effect.forEach(
         turnKeys,
         (key) =>
@@ -1199,6 +1236,12 @@ const make = Effect.gen(function* () {
           key.startsWith(proposedPlanPrefix)
             ? Cache.invalidate(bufferedProposedPlanById, key)
             : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        reasoningStreamKeys,
+        (key) =>
+          key.startsWith(prefix) ? Cache.invalidate(reasoningStreamByKey, key) : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
     });
@@ -1459,6 +1502,15 @@ const make = Effect.gen(function* () {
         event.type === "content.delta" && event.payload.streamKind === "assistant_text"
           ? event.payload.delta
           : undefined;
+      const reasoningDelta =
+        event.type === "content.delta" &&
+        (event.payload.streamKind === "reasoning_text" ||
+          event.payload.streamKind === "reasoning_summary_text")
+          ? {
+              text: event.payload.delta,
+              streamKind: event.payload.streamKind,
+            }
+          : undefined;
       const proposedPlanDelta =
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
 
@@ -1498,6 +1550,75 @@ const make = Effect.gen(function* () {
             messageId: assistantMessageId,
             delta: assistantDelta,
             ...(turnId ? { turnId } : {}),
+            createdAt: now,
+          });
+        }
+      }
+
+      if (reasoningDelta && reasoningDelta.text.length > 0) {
+        const key = reasoningStreamKey(event, thread.id);
+        const cachedState = yield* Cache.getOption(reasoningStreamByKey, key);
+        const activityId = reasoningActivityId(event, thread.id);
+        const detailedThread =
+          Option.isNone(cachedState) && loadedThreadDetail === undefined
+            ? yield* getLoadedThreadDetail()
+            : loadedThreadDetail;
+        const projectedActivity = detailedThread?.activities.find(
+          (activity) => activity.id === activityId,
+        );
+        const projectedPayload =
+          projectedActivity?.payload &&
+          typeof projectedActivity.payload === "object" &&
+          "detail" in projectedActivity.payload
+            ? (projectedActivity.payload as { detail?: unknown; streamKind?: unknown })
+            : undefined;
+        const projectedStreamKind =
+          projectedPayload?.streamKind === "reasoning_summary_text"
+            ? "reasoning_summary_text"
+            : projectedPayload?.streamKind === "reasoning_text"
+              ? "reasoning_text"
+              : undefined;
+        const existingState = Option.getOrUndefined(cachedState) ?? {
+          text: typeof projectedPayload?.detail === "string" ? projectedPayload.detail : "",
+          createdAt: projectedActivity?.createdAt ?? now,
+          streamKind: projectedStreamKind ?? reasoningDelta.streamKind,
+        };
+
+        // Prefer provider-authored reasoning summaries over raw reasoning when
+        // a provider supplies both channels for the same item.
+        if (
+          existingState.streamKind !== "reasoning_summary_text" ||
+          reasoningDelta.streamKind === "reasoning_summary_text"
+        ) {
+          const switchingToSummary =
+            existingState.streamKind === "reasoning_text" &&
+            reasoningDelta.streamKind === "reasoning_summary_text";
+          const nextState: ReasoningStreamState = {
+            text: appendReasoningPresentationText(
+              switchingToSummary ? "" : existingState.text,
+              reasoningDelta.text,
+            ),
+            createdAt: existingState.createdAt,
+            streamKind: reasoningDelta.streamKind,
+          };
+          yield* Cache.set(reasoningStreamByKey, key, nextState);
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "reasoning-presentation-update"),
+            threadId: thread.id,
+            activity: {
+              id: activityId,
+              createdAt: nextState.createdAt,
+              tone: "info",
+              kind: "reasoning.updated",
+              summary: "Thinking",
+              payload: {
+                detail: nextState.text,
+                streamKind: nextState.streamKind,
+                streaming: true,
+              },
+              turnId: eventTurnId ?? null,
+            },
             createdAt: now,
           });
         }
@@ -1621,6 +1742,55 @@ const make = Effect.gen(function* () {
         if (turnId) {
           yield* clearAssistantSegmentStateForTurn(thread.id, turnId);
         }
+      }
+
+      if (event.type === "item.completed" && event.payload.itemType === "reasoning") {
+        const key = reasoningStreamKey(event, thread.id);
+        const cachedState = yield* Cache.getOption(reasoningStreamByKey, key);
+        const activityId = reasoningActivityId(event, thread.id);
+        const detailedThread = yield* getLoadedThreadDetail();
+        const projectedActivity = detailedThread?.activities.find(
+          (activity) => activity.id === activityId,
+        );
+        const projectedPayload =
+          projectedActivity?.payload &&
+          typeof projectedActivity.payload === "object" &&
+          "detail" in projectedActivity.payload
+            ? (projectedActivity.payload as { detail?: unknown; streamKind?: unknown })
+            : undefined;
+        const state = Option.getOrUndefined(cachedState);
+        const detail =
+          state?.text ??
+          (typeof projectedPayload?.detail === "string"
+            ? projectedPayload.detail
+            : (event.payload.detail ?? ""));
+        if (state !== undefined || projectedActivity !== undefined || detail.trim().length > 0) {
+          const streamKind =
+            state?.streamKind ??
+            (projectedPayload?.streamKind === "reasoning_summary_text"
+              ? "reasoning_summary_text"
+              : "reasoning_text");
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "reasoning-presentation-complete"),
+            threadId: thread.id,
+            activity: {
+              id: activityId,
+              createdAt: state?.createdAt ?? projectedActivity?.createdAt ?? now,
+              tone: "info",
+              kind: "reasoning.completed",
+              summary: "Thinking",
+              payload: {
+                detail,
+                streamKind,
+                streaming: false,
+              },
+              turnId: eventTurnId ?? null,
+            },
+            createdAt: now,
+          });
+        }
+        yield* Cache.invalidate(reasoningStreamByKey, key);
       }
 
       if (proposedPlanCompletion) {
