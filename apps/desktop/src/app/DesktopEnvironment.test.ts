@@ -53,6 +53,8 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.isDevelopment, true);
       assert.equal(environment.appDataDirectory, "/Users/alice/Library/Application Support");
       assert.equal(environment.baseDir, "/tmp/t3");
+      assert.equal(environment.legacyBaseDir, "/Users/alice/.t3");
+      assert.equal(environment.usesDefaultBaseDir, false);
       assert.equal(environment.stateDir, "/tmp/t3/dev");
       assert.equal(environment.desktopSettingsPath, "/tmp/t3/dev/desktop-settings.json");
       assert.equal(environment.clientSettingsPath, "/tmp/t3/dev/client-settings.json");
@@ -95,6 +97,17 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
       assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
       assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
+    }),
+  );
+
+  it.effect("isolates the default production state from T3 Code", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment();
+
+      assert.equal(environment.baseDir, "/Users/alice/.zrode");
+      assert.equal(environment.legacyBaseDir, "/Users/alice/.t3");
+      assert.equal(environment.usesDefaultBaseDir, true);
+      assert.equal(environment.stateDir, "/Users/alice/.zrode/userdata");
     }),
   );
 

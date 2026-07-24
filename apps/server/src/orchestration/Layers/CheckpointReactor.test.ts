@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import {
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -21,6 +22,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as Encoding from "effect/Encoding";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -1236,6 +1238,70 @@ describe("CheckpointReactor", () => {
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
     ).toBe(false);
+  });
+
+  it("reads legacy T3 checkpoints without deleting their refs during rollback", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const encodedThreadId = Encoding.encodeBase64Url(threadId);
+    const legacyTurnOne = CheckpointRef.make(`refs/t3/checkpoints/${encodedThreadId}/turn/1`);
+    const legacyTurnTwo = CheckpointRef.make(`refs/t3/checkpoints/${encodedThreadId}/turn/2`);
+
+    runGit(harness.cwd, ["update-ref", legacyTurnOne, checkpointRefForThreadTurn(threadId, 1)]);
+    runGit(harness.cwd, ["update-ref", legacyTurnTwo, checkpointRefForThreadTurn(threadId, 2)]);
+
+    await runtime!.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-legacy-checkpoints"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    for (const [turnCount, checkpointRef] of [
+      [1, legacyTurnOne],
+      [2, legacyTurnTwo],
+    ] as const) {
+      await runtime!.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`cmd-diff-legacy-${turnCount}`),
+          threadId,
+          turnId: asTurnId(`turn-${turnCount}`),
+          completedAt: createdAt,
+          checkpointRef,
+          status: "ready",
+          files: [],
+          checkpointTurnCount: turnCount,
+          createdAt,
+        }),
+      );
+    }
+
+    await runtime!.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-revert-legacy-checkpoints"),
+        threadId,
+        turnCount: 1,
+        createdAt,
+      }),
+    );
+
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    expect(gitRefExists(harness.cwd, legacyTurnOne)).toBe(true);
+    expect(gitRefExists(harness.cwd, legacyTurnTwo)).toBe(true);
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
   });
 
   it("restores checkpoint and starts a new turn for last user message edits", async () => {

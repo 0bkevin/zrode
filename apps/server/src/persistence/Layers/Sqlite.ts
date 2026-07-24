@@ -33,6 +33,10 @@ const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    // A desktop update or a second local client can briefly hold SQLite's
+    // writer lock. Wait for that bounded transient window instead of crashing
+    // the backend immediately and forcing the UI into a reconnect loop.
+    yield* sql`PRAGMA busy_timeout = 10000;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* runMigrations();

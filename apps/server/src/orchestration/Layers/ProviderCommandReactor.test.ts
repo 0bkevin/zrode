@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -284,6 +285,9 @@ describe("ProviderCommandReactor", () => {
     readonly interruptTurn?: ProviderServiceShape["interruptTurn"];
     readonly checkpointOperations?: string[];
     readonly checkpointCaptureFailure?: boolean;
+    readonly startSessionEffect?: (
+      session: ProviderSession,
+    ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -298,6 +302,7 @@ describe("ProviderCommandReactor", () => {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",
     };
+    const startSessionEffect = input?.startSessionEffect;
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -351,8 +356,13 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
         updatedAt: now,
       };
-      runtimeSessions.push(session);
-      return Effect.succeed(session);
+      return (startSessionEffect?.(session) ?? Effect.succeed(session)).pipe(
+        Effect.tap((startedSession) =>
+          Effect.sync(() => {
+            runtimeSessions.push(startedSession);
+          }),
+        ),
+      );
     });
     const sendTurn = vi.fn((sendInput: Parameters<ProviderServiceShape["sendTurn"]>[0]) =>
       (input?.sendTurn
@@ -631,8 +641,85 @@ describe("ProviderCommandReactor", () => {
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
+    expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect("projects starting before a slow provider session finishes", () =>
+    Effect.gen(function* () {
+      const releaseStart = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          startSessionEffect: (session) => Deferred.await(releaseStart).pipe(Effect.as(session)),
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-slow-provider"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-slow-provider"),
+          role: "user",
+          text: "start slowly",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 1));
+      const duringStartup = yield* Effect.promise(() => harness.readModel());
+      expect(
+        duringStartup.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
+          ?.status,
+      ).toBe("starting");
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+
+      yield* Deferred.succeed(releaseStart, undefined);
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+    }),
+  );
+
+  effectIt.effect("projects a terminal error when the first provider startup fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          startSessionEffect: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "thread.start",
+                detail: "deterministic startup failure",
+              }),
+            ),
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-provider-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-provider-failure"),
+          role: "user",
+          text: "fail once",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() => harness.drain());
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session?.status).toBe("error");
+      expect(thread?.session?.lastError).toContain("deterministic startup failure");
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    }),
+  );
 
   it("captures the exact turn-start baseline before sending work to the provider", async () => {
     const checkpointOperations: string[] = [];
@@ -2267,6 +2354,118 @@ describe("ProviderCommandReactor", () => {
           },
         ],
       ]);
+    }),
+  );
+
+  effectIt.effect("does not let a late failed start clobber a newer restarted turn", () =>
+    Effect.gen(function* () {
+      const releaseFirstStart = yield* Deferred.make<void>();
+      let sendCount = 0;
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurn: () => {
+            sendCount += 1;
+            if (sendCount === 1) {
+              return Deferred.await(releaseFirstStart).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: "codex",
+                      method: "thread.turn.start",
+                      detail: "late failure from the retired start",
+                    }),
+                  ),
+                ),
+              );
+            }
+            return Effect.succeed({
+              threadId: ThreadId.make("thread-1"),
+              turnId: asTurnId("turn-newer-after-restart"),
+            });
+          },
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-old-slow-start"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-old-slow-start"),
+          role: "user",
+          text: "old slow start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-stop-old-slow-start"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.stopSession.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-new-start-after-stop"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-new-start-after-stop"),
+          role: "user",
+          text: "new start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-newer-turn-running"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-newer-after-restart"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:03.000Z",
+        },
+        createdAt: "2026-01-01T00:00:03.000Z",
+      });
+
+      yield* Deferred.succeed(releaseFirstStart, undefined);
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const readModel = await harness.readModel();
+          return (
+            readModel.threads
+              .find((entry) => entry.id === ThreadId.make("thread-1"))
+              ?.activities.some(
+                (activity) =>
+                  activity.kind === "provider.turn.start.failed" &&
+                  typeof activity.payload === "object" &&
+                  activity.payload !== null &&
+                  (activity.payload as Record<string, unknown>).messageId ===
+                    "message-old-slow-start",
+              ) === true
+          );
+        }),
+      );
+
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session?.status).toBe("running");
+      expect(thread?.session?.activeTurnId).toBe(asTurnId("turn-newer-after-restart"));
+      expect(thread?.session?.lastError).toBeNull();
     }),
   );
 

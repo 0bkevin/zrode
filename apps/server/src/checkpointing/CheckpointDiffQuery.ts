@@ -30,7 +30,12 @@ import {
   CheckpointWorkspacePathMissingError,
 } from "./Errors.ts";
 import type { CheckpointServiceError } from "./Errors.ts";
-import { checkpointBaselineRefForThreadTurn, checkpointRefForThreadTurn } from "./Utils.ts";
+import {
+  checkpointBaselineRefForThreadTurn,
+  checkpointBaselineRefForThreadTurnInManagedFamily,
+  checkpointRefForThreadTurn,
+  checkpointRefForThreadTurnInManagedFamily,
+} from "./Utils.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 
 /** Service tag for checkpoint diff queries. */
@@ -137,21 +142,6 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const fallbackFromCheckpointRef =
-        input.fromTurnCount === 0
-          ? checkpointRefForThreadTurn(input.threadId, 0)
-          : threadContext.value.checkpoints.find(
-              (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
-            )?.checkpointRef;
-      if (!fallbackFromCheckpointRef) {
-        return yield* new CheckpointRefUnavailableError({
-          operation,
-          threadId: input.threadId,
-          turnCount: input.fromTurnCount,
-          checkpoint: "from",
-        });
-      }
-
       const toCheckpoint = threadContext.value.checkpoints.find(
         (checkpoint) => checkpoint.checkpointTurnCount === input.toTurnCount,
       );
@@ -164,12 +154,35 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const fallbackFromCheckpointRef =
+        input.fromTurnCount === 0
+          ? (checkpointRefForThreadTurnInManagedFamily(
+              toCheckpoint.checkpointRef,
+              input.threadId,
+              0,
+            ) ?? checkpointRefForThreadTurn(input.threadId, 0))
+          : threadContext.value.checkpoints.find(
+              (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
+            )?.checkpointRef;
+      if (!fallbackFromCheckpointRef) {
+        return yield* new CheckpointRefUnavailableError({
+          operation,
+          threadId: input.threadId,
+          turnCount: input.fromTurnCount,
+          checkpoint: "from",
+        });
+      }
+
       const isSingleTurn = input.toTurnCount === input.fromTurnCount + 1;
       const hasUnavailableSummary =
         toCheckpoint.status === "error" && toCheckpoint.files.length === 0;
       const useLegacyFallback = isSingleTurn && !hasUnavailableSummary;
       const fromCheckpointRef = isSingleTurn
-        ? checkpointBaselineRefForThreadTurn(input.threadId, input.toTurnCount)
+        ? (checkpointBaselineRefForThreadTurnInManagedFamily(
+            toCheckpoint.checkpointRef,
+            input.threadId,
+            input.toTurnCount,
+          ) ?? checkpointBaselineRefForThreadTurn(input.threadId, input.toTurnCount))
         : fallbackFromCheckpointRef;
 
       if (isSingleTurn && !useLegacyFallback) {
@@ -278,10 +291,16 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const rootFamilyRef =
+      threadContext.value.firstCheckpointRef ?? threadContext.value.toCheckpointRef;
+    const fromCheckpointRef =
+      checkpointRefForThreadTurnInManagedFamily(rootFamilyRef, input.threadId, 0) ??
+      checkpointRefForThreadTurn(input.threadId, 0);
+
     const diff = yield* checkpointStore
       .diffCheckpoints({
         cwd: workspaceCwd,
-        fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
+        fromCheckpointRef,
         toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace,

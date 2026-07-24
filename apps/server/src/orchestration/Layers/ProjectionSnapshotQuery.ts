@@ -140,6 +140,7 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
   latestCheckpointTurnCount: Schema.NullOr(NonNegativeInt),
+  firstCheckpointRef: Schema.NullOr(CheckpointRef),
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
 
@@ -985,6 +986,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             WHERE turns.thread_id = threads.thread_id
               AND turns.checkpoint_turn_count IS NOT NULL
           ) AS "latestCheckpointTurnCount",
+          (
+            SELECT turns.checkpoint_ref
+            FROM projection_turns AS turns
+            WHERE turns.thread_id = threads.thread_id
+              AND turns.checkpoint_turn_count IS NOT NULL
+              AND turns.checkpoint_ref IS NOT NULL
+            ORDER BY turns.checkpoint_turn_count ASC
+            LIMIT 1
+          ) AS "firstCheckpointRef",
           (
             SELECT turns.checkpoint_ref
             FROM projection_turns AS turns
@@ -1958,6 +1968,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         workspaceRoot: row.value.workspaceRoot,
         worktreePath: row.value.worktreePath,
         latestCheckpointTurnCount: row.value.latestCheckpointTurnCount ?? 0,
+        firstCheckpointRef: row.value.firstCheckpointRef,
         toCheckpointRef: row.value.toCheckpointRef,
       });
     });

@@ -70,6 +70,12 @@ const ReadFromSequenceByTypesRequestSchema = Schema.Struct({
   limit: Schema.Number,
   eventTypes: Schema.Array(OrchestrationEventType),
 });
+const ReadFromSequenceByTypesAndActivityKindsRequestSchema = Schema.Struct({
+  sequenceExclusive: NonNegativeInt,
+  limit: Schema.Number,
+  eventTypes: Schema.Array(OrchestrationEventType),
+  threadActivityKinds: Schema.Array(Schema.String),
+});
 const DEFAULT_READ_FROM_SEQUENCE_LIMIT = 1_000;
 const READ_PAGE_SIZE = 500;
 
@@ -212,6 +218,59 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
+  const readEventRowsFromSequenceByTypesAndActivityKinds = SqlSchema.findAll({
+    Request: ReadFromSequenceByTypesAndActivityKindsRequestSchema,
+    Result: OrchestrationEventPersistedRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT *
+        FROM (
+          SELECT
+            sequence,
+            event_id AS "eventId",
+            event_type AS "type",
+            aggregate_kind AS "aggregateKind",
+            stream_id AS "aggregateId",
+            occurred_at AS "occurredAt",
+            command_id AS "commandId",
+            causation_event_id AS "causationEventId",
+            correlation_id AS "correlationId",
+            payload_json AS "payload",
+            metadata_json AS "metadata"
+          FROM orchestration_events
+          WHERE sequence > ${request.sequenceExclusive}
+            AND event_type IN ${sql.in(request.eventTypes)}
+            AND event_type <> 'thread.activity-appended'
+
+          UNION ALL
+
+          SELECT
+            sequence,
+            event_id AS "eventId",
+            event_type AS "type",
+            aggregate_kind AS "aggregateKind",
+            stream_id AS "aggregateId",
+            occurred_at AS "occurredAt",
+            command_id AS "commandId",
+            causation_event_id AS "causationEventId",
+            correlation_id AS "correlationId",
+            payload_json AS "payload",
+            metadata_json AS "metadata"
+          FROM orchestration_events
+          WHERE sequence > ${request.sequenceExclusive}
+            AND event_type = 'thread.activity-appended'
+            AND event_type IN ${sql.in(request.eventTypes)}
+            AND (
+              json_valid(payload_json)
+              AND json_extract(payload_json, '$.activity.kind')
+                IN ${sql.in(request.threadActivityKinds)}
+            )
+        )
+        ORDER BY sequence ASC
+        LIMIT ${request.limit}
+      `,
+  });
+
   const append: OrchestrationEventStoreShape["append"] = (event) =>
     appendEventRow({
       eventId: event.eventId,
@@ -243,12 +302,29 @@ const makeEventStore = Effect.gen(function* () {
     sequenceExclusive,
     limit = DEFAULT_READ_FROM_SEQUENCE_LIMIT,
     eventTypes,
+    threadActivityKinds,
   ) => {
     const normalizedLimit = Math.max(0, Math.floor(limit));
     if (normalizedLimit === 0 || eventTypes?.length === 0) {
       return Stream.empty;
     }
-    const selectedEventTypes = eventTypes === undefined ? undefined : Array.from(eventTypes);
+    let selectedThreadActivityKinds =
+      threadActivityKinds === undefined ? undefined : Array.from(threadActivityKinds);
+    let selectedEventTypes =
+      eventTypes === undefined
+        ? selectedThreadActivityKinds === undefined
+          ? undefined
+          : (["thread.activity-appended"] satisfies Array<OrchestrationEventType>)
+        : Array.from(eventTypes);
+    if (selectedThreadActivityKinds?.length === 0) {
+      selectedEventTypes = selectedEventTypes?.filter(
+        (eventType) => eventType !== "thread.activity-appended",
+      );
+      selectedThreadActivityKinds = undefined;
+    }
+    if (selectedEventTypes?.length === 0) {
+      return Stream.empty;
+    }
 
     return Stream.paginate(
       { cursor: sequenceExclusive, remaining: normalizedLimit },
@@ -257,11 +333,18 @@ const makeEventStore = Effect.gen(function* () {
         const rows = yield* (
           selectedEventTypes === undefined
             ? readEventRowsFromSequence({ sequenceExclusive: cursor, limit: pageLimit })
-            : readEventRowsFromSequenceByTypes({
-                sequenceExclusive: cursor,
-                limit: pageLimit,
-                eventTypes: selectedEventTypes,
-              })
+            : selectedThreadActivityKinds !== undefined
+              ? readEventRowsFromSequenceByTypesAndActivityKinds({
+                  sequenceExclusive: cursor,
+                  limit: pageLimit,
+                  eventTypes: selectedEventTypes,
+                  threadActivityKinds: selectedThreadActivityKinds,
+                })
+              : readEventRowsFromSequenceByTypes({
+                  sequenceExclusive: cursor,
+                  limit: pageLimit,
+                  eventTypes: selectedEventTypes,
+                })
         ).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(

@@ -44,6 +44,7 @@ export class DesktopClerkBridgeCleanupError extends Schema.TaggedErrorClass<Desk
 export class DesktopClerk extends Context.Service<
   DesktopClerk,
   {
+    readonly activateStorage: Effect.Effect<void, DesktopClerkBridgeInitializationError>;
     readonly configure: Effect.Effect<
       void,
       never,
@@ -82,11 +83,34 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   });
 }
 
+function createDeferredClerkStorage(stateDir: string) {
+  type ClerkStorage = ReturnType<typeof storage>;
+  let activeStorage: ClerkStorage | undefined;
+  const activate = () => {
+    activeStorage ??= storage({ path: stateDir });
+  };
+  const deferredStorage: ClerkStorage = {
+    getItem: (key) => activeStorage?.getItem(key) ?? null,
+    setItem: (key, value) => activeStorage?.setItem(key, value),
+    removeItem: (key) => activeStorage?.removeItem(key),
+  };
+  return { activate, storage: deferredStorage };
+}
+
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const deferredStorage = createDeferredClerkStorage(environment.stateDir);
   yield* Effect.acquireRelease(
     Effect.try({
-      try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
+      try: () =>
+        createClerkBridge({
+          storage: deferredStorage.storage,
+          passkeys: true,
+          renderer: {
+            scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
+            host: ElectronProtocol.DESKTOP_HOST,
+          },
+        }),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
           stateDir: environment.stateDir,
@@ -107,16 +131,20 @@ export const make = Effect.gen(function* () {
   );
 
   return DesktopClerk.of({
+    activateStorage: Effect.try({
+      try: deferredStorage.activate,
+      catch: (cause) =>
+        new DesktopClerkBridgeInitializationError({
+          stateDir: environment.stateDir,
+          isDevelopment: environment.isDevelopment,
+          cause,
+        }),
+    }),
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
-
-      if (!(yield* electronApp.requestSingleInstanceLock)) {
-        yield* electronApp.quit;
-        return yield* Effect.interrupt;
-      }
 
       yield* electronApp.on("second-instance", () => {
         void runPromise(

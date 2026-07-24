@@ -1444,6 +1444,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
+        // The event pump belongs to the provider session, not to whichever
+        // command worker happened to call startSession. In particular, the
+        // partitioned command reactor completes that caller fiber as soon as
+        // startup returns; a child fiber would be interrupted at that point
+        // while the Codex process keeps running.
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
@@ -1459,7 +1464,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
           }),
-        ).pipe(Effect.forkChild);
+        ).pipe(Effect.forkIn(sessionScope));
 
         const started = yield* runtime.start().pipe(
           Effect.mapError(
@@ -1589,15 +1594,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     // close() shuts down the runtime event queue after publishing terminal
     // turn/session events. Let the adapter pump drain those queued events
-    // before interrupting it, otherwise a hard cancellation fallback can lose
-    // the very completion event that makes the UI leave the running state.
+    // before closing its owning scope, otherwise a hard cancellation fallback
+    // can lose the very completion event that makes the UI leave the running
+    // state.
     yield* Effect.exit(Fiber.join(session.eventFiber)).pipe(
       Effect.timeoutOption("500 millis"),
       Effect.ignore,
     );
+    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 

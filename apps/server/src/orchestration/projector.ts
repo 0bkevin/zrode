@@ -281,6 +281,12 @@ export function projectEvent(
         })),
       );
 
+    // Historical internal work request. Its durable result, when any, is
+    // represented by thread.meta-updated, so replay must preserve sequence
+    // ordering without changing the read model.
+    case "thread.title-generation-requested":
+      return Effect.succeed(nextBase);
+
     case "thread.meta-updated":
       return decodeForEvent(ThreadMetaUpdatedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({

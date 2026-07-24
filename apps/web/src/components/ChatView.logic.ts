@@ -711,6 +711,7 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   localDispatch: LocalDispatchSnapshot | null;
   phase: SessionPhase;
   latestTurn: Thread["latestTurn"] | null;
+  latestUserMessageId?: ChatMessage["id"] | null;
   session: Thread["session"] | null;
   activities: Thread["activities"];
   hasPendingApproval: boolean;
@@ -726,6 +727,9 @@ export function hasServerAcknowledgedLocalDispatch(input: {
 
   const latestTurn = input.latestTurn ?? null;
   const session = input.session ?? null;
+  const dispatchedUserMessageAcknowledged =
+    input.localDispatch.messageId !== null &&
+    input.localDispatch.messageId === (input.latestUserMessageId ?? null);
   const matchingProviderFailure =
     input.localDispatch.messageId !== null &&
     input.activities.some((activity) => {
@@ -745,6 +749,11 @@ export function hasServerAcknowledgedLocalDispatch(input: {
     input.localDispatch.latestTurnCompletedAt !== (latestTurn?.completedAt ?? null);
 
   if (input.phase === "running") {
+    // Steering projects a new user message onto the existing running turn
+    // without necessarily changing any turn timestamps.
+    if (dispatchedUserMessageAcknowledged) {
+      return true;
+    }
     if (!latestTurnChanged) {
       return false;
     }
@@ -773,4 +782,8 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   // optimistic Working state; only a real turn lifecycle change or an explicit
   // provider failure acknowledges this local dispatch.
   return latestTurnChanged || providerFailureChanged;
+}
+
+export function submissionUsesLocalDispatch(behavior: "start" | "queue" | "steer"): boolean {
+  return behavior !== "queue";
 }

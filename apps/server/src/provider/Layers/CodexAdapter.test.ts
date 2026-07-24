@@ -13,6 +13,7 @@ import {
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -24,6 +25,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -483,6 +485,47 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("keeps forwarding runtime events after the startSession caller fiber exits", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-detached-start");
+
+      const startupFiber = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkChild);
+      yield* Fiber.join(startupFiber);
+
+      const runtime = lifecycleRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const receivedEvent = yield* Deferred.make<ProviderRuntimeEvent>();
+      const eventFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Deferred.succeed(receivedEvent, event).pipe(Effect.asVoid),
+      ).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-after-startup-caller"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-after-startup-caller"),
+      });
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      NodeAssert.equal(yield* Deferred.isDone(receivedEvent), true);
+      const event = yield* Deferred.await(receivedEvent);
+      yield* Fiber.interrupt(eventFiber).pipe(Effect.ignore);
+      NodeAssert.equal(event.type, "turn.started");
+      NodeAssert.equal(event.threadId, threadId);
+    }),
+  );
+
   it.effect("closes the Codex session when its interrupt request fails", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

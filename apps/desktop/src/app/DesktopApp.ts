@@ -228,14 +228,8 @@ const startup = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
 
   yield* shellEnvironment.installIntoProcess;
-  const userDataPath = yield* appIdentity.resolveUserDataPath;
-  yield* electronApp.setPath("userData", userDataPath);
   yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
   yield* desktopSettings.load;
-
-  if (environment.platform === "linux") {
-    yield* electronApp.appendCommandLineSwitch("class", environment.linuxWmClass);
-  }
 
   yield* appIdentity.configure;
   yield* lifecycle.register;

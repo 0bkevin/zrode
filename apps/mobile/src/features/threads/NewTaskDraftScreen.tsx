@@ -522,6 +522,21 @@ export function NewTaskDraftScreen(props: {
       return;
     }
 
+    const turnMetadata = editingPendingTask
+      ? {
+          threadId: editingPendingTask.threadId,
+          commandId: editingPendingTask.commandId,
+          messageId: editingPendingTask.messageId,
+          createdAt: editingPendingTask.createdAt,
+        }
+      : makeTurnCommandMetadata();
+    const persistentOutboxMessage = editingPendingTask
+      ? undefined
+      : flow.buildPendingTaskMessage(turnMetadata);
+    if (!editingPendingTask && persistentOutboxMessage === null) {
+      return;
+    }
+
     flow.setSubmitting(true);
     const result = await createProjectThread({
       project: selectedProject,
@@ -534,16 +549,8 @@ export function NewTaskDraftScreen(props: {
       interactionMode,
       initialMessageText,
       initialAttachments: draft.attachments,
-      ...(editingPendingTask
-        ? {
-            turnMetadata: {
-              threadId: editingPendingTask.threadId,
-              commandId: editingPendingTask.commandId,
-              messageId: editingPendingTask.messageId,
-              createdAt: editingPendingTask.createdAt,
-            },
-          }
-        : {}),
+      turnMetadata,
+      ...(persistentOutboxMessage ? { persistentOutboxMessage } : {}),
     });
     flow.setSubmitting(false);
 

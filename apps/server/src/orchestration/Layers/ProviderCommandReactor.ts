@@ -276,6 +276,7 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
   const threadInteractionModes = new Map<string, "default" | "plan">();
+  const latestTurnStartKeys = new Map<string, string>();
   // Turn starts run in scoped background fibers so the intent worker remains
   // responsive. Track a per-thread cancellation generation to fence the race
   // where Stop arrives while startSession/sendTurn is still awaiting the
@@ -397,15 +398,20 @@ const make = Effect.gen(function* () {
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
-    const session = thread?.session;
-    if (!session) {
+    if (!thread) {
       return;
     }
+    const session = thread.session;
     yield* setThreadSession({
       threadId: input.threadId,
       session: {
-        ...session,
-        status: session.status === "stopped" ? "stopped" : "ready",
+        ...(session ?? {
+          threadId: input.threadId,
+          providerName: null,
+          providerInstanceId: thread.modelSelection.instanceId,
+          runtimeMode: thread.runtimeMode,
+        }),
+        status: session?.status === "stopped" ? "stopped" : "error",
         activeTurnId: null,
         lastError: input.detail,
         updatedAt: input.createdAt,
@@ -464,6 +470,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly interactionMode?: "default" | "plan";
+      readonly pendingTurnStart?: boolean;
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -539,6 +546,22 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
+    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
+      yield* setThreadSession({
+        threadId,
+        session: {
+          threadId,
+          status: "starting",
+          providerName: activeSession?.provider ?? preferredProvider,
+          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
+          runtimeMode: desiredRuntimeMode,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+    }
     if (thread.session !== null) {
       yield* rejectStartedThreadModelChangeIfRequired({
         threadId,
@@ -610,7 +633,10 @@ const make = Effect.gen(function* () {
           threadId,
           session: {
             threadId,
-            status: mapProviderSessionStatusToOrchestrationStatus(session.status),
+            status:
+              options?.pendingTurnStart === true && session.status === "ready"
+                ? "starting"
+                : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
             runtimeMode: desiredRuntimeMode,
@@ -728,6 +754,7 @@ const make = Effect.gen(function* () {
       yield* ensureSessionForThread(input.threadId, input.createdAt, {
         modelSelection: requestedModelSelection,
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        pendingTurnStart: true,
       });
     }
     threadModelSelections.set(input.threadId, requestedModelSelection);
@@ -937,6 +964,8 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    latestTurnStartKeys.set(event.payload.threadId, key);
+    const startGeneration = currentTurnCancellationGeneration(event.payload.threadId);
 
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
@@ -989,11 +1018,17 @@ const make = Effect.gen(function* () {
           ? { sourceProposedPlan: event.payload.sourceProposedPlan }
           : {}),
       };
-      return setThreadSessionErrorOnTurnStartFailure({
-        threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
-      }).pipe(
+      const stillOwnsLifecycle =
+        latestTurnStartKeys.get(event.payload.threadId) === key &&
+        currentTurnCancellationGeneration(event.payload.threadId) === startGeneration;
+      const updateLifecycle = stillOwnsLifecycle
+        ? setThreadSessionErrorOnTurnStartFailure({
+            threadId: event.payload.threadId,
+            detail,
+            createdAt: event.payload.createdAt,
+          })
+        : Effect.void;
+      return updateLifecycle.pipe(
         Effect.flatMap(() =>
           appendProviderFailureActivity({
             threadId: event.payload.threadId,
@@ -1062,7 +1097,6 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const startGeneration = currentTurnCancellationGeneration(event.payload.threadId);
     yield* providerService.sendTurn(sendTurnRequest.value).pipe(
       Effect.tap((turn) =>
         interruptTurnStartedAfterCancellation({

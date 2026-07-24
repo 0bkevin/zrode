@@ -114,6 +114,9 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
         const sessionsTarget = yield* fileSystem.readLink(path.join(shadowHome, "sessions"));
         const configTarget = yield* fileSystem.readLink(path.join(shadowHome, "config.toml"));
+        const mcpOauthLocksTarget = yield* fileSystem.readLink(
+          path.join(shadowHome, "mcp-oauth-locks"),
+        );
         const modelsCacheExists = yield* fileSystem.exists(
           path.join(shadowHome, "models_cache.json"),
         );
@@ -124,9 +127,72 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
         expect(sessionsTarget).toBe(path.join(sharedHome, "sessions"));
         expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
+        expect(mcpOauthLocksTarget).toBe(path.join(sharedHome, "mcp-oauth-locks"));
         expect(modelsCacheExists).toBe(false);
         expect(authLinkResult._tag).toBe("Failure");
         expect(authContents).toContain("shadow");
+      }),
+    );
+
+    it.effect("replaces Codex-created local MCP OAuth locks with the shared lock directory", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("zrode-codex-shared-");
+        const shadowRoot = yield* makeTempDir("zrode-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+        const sharedLocks = path.join(sharedHome, "mcp-oauth-locks");
+        const shadowLocks = path.join(shadowHome, "mcp-oauth-locks");
+
+        yield* writeTextFile(path.join(sharedLocks, "file-store.lock"), "");
+        yield* writeTextFile(path.join(shadowLocks, "file-store.lock"), "");
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout);
+
+        const locksTarget = yield* fileSystem.readLink(shadowLocks);
+        const sharedLockExists = yield* fileSystem.exists(
+          path.join(sharedLocks, "file-store.lock"),
+        );
+        expect(locksTarget).toBe(sharedLocks);
+        expect(sharedLockExists).toBe(true);
+      }),
+    );
+
+    it.effect("rejects aliased home roots before deleting shared OAuth locks", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const realRoot = yield* makeTempDir("zrode-codex-real-root-");
+        const aliasParent = yield* makeTempDir("zrode-codex-alias-parent-");
+        const aliasRoot = path.join(aliasParent, "alias");
+        const sharedHome = path.join(realRoot, "home");
+        const shadowHomeAlias = path.join(aliasRoot, "home");
+        const sharedLock = path.join(sharedHome, "mcp-oauth-locks", "file-store.lock");
+
+        yield* writeTextFile(sharedLock, "must-survive");
+        yield* fileSystem.symlink(realRoot, aliasRoot);
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHomeAlias,
+          }),
+        );
+        const error = yield* materializeCodexShadowHome(layout).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(CodexShadowHomePathConflictError);
+        expect(yield* fileSystem.readFileString(sharedLock)).toBe("must-survive");
+        const sharedLocksLink = yield* fileSystem
+          .readLink(path.dirname(sharedLock))
+          .pipe(Effect.result);
+        expect(sharedLocksLink._tag).toBe("Failure");
       }),
     );
 
@@ -192,8 +258,54 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           effectiveHomePath: sharedHome,
         });
         expect(error.message).toBe(
-          `Codex shadow home path '${sharedHome}' must be different from the shared home path '${sharedHome}'.`,
+          `Codex shadow home path '${sharedHome}' must not equal, contain, or be contained by the shared home path '${sharedHome}'.`,
         );
+      }),
+    );
+
+    it.effect("rejects a shadow home nested inside the shared home before mutation", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("zrode-codex-shared-");
+        const shadowHome = path.join(sharedHome, "nested-shadow");
+        const sentinel = path.join(sharedHome, "sentinel.txt");
+        yield* writeTextFile(sentinel, "shared");
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+        const error = yield* materializeCodexShadowHome(layout).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(CodexShadowHomePathConflictError);
+        expect(yield* fileSystem.exists(shadowHome)).toBe(false);
+        expect(yield* fileSystem.readFileString(sentinel)).toBe("shared");
+      }),
+    );
+
+    it.effect("rejects a shared home nested inside the shadow home before mutation", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const shadowHome = yield* makeTempDir("zrode-codex-shadow-");
+        const sharedHome = path.join(shadowHome, "nested-shared");
+        const sharedLock = path.join(sharedHome, "mcp-oauth-locks", "file-store.lock");
+        yield* writeTextFile(sharedLock, "shared");
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+        const error = yield* materializeCodexShadowHome(layout).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(CodexShadowHomePathConflictError);
+        expect(yield* fileSystem.readFileString(sharedLock)).toBe("shared");
+        expect(yield* fileSystem.exists(path.join(shadowHome, "sessions"))).toBe(false);
       }),
     );
 

@@ -31,11 +31,14 @@ export interface OrchestrationEngineShape {
    *
    * @param fromSequenceExclusive - Sequence cursor (exclusive).
    * @param eventTypes - Optional event type filter for targeted startup replay.
+   * @param threadActivityKinds - Optional activity-kind filter applied only to
+   * `thread.activity-appended` events while preserving other selected event types.
    * @returns Stream containing ordered events.
    */
   readonly readEvents: (
     fromSequenceExclusive: number,
     eventTypes?: ReadonlyArray<OrchestrationEventType>,
+    threadActivityKinds?: ReadonlyArray<string>,
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError, never>;
 
   /**

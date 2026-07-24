@@ -531,6 +531,17 @@ const buildAppUnderTest = (options?: {
           ...options.layers.vcsStatusBroadcaster,
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
+    const orchestrationEngineMock = {
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.succeed({ sequence: 0 }),
+      streamDomainEvents: Stream.empty,
+    };
+    if (options?.layers?.orchestrationEngine !== undefined) {
+      Object.defineProperties(
+        orchestrationEngineMock,
+        Object.getOwnPropertyDescriptors(options.layers.orchestrationEngine),
+      );
+    }
 
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
@@ -708,12 +719,7 @@ const buildAppUnderTest = (options?: {
         ),
       ),
       Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          ...options?.layers?.orchestrationEngine,
-        }),
+        Layer.mock(OrchestrationEngine.OrchestrationEngineService)(orchestrationEngineMock),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
@@ -3166,9 +3172,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const rpcError = yield* Effect.flip(
         Effect.scoped(withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({}))),
       );
+      const probeError = yield* Effect.flip(
+        Effect.scoped(withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverProbe]({}))),
+      );
       assert.equal(rpcError._tag, "EnvironmentAuthorizationError");
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
+      }
+      assert.equal(probeError._tag, "EnvironmentAuthorizationError");
+      if (probeError._tag === "EnvironmentAuthorizationError") {
+        assert.equal(probeError.requiredScope, "orchestration:read");
       }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -3751,6 +3764,36 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
       assert.equal(response.auth.policy, "desktop-managed-local");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("answers connection probes without assembling the full server config", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          externalLauncher: {
+            resolveAvailableEditors: () =>
+              Effect.die(
+                new Error("Connection probes must not perform full server config assembly."),
+              ),
+          },
+        },
+      });
+
+      const { response: bootstrapResponse, cookie } = yield* bootstrapBrowserSession();
+
+      assert.equal(bootstrapResponse.status, 200);
+      assert.isDefined(cookie);
+
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverProbe]({})),
+      );
+
+      assert.deepEqual(response, {});
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -5956,13 +5999,450 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        Array.from(items, (item) => (item.kind === "snapshot" ? item.kind : item.event.type)),
+        Array.from(items, (item) =>
+          item.kind === "snapshot" || item.kind === "synchronized" ? item.kind : item.event.type,
+        ),
         [
           "snapshot",
           "thread.turn-enqueued",
           "thread.queued-turn-cancelled",
           "thread.queued-turn-dequeued",
         ],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("does not lose shell events committed while the snapshot is loading", () =>
+    Effect.gen(function* () {
+      const now = "2026-07-22T10:00:00.000Z";
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const shellThread: OrchestrationThreadShell = {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        handoffSource: thread.handoffSource,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt,
+        archivedAt: thread.archivedAt,
+        session: thread.session,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      };
+      const committedEvents: OrchestrationEvent[] = [];
+      const liveEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+      const acquisitionOrder: string[] = [];
+      const overlappingEvent = {
+        sequence: 1,
+        eventId: EventId.make("shell-overlap-event"),
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        type: "thread.meta-updated" as const,
+        payload: {
+          threadId: defaultThreadId,
+          title: "Included in snapshot",
+          updatedAt: now,
+        },
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } satisfies OrchestrationEvent;
+      const event = {
+        ...overlappingEvent,
+        sequence: 2,
+        eventId: EventId.make("shell-race-event"),
+        payload: {
+          ...overlappingEvent.payload,
+          title: "Committed after snapshot sequence",
+        },
+      } satisfies OrchestrationEvent;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            get streamDomainEvents() {
+              acquisitionOrder.push("stream");
+              return Stream.fromPubSub(liveEvents);
+            },
+            readEvents: (afterSequence) =>
+              Stream.fromIterable(
+                committedEvents.filter((event) => event.sequence > afterSequence),
+              ),
+          },
+          projectionSnapshotQuery: {
+            getSnapshotSequence: () =>
+              Effect.succeed({
+                snapshotSequence: committedEvents.at(-1)?.sequence ?? 0,
+              }),
+            getShellSnapshot: () =>
+              Effect.gen(function* () {
+                acquisitionOrder.push("snapshot");
+                yield* Effect.yieldNow;
+                // Sequence 1 overlaps the returned snapshot while sequence 2
+                // commits after its transactional cursor.
+                committedEvents.push(overlappingEvent, event);
+                yield* PubSub.publish(liveEvents, overlappingEvent);
+                yield* PubSub.publish(liveEvents, event);
+                return {
+                  snapshotSequence: 1,
+                  projects: [],
+                  threads: [shellThread],
+                  updatedAt: now,
+                };
+              }),
+            getThreadShellById: () =>
+              Effect.succeed(
+                Option.some({
+                  ...shellThread,
+                  title: "Committed after snapshot sequence",
+                  updatedAt: now,
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(3), Stream.runCollect),
+        ).pipe(Effect.timeout("1 second")),
+      );
+
+      assert.deepEqual(acquisitionOrder.slice(-2), ["stream", "snapshot"]);
+      assert.deepEqual(
+        Array.from(items, (item) =>
+          item.kind === "snapshot" || item.kind === "synchronized"
+            ? item.kind
+            : `${item.kind}:${item.sequence}`,
+        ),
+        ["snapshot", "thread-upserted:2", "synchronized"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("orders a thread event committed during snapshot loading before synchronization", () =>
+    Effect.gen(function* () {
+      const now = "2026-07-22T10:00:00.000Z";
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const committedEvents: OrchestrationEvent[] = [];
+      const liveEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+      const acquisitionOrder: string[] = [];
+      const messageId = MessageId.make("thread-race-message");
+      const overlappingEvent = {
+        sequence: 1,
+        eventId: EventId.make("thread-overlap-event"),
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        type: "thread.turn-enqueued" as const,
+        payload: {
+          threadId: defaultThreadId,
+          messageId,
+          text: "Queued during snapshot",
+          attachments: [],
+          modelSelection: defaultModelSelection,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          queuedAt: now,
+        },
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } satisfies OrchestrationEvent;
+      const event = {
+        sequence: 2,
+        eventId: EventId.make("thread-race-event"),
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        type: "thread.queued-turn-cancelled" as const,
+        payload: {
+          threadId: defaultThreadId,
+          messageId,
+          cancelledAt: now,
+        },
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } satisfies OrchestrationEvent;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            get streamDomainEvents() {
+              acquisitionOrder.push("stream");
+              return Stream.fromPubSub(liveEvents);
+            },
+            readEvents: (afterSequence) =>
+              Stream.fromIterable(
+                committedEvents.filter((event) => event.sequence > afterSequence),
+              ),
+          },
+          projectionSnapshotQuery: {
+            getSnapshotSequence: () =>
+              Effect.succeed({
+                snapshotSequence: committedEvents.at(-1)?.sequence ?? 0,
+              }),
+            getThreadDetailSnapshotById: () =>
+              Effect.gen(function* () {
+                acquisitionOrder.push("snapshot");
+                yield* Effect.yieldNow;
+                committedEvents.push(overlappingEvent, event);
+                yield* PubSub.publish(liveEvents, overlappingEvent);
+                yield* PubSub.publish(liveEvents, event);
+                return Option.some({
+                  snapshotSequence: 1,
+                  thread: {
+                    ...thread,
+                    updatedAt: now,
+                  },
+                });
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(3), Stream.runCollect),
+        ).pipe(Effect.timeout("1 second")),
+      );
+
+      assert.deepEqual(acquisitionOrder.slice(-2), ["stream", "snapshot"]);
+      assert.deepEqual(
+        Array.from(items, (item) =>
+          item.kind === "event"
+            ? `${item.event.type}:${item.event.sequence}`
+            : item.kind === "synchronized"
+              ? `${item.kind}:${item.sequence}`
+              : item.kind,
+        ),
+        ["snapshot", "thread.queued-turn-cancelled:2", "synchronized:2"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("coalesces a busy-thread replay without stalling another thread", () =>
+    Effect.gen(function* () {
+      const busyThreadId = ThreadId.make("thread-busy");
+      const newThreadId = ThreadId.make("thread-new");
+      const now = "2026-07-22T10:00:00.000Z";
+      const shellFetches: Array<string> = [];
+      const makeMessageEvent = (sequence: number): OrchestrationEvent =>
+        ({
+          sequence,
+          eventId: EventId.make(`shell-burst-${sequence}`),
+          aggregateKind: "thread",
+          aggregateId: busyThreadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.message-sent",
+          payload: {},
+        }) as OrchestrationEvent;
+      const createdEvent = {
+        sequence: 50,
+        eventId: EventId.make("shell-burst-new-thread"),
+        aggregateKind: "thread" as const,
+        aggregateId: newThreadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.created" as const,
+        payload: {},
+      } as OrchestrationEvent;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEvents: () =>
+              Stream.fromIterable([
+                ...Array.from({ length: 20 }, (_unused, index) => makeMessageEvent(index + 1)),
+                createdEvent,
+              ]),
+            streamDomainEvents: Stream.never,
+          },
+          projectionSnapshotQuery: {
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 50 }),
+            getThreadShellById: (threadId) =>
+              Effect.sync(() => {
+                shellFetches.push(threadId);
+                return Option.some(makeDefaultOrchestrationThreadShell({ id: threadId }));
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+            afterSequence: 0,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(3), Stream.runCollect),
+        ).pipe(Effect.timeout("1 second")),
+      );
+      const collected = Array.from(items);
+      const upsertedIds = collected.flatMap((item) =>
+        item.kind === "thread-upserted" ? [item.thread.id] : [],
+      );
+
+      assert.include(upsertedIds, busyThreadId);
+      assert.include(upsertedIds, newThreadId);
+      assert.equal(collected[2]?.kind, "synchronized");
+      assert.equal(collected[2]?.kind === "synchronized" ? collected[2].sequence : null, 50);
+      assert.equal(shellFetches.filter((threadId) => threadId === busyThreadId).length, 1);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
+  it.effect("resumes the shell from a bounded cursor and emits completion in order", () =>
+    Effect.gen(function* () {
+      const now = "2026-07-22T10:00:00.000Z";
+      const thread = makeDefaultOrchestrationReadModel().threads[0]!;
+      const event = {
+        sequence: 2,
+        eventId: EventId.make("shell-resume-event"),
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        type: "thread.meta-updated" as const,
+        payload: {
+          threadId: defaultThreadId,
+          title: "Resumed title",
+          updatedAt: now,
+        },
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } satisfies OrchestrationEvent;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEvents: () => Stream.make(event),
+            streamDomainEvents: Stream.never,
+          },
+          projectionSnapshotQuery: {
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 2 }),
+            getThreadShellById: () =>
+              Effect.succeed(
+                Option.some({
+                  id: thread.id,
+                  projectId: thread.projectId,
+                  title: "Resumed title",
+                  modelSelection: thread.modelSelection,
+                  runtimeMode: thread.runtimeMode,
+                  interactionMode: thread.interactionMode,
+                  branch: thread.branch,
+                  worktreePath: thread.worktreePath,
+                  handoffSource: thread.handoffSource,
+                  latestTurn: thread.latestTurn,
+                  createdAt: thread.createdAt,
+                  updatedAt: now,
+                  archivedAt: thread.archivedAt,
+                  session: thread.session,
+                  latestUserMessageAt: null,
+                  hasPendingApprovals: false,
+                  hasPendingUserInput: false,
+                  hasActionableProposedPlan: false,
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({
+            afterSequence: 1,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(2), Stream.runCollect),
+        ).pipe(Effect.timeout("1 second")),
+      );
+
+      assert.deepEqual(
+        Array.from(items, (item) =>
+          item.kind === "synchronized" || item.kind === "snapshot"
+            ? item.kind
+            : `${item.kind}:${item.sequence}`,
+        ),
+        ["thread-upserted:2", "synchronized"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("replays a thread deletion across a large global cursor gap", () =>
+    Effect.gen(function* () {
+      const deletedAt = "2026-07-22T10:00:00.000Z";
+      const deletion = {
+        sequence: 2_000,
+        eventId: EventId.make("thread-large-gap-deletion"),
+        aggregateKind: "thread" as const,
+        aggregateId: defaultThreadId,
+        type: "thread.deleted" as const,
+        payload: {
+          threadId: defaultThreadId,
+          deletedAt,
+        },
+        occurredAt: deletedAt,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } satisfies OrchestrationEvent;
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEvents: () => Stream.make(deletion),
+            streamDomainEvents: Stream.never,
+          },
+          projectionSnapshotQuery: {
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: deletion.sequence }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            afterSequence: 1,
+            requestCompletionMarker: true,
+          }).pipe(Stream.take(2), Stream.runCollect),
+        ).pipe(Effect.timeout("1 second")),
+      );
+
+      assert.deepEqual(
+        Array.from(items, (item) =>
+          item.kind === "event" ? `${item.event.type}:${item.event.sequence}` : item.kind,
+        ),
+        ["thread.deleted:2000", "synchronized"],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

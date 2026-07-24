@@ -1,8 +1,16 @@
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
+}
+
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -26,6 +34,7 @@ import * as ElectronUpdater from "./electron/ElectronUpdater.ts";
 import * as ElectronWindow from "./electron/ElectronWindow.ts";
 import * as DesktopApp from "./app/DesktopApp.ts";
 import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
+import * as DesktopLegacyStateMigration from "./app/DesktopLegacyStateMigration.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
@@ -185,16 +194,73 @@ const desktopClerkLayer = DesktopClerk.layer.pipe(
   Layer.provideMerge(ElectronApp.layer),
 );
 
-const desktopRuntimeLayer = desktopClerkLayer.pipe(
-  Layer.flatMap((clerkContext) =>
-    desktopApplicationLayer.pipe(
-      Layer.provideMerge(Layer.succeedContext(clerkContext)),
-      Layer.provideMerge(NodeServices.layer),
-      Layer.provideMerge(NodeHttpClient.layerUndici),
-      Layer.provideMerge(NetService.layer),
-      Layer.provideMerge(electronLayer),
-    ),
-  ),
+const desktopRuntimeLayer = (clerkContext: Context.Context<DesktopClerk.DesktopClerk>) =>
+  desktopApplicationLayer.pipe(
+    Layer.provideMerge(Layer.succeedContext(clerkContext)),
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(NodeHttpClient.layerUndici),
+    Layer.provideMerge(NetService.layer),
+    Layer.provideMerge(electronLayer),
+  );
+
+const desktopPreflightLayer = DesktopLegacyStateMigration.layer.pipe(
+  Layer.provideMerge(desktopEnvironmentLayer),
+  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(ElectronApp.layer),
+  Layer.provideMerge(ElectronDialog.layer),
+  Layer.provideMerge(ElectronWindow.layer),
 );
 
-DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);
+const desktopBeforeReady = Effect.gen(function* () {
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const fileSystem = yield* FileSystem.FileSystem;
+
+  const userDataPath = yield* DesktopAppIdentity.resolveDesktopUserDataPath(
+    environment,
+    fileSystem,
+  );
+  yield* electronApp.setPath("userData", userDataPath);
+  if (environment.platform === "linux") {
+    yield* electronApp.appendCommandLineSwitch("class", environment.linuxWmClass);
+  }
+
+  if (!(yield* electronApp.requestSingleInstanceLock)) {
+    yield* electronApp.quit;
+    return false;
+  }
+  return true;
+});
+
+const desktopAfterReady = Effect.gen(function* () {
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const migration = yield* DesktopLegacyStateMigration.DesktopLegacyStateMigration;
+  yield* electronApp.whenReady;
+  const shouldContinue = yield* migration.run;
+  if (!shouldContinue) {
+    yield* electronApp.quit;
+  }
+  return shouldContinue;
+});
+
+const desktopMain = Effect.scoped(
+  Effect.gen(function* () {
+    const preflightContext = yield* Layer.build(desktopPreflightLayer);
+    const hasSingleInstanceLock = yield* desktopBeforeReady.pipe(Effect.provide(preflightContext));
+    if (!hasSingleInstanceLock) return;
+
+    // Clerk must register its privileged renderer scheme before app.ready, but
+    // its deferred storage is only activated after the state migration.
+    const clerkContext = yield* Layer.build(desktopClerkLayer);
+    const shouldContinue = yield* desktopAfterReady.pipe(Effect.provide(preflightContext));
+    if (!shouldContinue) return;
+
+    yield* DesktopClerk.DesktopClerk.pipe(
+      Effect.flatMap((clerk) => clerk.activateStorage),
+      Effect.provide(clerkContext),
+    );
+    yield* DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer(clerkContext)));
+  }),
+);
+
+NodeRuntime.runMain(desktopMain);

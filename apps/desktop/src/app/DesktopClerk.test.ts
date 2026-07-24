@@ -55,25 +55,32 @@ describe("DesktopClerk", () => {
 
   it.effect("acquires and releases the SDK bridge with the layer", () => {
     const cleanup = vi.fn();
+    storageAdapter.getItem.mockResolvedValue(null);
     storageMock.mockReturnValue(storageAdapter);
     createClerkBridgeMock.mockReturnValue({ cleanup });
 
-    return Effect.gen(function* () {
-      yield* Effect.scoped(Layer.build(makeDesktopClerkLayer()));
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const clerk = yield* DesktopClerk.DesktopClerk;
+        const bridgeOptions = createClerkBridgeMock.mock.calls[0]?.[0];
+        assert.isDefined(bridgeOptions);
+        assert.equal(storageMock.mock.calls.length, 0);
+        assert.equal(bridgeOptions.passkeys, true);
+        assert.deepEqual(bridgeOptions.renderer, { scheme: "zrode-dev", host: "app" });
 
-      assert.deepEqual(createClerkBridgeMock.mock.calls, [
-        [
-          {
-            storage: storageAdapter,
-            passkeys: true,
-            renderer: { scheme: "zrode-dev", host: "app" },
-          },
-        ],
-      ]);
-      assert.equal(cleanup.mock.calls.length, 1);
-      storageMock.mockClear();
-      createClerkBridgeMock.mockClear();
-    });
+        yield* clerk.activateStorage;
+        assert.deepEqual(storageMock.mock.calls, [[{ path: "/tmp/t3-state" }]]);
+        yield* Effect.promise(() => bridgeOptions.storage.getItem("token"));
+        assert.deepEqual(storageAdapter.getItem.mock.calls, [["token"]]);
+      }),
+    ).pipe(
+      Effect.provide(makeDesktopClerkLayer()),
+      Effect.ensuring(
+        Effect.sync(() => {
+          assert.equal(cleanup.mock.calls.length, 1);
+        }),
+      ),
+    );
   });
 
   it.effect("preserves bridge initialization failures", () => {

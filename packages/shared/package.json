@@ -194,6 +194,14 @@
     "./providerError": {
       "types": "./src/providerError.ts",
       "import": "./src/providerError.ts"
+    },
+    "./zrodeStateMigration": {
+      "types": "./src/zrodeStateMigration.ts",
+      "import": "./src/zrodeStateMigration.ts"
+    },
+    "./zrodeDatabaseMigrations": {
+      "types": "./src/zrodeDatabaseMigrations.ts",
+      "import": "./src/zrodeDatabaseMigrations.ts"
     }
   },
   "scripts": {

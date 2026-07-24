@@ -30,6 +30,7 @@ import {
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
 } from "./thread-outbox-model";
+import { removeDroppedThreadOutboxMessage } from "./thread-outbox-drop";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
@@ -38,6 +39,12 @@ import {
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
 import { useRemoteConnectionStatus } from "./use-remote-environment-registry";
+import {
+  clearOptimisticThreadDispatch,
+  hasAuthoritativeOptimisticDispatchOutcome,
+  optimisticThreadDispatchesAtom,
+  registerOptimisticThreadDispatch,
+} from "./thread-optimistic-dispatch";
 
 export const dispatchingQueuedMessageIdAtom = Atom.make<MessageId | null>(null).pipe(
   Atom.keepAlive,
@@ -83,6 +90,7 @@ export function useThreadOutboxDrain(): void {
   const editingQueuedMessageIds = useAtomValue(editingQueuedMessageIdsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
   const shellStatuses = useThreadOutboxShellStatuses();
+  const optimisticDispatches = useAtomValue(optimisticThreadDispatchesAtom);
   const threads = useThreadShells();
   const projects = useProjects();
   const { connectedEnvironments } = useRemoteConnectionStatus();
@@ -90,6 +98,32 @@ export function useThreadOutboxDrain(): void {
   const retryAttemptRef = useRef(new Map<MessageId, number>());
   const retryNotBeforeRef = useRef(new Map<MessageId, number>());
   const retryTimersRef = useRef(new Map<MessageId, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    for (const dispatch of Object.values(optimisticDispatches)) {
+      const thread =
+        threads.find(
+          (candidate) =>
+            candidate.environmentId === dispatch.environmentId &&
+            candidate.id === dispatch.threadId,
+        ) ?? null;
+      if (
+        !hasAuthoritativeOptimisticDispatchOutcome({
+          dispatch,
+          thread,
+          activities: [],
+        })
+      ) {
+        continue;
+      }
+      clearOptimisticThreadDispatch({
+        environmentId: dispatch.environmentId,
+        threadId: dispatch.threadId,
+        messageId: dispatch.messageId,
+        commandId: dispatch.commandId,
+      });
+    }
+  }, [optimisticDispatches, threads]);
 
   useEffect(() => {
     ensureThreadOutboxLoaded();
@@ -130,6 +164,14 @@ export function useThreadOutboxDrain(): void {
     ): Promise<boolean> => {
       if (reportFailure(deliveryResult, "submit-turn")) {
         return false;
+      }
+      if (AsyncResult.isFailure(deliveryResult)) {
+        clearOptimisticThreadDispatch({
+          environmentId: queuedMessage.environmentId,
+          threadId: queuedMessage.threadId,
+          messageId: queuedMessage.messageId,
+          commandId: queuedMessage.commandId,
+        });
       }
 
       try {
@@ -269,20 +311,23 @@ export function useThreadOutboxDrain(): void {
         }
       }
 
+      if (deliveryAction === "send") {
+        registerOptimisticThreadDispatch({
+          environmentId: nextQueuedMessage.environmentId,
+          threadId: nextQueuedMessage.threadId,
+          messageId: nextQueuedMessage.messageId,
+          commandId: nextQueuedMessage.commandId,
+          startedAt: nextQueuedMessage.createdAt,
+          thread: thread ?? null,
+        });
+      }
       beginDispatchingQueuedMessage(nextQueuedMessage.messageId);
       const removeQueuedMessage = (warning: string) =>
-        removeThreadOutboxMessage(nextQueuedMessage).then(
-          () => true,
-          (error) => {
-            console.warn(warning, {
-              environmentId: nextQueuedMessage.environmentId,
-              threadId: nextQueuedMessage.threadId,
-              messageId: nextQueuedMessage.messageId,
-              error,
-            });
-            return false;
-          },
-        );
+        removeDroppedThreadOutboxMessage({
+          message: nextQueuedMessage,
+          remove: removeThreadOutboxMessage,
+          warning,
+        });
       const delivery =
         deliveryAction === "remove"
           ? removeQueuedMessage("[thread-outbox] failed to remove message for a missing thread")

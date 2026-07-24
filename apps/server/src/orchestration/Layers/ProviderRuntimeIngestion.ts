@@ -267,7 +267,7 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
-function runtimeEventToActivities(
+export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
@@ -300,7 +300,7 @@ function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1297,6 +1297,11 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+        threadId: thread.id,
+      });
+      const hasPendingTurnStart =
+        Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1311,11 +1316,7 @@ const make = Effect.gen(function* () {
       const conflictingTurnStartIsPendingTurnStart =
         event.type === "turn.started" && conflictsWithActiveTurn
           ? sameId(yield* getExpectedProviderTurnIdForThread(thread.id), eventTurnId) &&
-            Option.isSome(
-              yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-                threadId: thread.id,
-              }),
-            )
+            Option.isSome(pendingTurnStart)
           : false;
 
       const shouldApplyThreadLifecycle = (() => {
@@ -1357,16 +1358,24 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" ||
         event.type === "turn.completed"
       ) {
+        const terminalSessionState =
+          event.type === "session.state.changed" &&
+          (event.payload.state === "error" || event.payload.state === "stopped");
         const nextActiveTurnId =
           event.type === "turn.started"
             ? (eventTurnId ?? null)
-            : event.type === "turn.completed" || event.type === "session.exited"
+            : event.type === "turn.completed" ||
+                event.type === "session.exited" ||
+                terminalSessionState
               ? null
               : activeTurnId;
         const status = (() => {
           switch (event.type) {
             case "session.state.changed": {
               const runtimeStatus = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              if (hasPendingTurnStart && runtimeStatus === "ready") {
+                return "starting";
+              }
               // Some providers announce ready/waiting while the current turn is
               // still streaming; only turn.completed should settle that turn.
               const preserveRunningTurn =
@@ -1384,8 +1393,8 @@ const make = Effect.gen(function* () {
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
-              // active turn; preserve turn-running state in that case.
-              return activeTurnId !== null ? "running" : "ready";
+              // active or pending turn; preserve that lifecycle state.
+              return activeTurnId !== null ? "running" : hasPendingTurnStart ? "starting" : "ready";
           }
         })();
         const lastError =

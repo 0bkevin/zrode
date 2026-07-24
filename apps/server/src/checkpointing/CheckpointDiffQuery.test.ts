@@ -1,12 +1,17 @@
 import { CheckpointRef, ProjectId, ThreadId, TurnId } from "@t3tools/contracts";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { describe, expect } from "vite-plus/test";
 
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { checkpointBaselineRefForThreadTurn, checkpointRefForThreadTurn } from "./Utils.ts";
+import {
+  checkpointBaselineRefForThreadTurn,
+  checkpointRefForThreadTurn,
+  checkpointRefForThreadTurnInManagedFamily,
+} from "./Utils.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import { CheckpointRefUnavailableError, CheckpointThreadNotFoundError } from "./Errors.ts";
@@ -45,6 +50,9 @@ describe("CheckpointDiffQuery.layer", () => {
       const projectId = ProjectId.make("project-full-thread");
       const threadId = ThreadId.make("thread-full-thread");
       const toCheckpointRef = checkpointRefForThreadTurn(threadId, 4);
+      const firstCheckpointRef = CheckpointRef.make(
+        `refs/t3/checkpoints/${Encoding.encodeBase64Url(threadId)}/turn/1`,
+      );
       let getThreadCheckpointContextCalls = 0;
       let getFullThreadDiffContextCalls = 0;
       const diffCheckpointsCalls: Array<{
@@ -103,6 +111,7 @@ describe("CheckpointDiffQuery.layer", () => {
                   workspaceRoot: "/tmp/workspace",
                   worktreePath: "/tmp/worktree",
                   latestCheckpointTurnCount: 4,
+                  firstCheckpointRef,
                   toCheckpointRef,
                 });
               }),
@@ -127,7 +136,9 @@ describe("CheckpointDiffQuery.layer", () => {
       expect(diffCheckpointsCalls).toEqual([
         {
           cwd: "/tmp/worktree",
-          fromCheckpointRef: checkpointRefForThreadTurn(threadId, 0),
+          fromCheckpointRef:
+            checkpointRefForThreadTurnInManagedFamily(firstCheckpointRef, threadId, 0) ??
+            checkpointRefForThreadTurn(threadId, 0),
           toCheckpointRef,
           ignoreWhitespace: true,
         },

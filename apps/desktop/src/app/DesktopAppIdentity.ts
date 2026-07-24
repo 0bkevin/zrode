@@ -45,6 +45,30 @@ const normalizeCommitHash = (value: string): Option.Option<string> => {
     : Option.none();
 };
 
+export const resolveDesktopUserDataPath = Effect.fn("desktop.appIdentity.resolveUserDataPath")(
+  function* (
+    environment: DesktopEnvironment.DesktopEnvironment["Service"],
+    fileSystem: FileSystem.FileSystem,
+  ): Effect.fn.Return<string, DesktopUserDataPathResolutionError> {
+    const legacyPath = environment.path.join(
+      environment.appDataDirectory,
+      environment.legacyUserDataDirName,
+    );
+    const legacyPathExists = yield* fileSystem.exists(legacyPath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DesktopUserDataPathResolutionError({
+            legacyPath,
+            cause,
+          }),
+      ),
+    );
+    return legacyPathExists
+      ? legacyPath
+      : environment.path.join(environment.appDataDirectory, environment.userDataDirName);
+  },
+);
+
 export const make = Effect.gen(function* () {
   const assets = yield* DesktopAssets.DesktopAssets;
   const electronApp = yield* ElectronApp.ElectronApp;
@@ -90,24 +114,7 @@ export const make = Effect.gen(function* () {
     return commitHash;
   });
 
-  const resolveUserDataPath = Effect.gen(function* () {
-    const legacyPath = environment.path.join(
-      environment.appDataDirectory,
-      environment.legacyUserDataDirName,
-    );
-    const legacyPathExists = yield* fileSystem.exists(legacyPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DesktopUserDataPathResolutionError({
-            legacyPath,
-            cause,
-          }),
-      ),
-    );
-    return legacyPathExists
-      ? legacyPath
-      : environment.path.join(environment.appDataDirectory, environment.userDataDirName);
-  }).pipe(Effect.withSpan("desktop.appIdentity.resolveUserDataPath"));
+  const resolveUserDataPath = resolveDesktopUserDataPath(environment, fileSystem);
 
   const configure = Effect.gen(function* () {
     const commitHash = yield* resolveAboutCommitHash;

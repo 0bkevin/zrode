@@ -37,8 +37,15 @@ import {
 } from "./use-composer-drafts";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
+import { useThread } from "../state/entities";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
+import {
+  clearOptimisticThreadDispatch,
+  hasAuthoritativeOptimisticDispatchOutcome,
+  registerOptimisticThreadDispatch,
+  useOptimisticThreadDispatch,
+} from "./thread-optimistic-dispatch";
 import { useThreadOutboxMessages } from "./use-thread-outbox";
 
 export function appendReviewCommentToDraft(input: {
@@ -73,8 +80,10 @@ export function useThreadDraftForThread(input: {
 }
 
 export function useThreadComposerState() {
-  const { selectedThread: selectedThreadShell } = useThreadSelection();
+  const { selectedThread: selectedThreadShell, selectedThreadRef } = useThreadSelection();
   const selectedThreadDetail = useSelectedThreadDetail();
+  const selectedThread = useThread(selectedThreadRef) ?? selectedThreadShell;
+  const optimisticDispatch = useOptimisticThreadDispatch(selectedThreadRef);
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
 
@@ -104,13 +113,11 @@ export function useThreadComposerState() {
     }
     return messageIds.size;
   }, [selectedThreadDetail?.queuedTurns, selectedThreadQueuedMessages]);
-  const selectedThread = selectedThreadDetail ?? selectedThreadShell;
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const interactionMode = selectedDraft?.interactionMode ?? selectedThread?.interactionMode ?? null;
 
   const selectedThreadSessionActivity = useMemo(() => {
-    const selectedThread = selectedThreadDetail ?? selectedThreadShell;
     if (!selectedThread?.session) {
       return null;
     }
@@ -119,24 +126,55 @@ export function useThreadComposerState() {
       orchestrationStatus: selectedThread.session.status,
       activeTurnId: selectedThread.session.activeTurnId ?? undefined,
     };
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [selectedThread?.session]);
+
+  const authoritativeOptimisticDispatchOutcome = useMemo(
+    () =>
+      optimisticDispatch !== null &&
+      hasAuthoritativeOptimisticDispatchOutcome({
+        dispatch: optimisticDispatch,
+        thread: selectedThread,
+        activities: selectedThreadDetail?.activities ?? [],
+      }),
+    [optimisticDispatch, selectedThread, selectedThreadDetail?.activities],
+  );
+
+  useEffect(() => {
+    if (!authoritativeOptimisticDispatchOutcome || optimisticDispatch === null) {
+      return;
+    }
+    clearOptimisticThreadDispatch({
+      environmentId: optimisticDispatch.environmentId,
+      threadId: optimisticDispatch.threadId,
+      messageId: optimisticDispatch.messageId,
+      commandId: optimisticDispatch.commandId,
+    });
+  }, [authoritativeOptimisticDispatchOutcome, optimisticDispatch]);
 
   const activeWorkStartedAt = useMemo(() => {
-    const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-    if (!selectedThread) {
+    const activeOptimisticDispatch = authoritativeOptimisticDispatchOutcome
+      ? null
+      : optimisticDispatch;
+    if (!selectedThread && activeOptimisticDispatch === null) {
       return null;
     }
 
     return deriveActiveWorkStartedAt(
-      selectedThread.latestTurn,
+      selectedThread?.latestTurn ?? null,
       selectedThreadSessionActivity,
-      null,
+      activeOptimisticDispatch?.startedAt ?? null,
     );
-  }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
+  }, [
+    authoritativeOptimisticDispatchOutcome,
+    optimisticDispatch,
+    selectedThread?.latestTurn,
+    selectedThreadSessionActivity,
+  ]);
 
   const activeThreadBusy =
-    !!selectedThread &&
-    (selectedThread.session?.status === "running" || selectedThread.session?.status === "starting");
+    (!authoritativeOptimisticDispatchOutcome && optimisticDispatch !== null) ||
+    selectedThread?.session?.status === "running" ||
+    selectedThread?.session?.status === "starting";
 
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
@@ -145,7 +183,7 @@ export function useThreadComposerState() {
 
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
     const draft = getComposerDraftSnapshot(threadKey);
-    const thread = selectedThreadDetail ?? selectedThreadShell;
+    const thread = selectedThread ?? selectedThreadShell;
     const text = draft.text.trim();
     const attachments = draft.attachments;
     if (text.length === 0 && attachments.length === 0) {
@@ -154,12 +192,21 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
+    const commandId = CommandId.make(metadata.commandId);
+    registerOptimisticThreadDispatch({
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+      messageId,
+      commandId,
+      startedAt: metadata.createdAt,
+      thread,
+    });
     try {
       await enqueueThreadOutboxMessage({
         environmentId: selectedThreadShell.environmentId,
         threadId: selectedThreadShell.id,
         messageId,
-        commandId: CommandId.make(metadata.commandId),
+        commandId,
         text,
         attachments,
         modelSelection: draft.modelSelection ?? thread.modelSelection,
@@ -170,12 +217,18 @@ export function useThreadComposerState() {
       clearComposerDraftContent(threadKey);
       return messageId;
     } catch (error) {
+      clearOptimisticThreadDispatch({
+        environmentId: selectedThreadShell.environmentId,
+        threadId: selectedThreadShell.id,
+        messageId,
+        commandId,
+      });
       setPendingConnectionError(
         error instanceof Error ? error.message : "Failed to save the queued message.",
       );
       return null;
     }
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [selectedThread, selectedThreadShell]);
 
   const onChangeDraftMessage = useCallback(
     (value: string) => {

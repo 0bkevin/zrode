@@ -26,10 +26,12 @@ const KNOWN_SHARED_DIRECTORIES = [
   "plugins",
   "cache",
   "logs",
+  "mcp-oauth-locks",
 ] as const;
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
+const REPLACEABLE_SHARED_RUNTIME_DIRECTORIES = new Set(["mcp-oauth-locks"]);
 
 function resolveHomePath(path: Path.Path, value: string | undefined): string {
   const expanded =
@@ -72,7 +74,14 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedErrorClass<Code
   "CodexShadowHomeFileSystemError",
   {
     ...CodexShadowHomeContext,
-    operation: Schema.Literals(["readLink", "makeDirectory", "readDirectory", "remove", "symlink"]),
+    operation: Schema.Literals([
+      "realPath",
+      "readLink",
+      "makeDirectory",
+      "readDirectory",
+      "remove",
+      "symlink",
+    ]),
     path: Schema.String,
     targetPath: Schema.optional(Schema.String),
     entryName: Schema.optional(Schema.String),
@@ -90,7 +99,7 @@ export class CodexShadowHomePathConflictError extends Schema.TaggedErrorClass<Co
   CodexShadowHomeContext,
 ) {
   override get message(): string {
-    return `Codex shadow home path '${this.effectiveHomePath}' must be different from the shared home path '${this.sharedHomePath}'.`;
+    return `Codex shadow home path '${this.effectiveHomePath}' must not equal, contain, or be contained by the shared home path '${this.sharedHomePath}'.`;
   }
 }
 
@@ -225,16 +234,6 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     linkPath: link,
   });
 
-  if (state._tag === "NotSymlink") {
-    return yield* new CodexShadowHomeEntryConflictError({
-      sharedHomePath: input.sharedHomePath,
-      effectiveHomePath: input.effectiveHomePath,
-      entryName: input.entryName,
-      linkPath: link,
-      targetPath: target,
-    });
-  }
-
   const createLink = input.fileSystem.symlink(target, link).pipe(
     Effect.catchTags({
       PlatformError: (cause) =>
@@ -249,6 +248,33 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
         }),
     }),
   );
+
+  if (state._tag === "NotSymlink") {
+    if (!REPLACEABLE_SHARED_RUNTIME_DIRECTORIES.has(input.entryName)) {
+      return yield* new CodexShadowHomeEntryConflictError({
+        sharedHomePath: input.sharedHomePath,
+        effectiveHomePath: input.effectiveHomePath,
+        entryName: input.entryName,
+        linkPath: link,
+        targetPath: target,
+      });
+    }
+
+    yield* input.fileSystem.remove(link, { recursive: true }).pipe(
+      Effect.catchTags({
+        PlatformError: (cause) =>
+          new CodexShadowHomeFileSystemError({
+            sharedHomePath: input.sharedHomePath,
+            effectiveHomePath: input.effectiveHomePath,
+            operation: "remove",
+            path: link,
+            entryName: input.entryName,
+            cause,
+          }),
+      }),
+    );
+    return yield* createLink;
+  }
 
   if (state._tag === "Missing") {
     return yield* createLink;
@@ -298,6 +324,69 @@ const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsP
   },
 );
 
+/**
+ * Canonicalize a home path without creating it. `realPath` only accepts
+ * existing paths, so walk upward until an existing ancestor is found and
+ * append the missing suffix again. This catches aliases in any parent
+ * component (for example macOS `/tmp` -> `/private/tmp`) before shadow-home
+ * materialization can mutate either location.
+ */
+const canonicalizeProspectiveHome = Effect.fn("CodexHomeLayout.canonicalizeProspectiveHome")(
+  function* (input: {
+    readonly fileSystem: FileSystem.FileSystem;
+    readonly path: Path.Path;
+    readonly sharedHomePath: string;
+    readonly effectiveHomePath: string;
+    readonly homePath: string;
+  }): Effect.fn.Return<string, CodexShadowHomeError> {
+    let candidate = input.path.resolve(input.homePath);
+    const missingSegments: Array<string> = [];
+
+    while (true) {
+      const canonical = yield* input.fileSystem.realPath(candidate).pipe(
+        Effect.map((value) => ({ _tag: "Success" as const, value })),
+        Effect.catch((error) => Effect.succeed({ _tag: "Failure" as const, error })),
+      );
+      if (canonical._tag === "Success") {
+        return input.path.resolve(canonical.value, ...missingSegments);
+      }
+      if (canonical.error.reason._tag !== "NotFound") {
+        return yield* new CodexShadowHomeFileSystemError({
+          sharedHomePath: input.sharedHomePath,
+          effectiveHomePath: input.effectiveHomePath,
+          operation: "realPath",
+          path: candidate,
+          cause: canonical.error,
+        });
+      }
+
+      const parent = input.path.dirname(candidate);
+      if (parent === candidate) {
+        return yield* new CodexShadowHomeFileSystemError({
+          sharedHomePath: input.sharedHomePath,
+          effectiveHomePath: input.effectiveHomePath,
+          operation: "realPath",
+          path: candidate,
+          cause: canonical.error,
+        });
+      }
+      missingSegments.unshift(input.path.basename(candidate));
+      candidate = parent;
+    }
+  },
+);
+
+function homePathsOverlap(path: Path.Path, left: string, right: string): boolean {
+  const isSameOrDescendant = (parent: string, candidate: string) => {
+    const relative = path.relative(parent, candidate);
+    return (
+      relative === "" ||
+      (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+    );
+  };
+  return isSameOrDescendant(left, right) || isSameOrDescendant(right, left);
+}
+
 export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome")(function* (
   layout: CodexHomeLayout,
 ) {
@@ -313,6 +402,28 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const [canonicalSharedHomePath, canonicalEffectiveHomePath] = yield* Effect.all([
+    canonicalizeProspectiveHome({
+      fileSystem,
+      path,
+      sharedHomePath: layout.sharedHomePath,
+      effectiveHomePath,
+      homePath: layout.sharedHomePath,
+    }),
+    canonicalizeProspectiveHome({
+      fileSystem,
+      path,
+      sharedHomePath: layout.sharedHomePath,
+      effectiveHomePath,
+      homePath: effectiveHomePath,
+    }),
+  ]);
+  if (homePathsOverlap(path, canonicalSharedHomePath, canonicalEffectiveHomePath)) {
+    return yield* new CodexShadowHomePathConflictError({
+      sharedHomePath: layout.sharedHomePath,
+      effectiveHomePath,
+    });
+  }
 
   const makeDirectory = (directoryPath: string) =>
     fileSystem.makeDirectory(directoryPath, { recursive: true }).pipe(

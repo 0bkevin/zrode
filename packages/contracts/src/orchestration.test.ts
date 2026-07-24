@@ -244,6 +244,34 @@ it.effect("decodes project session history import request events", () =>
   }),
 );
 
+it.effect("decodes retired title-generation events for historical replay", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 156,
+      eventId: "evt-title-generation-requested",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: "2026-06-02T20:23:37.717Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.title-generation-requested",
+      payload: {
+        threadId: "thread-1",
+        message: "Terminal command: git status",
+        titleSeed: "git status",
+        createdAt: "2026-06-02T20:23:37.717Z",
+      },
+    });
+
+    assert.strictEqual(parsed.type, "thread.title-generation-requested");
+    if (parsed.type !== "thread.title-generation-requested") return;
+    assert.strictEqual(parsed.payload.threadId, "thread-1");
+    assert.strictEqual(parsed.payload.titleSeed, "git status");
+  }),
+);
+
 it.effect("decodes internal thread history import commands", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeOrchestrationCommand({

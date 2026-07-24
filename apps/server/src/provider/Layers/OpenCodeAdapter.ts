@@ -17,10 +17,14 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SynchronizedRef from "effect/SynchronizedRef";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 
@@ -55,6 +59,82 @@ import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_ABORT_TIMEOUT = "2 seconds";
+const OPENCODE_RESUME_VERSION = 1 as const;
+
+function parseOpenCodeResume(raw: unknown): { readonly sessionId: string } | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.schemaVersion !== OPENCODE_RESUME_VERSION) {
+    return undefined;
+  }
+  if (typeof record.sessionId !== "string" || record.sessionId.trim().length === 0) {
+    return undefined;
+  }
+  return { sessionId: record.sessionId.trim() };
+}
+
+/**
+ * Recover only a structurally confirmed missing session. Transport, auth, and
+ * server failures must propagate or a temporary outage silently resets a
+ * durable conversation to an empty session.
+ */
+export function isOpenCodeNotFound(cause: unknown): boolean {
+  const seen = new Set<unknown>();
+  const queue: Array<unknown> = [cause];
+  for (let steps = 0; queue.length > 0 && steps < 32; steps += 1) {
+    const node = queue.shift();
+    if (node === null || typeof node !== "object" || seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    const record = node as Record<string, unknown>;
+    const response = record.response;
+    const statuses = [
+      record.status,
+      record.statusCode,
+      response !== null && typeof response === "object"
+        ? (response as { readonly status?: unknown }).status
+        : undefined,
+    ].filter((status): status is number => typeof status === "number");
+    if (statuses.includes(404)) {
+      return true;
+    }
+    if (statuses.length > 0) {
+      continue;
+    }
+    if (typeof record.name === "string" && record.name.toLowerCase() === "notfounderror") {
+      return true;
+    }
+    for (const key of ["cause", "body", "error", "data"] as const) {
+      if (record[key] !== undefined) {
+        queue.push(record[key]);
+      }
+    }
+  }
+  return false;
+}
+
+export function isSameOpenCodeDirectory(
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  left: string,
+  right: string,
+): Effect.Effect<boolean> {
+  const lexicalLeft = path.resolve(left);
+  const lexicalRight = path.resolve(right);
+  if (lexicalLeft === lexicalRight) {
+    return Effect.succeed(true);
+  }
+  const canonicalize = (lexical: string) =>
+    fileSystem.realPath(lexical).pipe(Effect.orElseSucceed(() => lexical));
+  return Effect.zipWith(
+    canonicalize(lexicalLeft),
+    canonicalize(lexicalRight),
+    (canonicalLeft, canonicalRight) => canonicalLeft === canonicalRight,
+  );
+}
 
 interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
@@ -452,6 +532,10 @@ export function makeOpenCodeAdapter(
     const serverConfig = yield* ServerConfig;
     const openCodeRuntime = yield* OpenCodeRuntime;
     const crypto = yield* Crypto.Crypto;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sameDirectory = (left: string, right: string) =>
+      isSameOpenCodeDirectory(fileSystem, path, left, right);
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -465,6 +549,24 @@ export function makeOpenCodeAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const getThreadSemaphore = (threadId: string) =>
+      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
+        const existing = Option.fromNullishOr(current.get(threadId));
+        return Option.match(existing, {
+          onNone: () =>
+            Semaphore.make(1).pipe(
+              Effect.map((semaphore) => {
+                const next = new Map(current);
+                next.set(threadId, semaphore);
+                return [semaphore, next] as const;
+              }),
+            ),
+          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
+        });
+      });
+    const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
+      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -530,6 +632,30 @@ export function makeOpenCodeAdapter(
 
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    const deleteOwnedSession = Effect.fn("deleteOwnedOpenCodeSession")(function* (input: {
+      readonly client: OpencodeClient;
+      readonly threadId: ThreadId;
+      readonly sessionId: string;
+      readonly reason: string;
+    }) {
+      const deleteOutcome = yield* runOpenCodeSdk("session.delete", () =>
+        input.client.session.delete({ sessionID: input.sessionId }),
+      ).pipe(Effect.exit, Effect.timeoutOption(OPENCODE_ABORT_TIMEOUT));
+      if (Option.isNone(deleteOutcome)) {
+        yield* Effect.logWarning("OpenCode owned-session cleanup timed out", {
+          threadId: input.threadId,
+          openCodeSessionId: input.sessionId,
+          reason: input.reason,
+        });
+      } else if (Exit.isFailure(deleteOutcome.value)) {
+        yield* Effect.logWarning("OpenCode owned-session cleanup failed", {
+          threadId: input.threadId,
+          openCodeSessionId: input.sessionId,
+          reason: input.reason,
+          cause: Cause.pretty(deleteOutcome.value.cause),
+        });
+      }
+    });
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -1049,12 +1175,13 @@ export function makeOpenCodeAdapter(
       }
     });
 
-    const startSession: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
+    const startSessionUnlocked: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
       function* (input) {
         const binaryPath = openCodeSettings.binaryPath;
         const serverUrl = openCodeSettings.serverUrl;
         const serverPassword = openCodeSettings.serverPassword;
         const directory = input.cwd ?? serverConfig.cwd;
+        const resumeSessionId = parseOpenCodeResume(input.resumeCursor)?.sessionId;
         const existing = sessions.get(input.threadId);
         if (existing) {
           yield* stopOpenCodeContext(existing);
@@ -1063,6 +1190,12 @@ export function makeOpenCodeAdapter(
 
         const started = yield* Effect.gen(function* () {
           const sessionScope = yield* Scope.make();
+          let ownedSession:
+            | {
+                readonly client: OpencodeClient;
+                readonly sessionId: string;
+              }
+            | undefined;
           const startedExit = yield* Effect.exit(
             Effect.gen(function* () {
               // The runtime binds the server's lifetime to the Scope.Scope
@@ -1109,27 +1242,111 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
-              const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
-                client.session.create({
-                  title: `Zrode ${input.threadId}`,
-                  permission: buildOpenCodePermissionRules(input.runtimeMode),
-                }),
-              );
-              if (!openCodeSession.data) {
-                return yield* new OpenCodeRuntimeError({
-                  operation: "session.create",
-                  detail: "OpenCode session.create returned no session payload.",
-                });
-              }
+              const resolved = yield* Effect.gen(function* () {
+                const adopted = resumeSessionId
+                  ? yield* runOpenCodeSdk("session.get", () =>
+                      client.session.get({ sessionID: resumeSessionId }),
+                    ).pipe(
+                      Effect.map((response) => response.data),
+                      Effect.catchIf(
+                        (cause) => isOpenCodeNotFound(cause),
+                        () => Effect.void,
+                      ),
+                    )
+                  : undefined;
+                const reusable =
+                  adopted &&
+                  (!adopted.directory || (yield* sameDirectory(adopted.directory, directory)))
+                    ? adopted
+                    : undefined;
+
+                if (reusable) {
+                  yield* runOpenCodeSdk("session.update", () =>
+                    client.session.update({
+                      sessionID: reusable.id,
+                      permission: buildOpenCodePermissionRules(input.runtimeMode),
+                    }),
+                  );
+                  return { openCodeSession: reusable, created: false };
+                }
+
+                if (adopted) {
+                  yield* Effect.logInfo(
+                    `OpenCode session '${adopted.id}' was created under a different working directory; forking into '${directory}' to preserve conversation history.`,
+                  );
+                  const forkedSession = yield* runOpenCodeSdk("session.fork", () =>
+                    client.session.fork({ sessionID: adopted.id, directory }),
+                  );
+                  const forked = forkedSession.data;
+                  if (!forked) {
+                    return yield* new OpenCodeRuntimeError({
+                      operation: "session.fork",
+                      detail: "OpenCode session.fork returned no session payload.",
+                    });
+                  }
+                  ownedSession = { client, sessionId: forked.id };
+                  const confirmedFork = yield* runOpenCodeSdk("session.get", () =>
+                    client.session.get({ sessionID: forked.id }),
+                  ).pipe(Effect.map((response) => response.data));
+                  if (
+                    !confirmedFork?.directory ||
+                    !(yield* sameDirectory(confirmedFork.directory, directory))
+                  ) {
+                    return yield* new OpenCodeRuntimeError({
+                      operation: "session.fork",
+                      detail:
+                        `OpenCode kept forked session '${forked.id}' in ` +
+                        `'${confirmedFork?.directory ?? "an unknown directory"}' instead of ` +
+                        `'${directory}'. This OpenCode server cannot continue a session across working directories safely.`,
+                    });
+                  }
+                  yield* runOpenCodeSdk("session.update", () =>
+                    client.session.update({
+                      sessionID: forked.id,
+                      permission: buildOpenCodePermissionRules(input.runtimeMode),
+                    }),
+                  );
+                  return { openCodeSession: forked, created: true };
+                }
+
+                if (resumeSessionId) {
+                  yield* Effect.logWarning(
+                    `OpenCode session '${resumeSessionId}' no longer exists; starting a fresh session.`,
+                  );
+                }
+                const createdSession = yield* runOpenCodeSdk("session.create", () =>
+                  client.session.create({
+                    title: `Zrode ${input.threadId}`,
+                    permission: buildOpenCodePermissionRules(input.runtimeMode),
+                  }),
+                );
+                if (!createdSession.data) {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.create",
+                    detail: "OpenCode session.create returned no session payload.",
+                  });
+                }
+                ownedSession = { client, sessionId: createdSession.data.id };
+                return { openCodeSession: createdSession.data, created: true };
+              });
               return {
                 sessionScope,
                 server,
                 client,
-                openCodeSession: openCodeSession.data,
+                openCodeSession: resolved.openCodeSession,
+                created: resolved.created,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
           if (Exit.isFailure(startedExit)) {
+            if (ownedSession) {
+              yield* deleteOwnedSession({
+                client: ownedSession.client,
+                threadId: input.threadId,
+                sessionId: ownedSession.sessionId,
+                reason: "session startup failed after creating upstream state",
+              });
+            }
             yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
             return yield* toProcessError(input.threadId, Cause.squash(startedExit.cause));
           }
@@ -1140,13 +1357,17 @@ export function makeOpenCodeAdapter(
         // and already inserted a session while we were awaiting async work.
         const raceWinner = sessions.get(input.threadId);
         if (raceWinner) {
-          // Another call won the race – clean up the session we just created
-          // (including the remote SDK session) and return the existing one.
-          yield* runOpenCodeSdk("session.abort", () =>
-            started.client.session.abort({
-              sessionID: started.openCodeSession.id,
-            }),
-          ).pipe(Effect.ignore);
+          // Never delete an adopted remote session: the concurrent winner may
+          // be using that same durable upstream state. A session created by
+          // this losing start has no persisted cursor and must be removed.
+          if (started.created) {
+            yield* deleteOwnedSession({
+              client: started.client,
+              threadId: input.threadId,
+              sessionId: started.openCodeSession.id,
+              reason: "another concurrent start won thread ownership",
+            });
+          }
           yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
           return raceWinner.session;
         }
@@ -1160,6 +1381,10 @@ export function makeOpenCodeAdapter(
           cwd: directory,
           ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
           threadId: input.threadId,
+          resumeCursor: {
+            schemaVersion: OPENCODE_RESUME_VERSION,
+            sessionId: started.openCodeSession.id,
+          },
           createdAt,
           updatedAt: createdAt,
         };
@@ -1205,6 +1430,8 @@ export function makeOpenCodeAdapter(
         return session;
       },
     );
+    const startSession: OpenCodeAdapterShape["startSession"] = (input) =>
+      withThreadLock(input.threadId, startSessionUnlocked(input));
 
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
@@ -1333,6 +1560,9 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        ...(context.session.resumeCursor !== undefined
+          ? { resumeCursor: context.session.resumeCursor }
+          : {}),
       };
     });
 
@@ -1515,7 +1745,7 @@ export function makeOpenCodeAdapter(
       ).pipe(Effect.mapError(toRequestError));
     });
 
-    const stopSession: OpenCodeAdapterShape["stopSession"] = Effect.fn("stopSession")(
+    const stopSessionUnlocked: OpenCodeAdapterShape["stopSession"] = Effect.fn("stopSession")(
       function* (threadId) {
         const context = sessions.get(threadId);
         if (!context) {
@@ -1540,6 +1770,8 @@ export function makeOpenCodeAdapter(
         });
       },
     );
+    const stopSession: OpenCodeAdapterShape["stopSession"] = (threadId) =>
+      withThreadLock(threadId, stopSessionUnlocked(threadId));
 
     const listSessions: OpenCodeAdapterShape["listSessions"] = () =>
       Effect.sync(() => [...sessions.values()].map((context) => context.session));

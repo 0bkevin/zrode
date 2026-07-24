@@ -3,6 +3,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationShellSnapshot,
   type OrchestrationThread,
 } from "@t3tools/contracts";
@@ -198,6 +199,37 @@ function makeHarness() {
 describe("environment entity projections", () => {
   it("composes detail collections with authoritative shell workspace metadata", () => {
     const messages: OrchestrationThread["messages"] = [];
+    const cachedTurn = {
+      turnId: TurnId.make("turn-cached"),
+      state: "completed" as const,
+      requestedAt: "2026-06-01T00:00:00.000Z",
+      startedAt: "2026-06-01T00:00:01.000Z",
+      completedAt: "2026-06-01T00:01:00.000Z",
+      assistantMessageId: null,
+    };
+    const currentTurn = {
+      turnId: TurnId.make("turn-current"),
+      state: "running" as const,
+      requestedAt: "2026-06-01T00:02:00.000Z",
+      startedAt: "2026-06-01T00:02:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const cachedSession = {
+      threadId: THREAD_ID,
+      status: "ready" as const,
+      providerName: "codex",
+      runtimeMode: "full-access" as const,
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-06-01T00:01:00.000Z",
+    };
+    const currentSession = {
+      ...cachedSession,
+      status: "running" as const,
+      activeTurnId: currentTurn.turnId,
+      updatedAt: "2026-06-01T00:02:01.000Z",
+    };
     const detail = {
       ...THREAD_SHELL,
       environmentId: ENVIRONMENT_ID,
@@ -210,6 +242,8 @@ describe("environment entity projections", () => {
       proposedPlans: [],
       activities: [],
       checkpoints: [],
+      latestTurn: cachedTurn,
+      session: cachedSession,
     } satisfies OrchestrationThread & { readonly environmentId: EnvironmentId };
     const shell = {
       ...THREAD_SHELL,
@@ -217,6 +251,8 @@ describe("environment entity projections", () => {
       title: "Current thread",
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
+      latestTurn: currentTurn,
+      session: currentSession,
     };
 
     const merged = mergeEnvironmentThread(detail, shell);
@@ -227,6 +263,8 @@ describe("environment entity projections", () => {
       worktreePath: "/repo/current-worktree",
     });
     expect(merged?.messages).toBe(messages);
+    expect(merged?.latestTurn).toBe(currentTurn);
+    expect(merged?.session).toBe(currentSession);
   });
 
   it("preserves untouched project and thread identities across unrelated shell updates", () => {

@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
+import { ZRODE_DATABASE_MIGRATION_NAMES_BY_ID } from "@t3tools/shared/zrodeDatabaseMigrations";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -56,6 +57,8 @@ import Migration0041 from "./Migrations/041_ProviderGrokTokenIdentity.ts";
 import Migration0042 from "./Migrations/042_OpenCodeRecordedCloudCosts.ts";
 import Migration0043 from "./Migrations/043_GitHubCopilotTokenHistory.ts";
 import Migration0044 from "./Migrations/044_OrchestrationEventTypeSequenceIndex.ts";
+import Migration0045 from "./Migrations/045_OrchestrationActivityKindSequenceIndex.ts";
+import Migration0046 from "./Migrations/046_ArchiveRetiredTitleGenerationEvents.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -68,49 +71,51 @@ import Migration0044 from "./Migrations/044_OrchestrationEventTypeSequenceIndex.
  * returns migrations sorted by ID.
  */
 export const migrationEntries = [
-  [1, "OrchestrationEvents", Migration0001],
-  [2, "OrchestrationCommandReceipts", Migration0002],
-  [3, "CheckpointDiffBlobs", Migration0003],
-  [4, "ProviderSessionRuntime", Migration0004],
-  [5, "Projections", Migration0005],
-  [6, "ProjectionThreadSessionRuntimeModeColumns", Migration0006],
-  [7, "ProjectionThreadMessageAttachments", Migration0007],
-  [8, "ProjectionThreadActivitySequence", Migration0008],
-  [9, "ProviderSessionRuntimeMode", Migration0009],
-  [10, "ProjectionThreadsRuntimeMode", Migration0010],
-  [11, "OrchestrationThreadCreatedRuntimeMode", Migration0011],
-  [12, "ProjectionThreadsInteractionMode", Migration0012],
-  [13, "ProjectionThreadProposedPlans", Migration0013],
-  [14, "ProjectionThreadProposedPlanImplementation", Migration0014],
-  [15, "ProjectionTurnsSourceProposedPlan", Migration0015],
-  [16, "CanonicalizeModelSelections", Migration0016],
-  [17, "ProjectionThreadsArchivedAt", Migration0017],
-  [18, "ProjectionThreadsArchivedAtIndex", Migration0018],
-  [19, "ProjectionSnapshotLookupIndexes", Migration0019],
-  [20, "AuthAccessManagement", Migration0020],
-  [21, "AuthSessionClientMetadata", Migration0021],
-  [22, "AuthSessionLastConnectedAt", Migration0022],
-  [23, "ProjectionThreadShellSummary", Migration0023],
-  [24, "BackfillProjectionThreadShellSummary", Migration0024],
-  [25, "CleanupInvalidProjectionPendingApprovals", Migration0025],
-  [26, "CanonicalizeModelSelectionOptions", Migration0026],
-  [27, "ProviderSessionRuntimeInstanceId", Migration0027],
-  [28, "ProjectionThreadSessionInstanceId", Migration0028],
-  [29, "ProjectionThreadDetailOrderingIndexes", Migration0029],
-  [30, "ProjectionThreadShellArchiveIndexes", Migration0030],
-  [31, "AuthAuthorizationScopes", Migration0031],
-  [32, "AuthPairingProofKeyThumbprint", Migration0032],
-  [33, "ProjectionThreadsHandoffSource", Migration0033],
-  [34, "ProviderUsageHistory", Migration0034],
-  [35, "ProviderTokenActivity", Migration0035],
-  [37, "ProjectionThreadTurnQueue", Migration0037],
-  [38, "ProviderTokenModelActivity", Migration0038],
-  [39, "ProviderTokenAccounting", Migration0039],
-  [40, "ProviderTokenAccountingCorrections", Migration0040],
-  [41, "ProviderGrokTokenIdentity", Migration0041],
-  [42, "OpenCodeRecordedCloudCosts", Migration0042],
-  [43, "GitHubCopilotTokenHistory", Migration0043],
-  [44, "OrchestrationEventTypeSequenceIndex", Migration0044],
+  [1, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[1], Migration0001],
+  [2, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[2], Migration0002],
+  [3, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[3], Migration0003],
+  [4, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[4], Migration0004],
+  [5, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[5], Migration0005],
+  [6, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[6], Migration0006],
+  [7, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[7], Migration0007],
+  [8, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[8], Migration0008],
+  [9, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[9], Migration0009],
+  [10, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[10], Migration0010],
+  [11, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[11], Migration0011],
+  [12, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[12], Migration0012],
+  [13, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[13], Migration0013],
+  [14, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[14], Migration0014],
+  [15, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[15], Migration0015],
+  [16, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[16], Migration0016],
+  [17, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[17], Migration0017],
+  [18, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[18], Migration0018],
+  [19, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[19], Migration0019],
+  [20, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[20], Migration0020],
+  [21, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[21], Migration0021],
+  [22, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[22], Migration0022],
+  [23, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[23], Migration0023],
+  [24, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[24], Migration0024],
+  [25, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[25], Migration0025],
+  [26, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[26], Migration0026],
+  [27, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[27], Migration0027],
+  [28, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[28], Migration0028],
+  [29, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[29], Migration0029],
+  [30, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[30], Migration0030],
+  [31, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[31], Migration0031],
+  [32, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[32], Migration0032],
+  [33, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[33], Migration0033],
+  [34, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[34], Migration0034],
+  [35, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[35], Migration0035],
+  [37, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[37], Migration0037],
+  [38, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[38], Migration0038],
+  [39, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[39], Migration0039],
+  [40, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[40], Migration0040],
+  [41, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[41], Migration0041],
+  [42, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[42], Migration0042],
+  [43, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[43], Migration0043],
+  [44, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[44], Migration0044],
+  [45, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[45], Migration0045],
+  [46, ZRODE_DATABASE_MIGRATION_NAMES_BY_ID[46], Migration0046],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

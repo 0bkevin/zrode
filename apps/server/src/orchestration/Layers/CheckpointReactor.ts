@@ -25,6 +25,8 @@ import { captureTurnBaseline } from "../../checkpointing/TurnBaseline.ts";
 import {
   checkpointBaselineRefForThreadTurn,
   checkpointRefForThreadTurn,
+  checkpointRefForThreadTurnInManagedFamily,
+  isZrodeCheckpointRef,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
@@ -69,6 +71,34 @@ function currentCheckpointTurnCount(thread: Pick<OrchestrationThread, "checkpoin
     (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
     0,
   );
+}
+
+function checkpointRefForStoredThreadTurn(
+  thread: Pick<OrchestrationThread, "id" | "checkpoints">,
+  turnCount: number,
+): CheckpointRef {
+  const exactCheckpoint = thread.checkpoints.find(
+    (checkpoint) => checkpoint.checkpointTurnCount === turnCount,
+  )?.checkpointRef;
+  if (exactCheckpoint) {
+    return exactCheckpoint;
+  }
+
+  const checkpointsByTurn = thread.checkpoints.toSorted(
+    (left, right) => left.checkpointTurnCount - right.checkpointTurnCount,
+  );
+  for (const checkpoint of checkpointsByTurn) {
+    const familyRef = checkpointRefForThreadTurnInManagedFamily(
+      checkpoint.checkpointRef,
+      thread.id,
+      turnCount,
+    );
+    if (familyRef) {
+      return familyRef;
+    }
+  }
+
+  return checkpointRefForThreadTurn(thread.id, turnCount);
 }
 
 function autoTitleCandidatesForMessageText(text: string): ReadonlySet<string> {
@@ -687,7 +717,7 @@ const make = Effect.gen(function* () {
 
     const targetCheckpointRef =
       input.turnCount === 0
-        ? checkpointRefForThreadTurn(input.threadId, 0)
+        ? checkpointRefForStoredThreadTurn(thread, 0)
         : thread.checkpoints.find(
             (checkpoint) => checkpoint.checkpointTurnCount === input.turnCount,
           )?.checkpointRef;
@@ -732,7 +762,9 @@ const make = Effect.gen(function* () {
     const staleCheckpointRefs: Array<CheckpointRef> = [];
     for (const checkpoint of thread.checkpoints) {
       if (checkpoint.checkpointTurnCount > input.turnCount) {
-        staleCheckpointRefs.push(checkpoint.checkpointRef);
+        if (isZrodeCheckpointRef(checkpoint.checkpointRef, input.threadId)) {
+          staleCheckpointRefs.push(checkpoint.checkpointRef);
+        }
         staleCheckpointRefs.push(
           checkpointBaselineRefForThreadTurn(input.threadId, checkpoint.checkpointTurnCount),
         );
@@ -1111,7 +1143,11 @@ const make = Effect.gen(function* () {
       Extract<OrchestrationEvent, { type: "thread.activity-appended" }>
     >();
     yield* Stream.runForEach(
-      orchestrationEngine.readEvents(0, ["thread.activity-appended", "thread.turn-quiesced"]),
+      orchestrationEngine.readEvents(
+        0,
+        ["thread.activity-appended", "thread.turn-quiesced"],
+        ["turn.completed"],
+      ),
       (event) =>
         Effect.sync(() => {
           if (isTurnCompletionActivityEvent(event)) {

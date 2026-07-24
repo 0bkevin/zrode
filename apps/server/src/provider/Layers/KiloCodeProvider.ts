@@ -7,6 +7,7 @@ import {
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Crypto from "effect/Crypto";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -229,7 +230,11 @@ const runKiloCodeVersionCommand = (
 export const checkKiloCodeProviderStatus = Effect.fn("checkKiloCodeProviderStatus")(function* (
   kiloCodeSettings: KiloCodeSettings,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = kilocodeModelsFromSettings(kiloCodeSettings.customModels);
 

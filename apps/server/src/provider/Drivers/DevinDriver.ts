@@ -85,6 +85,7 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
   defaultConfig: (): DevinSettings => decodeDevinSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
@@ -115,6 +116,7 @@ export const DevinDriver: ProviderDriver<DevinSettings, DevinDriverEnv> = {
 
       const checkProvider = checkDevinProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
+        Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
 

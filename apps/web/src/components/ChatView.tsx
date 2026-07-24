@@ -268,6 +268,7 @@ import {
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
   shouldRouteFileCloseShortcut,
+  submissionUsesLocalDispatch,
   waitForSettledTurnAssistantText,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -510,6 +511,8 @@ function useLocalDispatchState(input: {
   threadError: string | null | undefined;
 }) {
   const [localDispatch, setLocalDispatch] = useState<LocalDispatchSnapshot | null>(null);
+  const latestUserMessageId =
+    input.activeThread?.messages.findLast((message) => message.role === "user")?.id ?? null;
 
   const resetLocalDispatch = useCallback(() => {
     setLocalDispatch(null);
@@ -521,6 +524,7 @@ function useLocalDispatchState(input: {
         localDispatch,
         phase: input.phase,
         latestTurn: input.activeLatestTurn,
+        latestUserMessageId,
         session: input.activeThread?.session ?? null,
         activities: input.activeThread?.activities ?? [],
         hasPendingApproval: input.activePendingApproval !== null,
@@ -535,6 +539,7 @@ function useLocalDispatchState(input: {
       input.activeThread?.activities,
       input.phase,
       input.threadError,
+      latestUserMessageId,
       localDispatch,
     ],
   );
@@ -5186,7 +5191,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     sendInFlightRef.current = true;
-    if (submissionBehavior === "start") {
+    if (submissionUsesLocalDispatch(submissionBehavior)) {
       beginLocalDispatch({
         preparingWorktree: Boolean(baseBranchForWorktree),
         messageId: messageIdForSend,
@@ -5390,7 +5395,7 @@ function ChatViewContent(props: ChatViewProps) {
                 : {}),
             }
           : undefined;
-      if (submissionBehavior === "start") {
+      if (submissionUsesLocalDispatch(submissionBehavior)) {
         beginLocalDispatch({ preparingWorktree: false, messageId: messageIdForSend });
       }
       const turnInput = {
@@ -5415,6 +5420,7 @@ function ChatViewContent(props: ChatViewProps) {
       } else if (submissionBehavior === "steer") {
         if (activeTurnIdForSteer === null) {
           sendInFlightRef.current = false;
+          resetLocalDispatch();
           setThreadError(activeThread.id, "The active turn changed before it could be steered.");
           return;
         }
@@ -5513,7 +5519,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
     sendInFlightRef.current = false;
-    if (!turnSubmissionSucceeded && submissionBehavior === "start") {
+    if (!turnSubmissionSucceeded && submissionUsesLocalDispatch(submissionBehavior)) {
       resetLocalDispatch();
     }
   };
@@ -6803,6 +6809,7 @@ function ChatViewContent(props: ChatViewProps) {
                       activeThread={activeThread}
                       isServerThread={isServerThread}
                       isLocalDraftThread={isLocalDraftThread}
+                      projectSelectionRequired={isLocalDraftThread && activeProject === null}
                       phase={phase}
                       isConnecting={isConnecting}
                       isSendBusy={isCommandBusy}

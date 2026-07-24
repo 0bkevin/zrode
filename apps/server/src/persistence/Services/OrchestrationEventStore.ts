@@ -38,6 +38,8 @@ export interface OrchestrationEventStoreShape {
    * @param sequenceExclusive - Sequence cursor (exclusive).
    * @param limit - Maximum number of events to emit.
    * @param eventTypes - Optional event type filter for targeted startup replay.
+   * @param threadActivityKinds - Optional activity-kind filter applied only to
+   * `thread.activity-appended` events while preserving other selected event types.
    * @returns Stream containing ordered events.
    *
    * Reads in fixed-size pages and normalizes non-integer/negative limits.
@@ -46,6 +48,7 @@ export interface OrchestrationEventStoreShape {
     sequenceExclusive: number,
     limit?: number,
     eventTypes?: ReadonlyArray<OrchestrationEventType>,
+    threadActivityKinds?: ReadonlyArray<string>,
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
 
   /**

@@ -75,6 +75,40 @@ describe("buildServerProvider", () => {
     expect(provider.message).toBe("Codex status check failed: 403 Forbidden.");
     expect(provider.message).not.toContain("request-id");
   });
+
+  it("keeps remediation guidance readable while bounding pathological diagnostics", () => {
+    const ordinaryGuidance = `Install the provider, then see ${"https://example.com/setup/".repeat(8)}`;
+    const ordinary = buildServerProvider({
+      presentation: { displayName: "Provider" },
+      enabled: true,
+      checkedAt: "2026-07-21T00:00:00.000Z",
+      models: [],
+      probe: {
+        installed: false,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: ordinaryGuidance,
+      },
+    });
+    expect(ordinary.message).toBe(ordinaryGuidance);
+
+    const oversized = buildServerProvider({
+      presentation: { displayName: "Provider" },
+      enabled: true,
+      checkedAt: "2026-07-21T00:00:00.000Z",
+      models: [],
+      probe: {
+        installed: false,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: "x".repeat(2_000),
+      },
+    });
+    expect(oversized.message).toHaveLength(512);
+    expect(oversized.message?.endsWith("…")).toBe(true);
+  });
 });
 
 describe("ProviderCommandNotFoundError", () => {

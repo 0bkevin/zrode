@@ -307,8 +307,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
   );
 
-  const readEvents: OrchestrationEngineShape["readEvents"] = (fromSequenceExclusive, eventTypes) =>
-    eventStore.readFromSequence(fromSequenceExclusive, Number.MAX_SAFE_INTEGER, eventTypes);
+  const readEvents: OrchestrationEngineShape["readEvents"] = (
+    fromSequenceExclusive,
+    eventTypes,
+    threadActivityKinds,
+  ) =>
+    eventStore.readFromSequence(
+      fromSequenceExclusive,
+      Number.MAX_SAFE_INTEGER,
+      eventTypes,
+      threadActivityKinds,
+    );
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {

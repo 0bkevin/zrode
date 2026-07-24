@@ -223,7 +223,9 @@ export function buildServerProvider(input: {
   const providerMessage = normalizeProviderErrorMessage(input.probe.message, {
     fallback: `${input.presentation.displayName} status could not be verified.`,
     requestSubject: `${input.presentation.displayName} status check`,
-    maxLength: 240,
+    // Keep diagnostics bounded without cutting ordinary remediation commands
+    // and documentation URLs (Cursor's missing-CLI guidance is >240 chars).
+    maxLength: 512,
   });
   const versionAdvisory = input.driver
     ? createProviderVersionAdvisory({
