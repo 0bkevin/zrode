@@ -723,9 +723,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const completedTurnId =
+            event.payload.turnCompletion?.turnId === existingRow.value.latestTurnId
+              ? event.payload.turnCompletion.turnId
+              : null;
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.session.activeTurnId,
+            latestTurnId: event.payload.session.activeTurnId ?? completedTurnId,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
@@ -1100,18 +1104,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             });
             yield* Effect.forEach(
               existingTurns.filter((turn) => turn.turnId !== null && turn.state === "running"),
-              (turn) =>
-                turn.turnId === null
-                  ? Effect.void
-                  : projectionTurnRepository.upsertByTurnId({
-                      ...turn,
-                      turnId: turn.turnId,
-                      state: settledTurnState,
-                      // A running turn's completedAt can only hold a mid-turn
-                      // placeholder checkpoint timestamp — the session leaving
-                      // "running" is the authoritative turn end.
-                      completedAt: event.payload.session.updatedAt,
-                    }),
+              (turn) => {
+                if (turn.turnId === null) {
+                  return Effect.void;
+                }
+                const matchingCompletion =
+                  event.payload.turnCompletion?.turnId === turn.turnId
+                    ? event.payload.turnCompletion
+                    : undefined;
+                return projectionTurnRepository.upsertByTurnId({
+                  ...turn,
+                  turnId: turn.turnId,
+                  state: matchingCompletion?.state ?? settledTurnState,
+                  // Canonical turn completion is authoritative when present.
+                  // Legacy session-set events retain the prior session-derived
+                  // settlement behavior.
+                  completedAt: matchingCompletion?.completedAt ?? event.payload.session.updatedAt,
+                });
+              },
               { concurrency: 1 },
             );
             return;

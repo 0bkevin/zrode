@@ -70,6 +70,83 @@ it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   }),
 );
 
+it.effect("decodes legacy thread.session-set events without turn completion metadata", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-session-set-legacy",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.session-set",
+      payload: {
+        threadId: "thread-1",
+        session: {
+          threadId: "thread-1",
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: "command-session-set-legacy",
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+    });
+
+    assert.strictEqual(parsed.type, "thread.session-set");
+    if (parsed.type === "thread.session-set") {
+      assert.strictEqual(parsed.payload.turnCompletion, undefined);
+    }
+  }),
+);
+
+it.effect("round-trips thread.session-set canonical turn completion metadata", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationEvent({
+      sequence: 2,
+      eventId: "event-session-set-completion",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.session-set",
+      payload: {
+        threadId: "thread-1",
+        session: {
+          threadId: "thread-1",
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        },
+        turnCompletion: {
+          turnId: "turn-1",
+          state: "interrupted",
+          completedAt: "2026-01-01T00:00:02.000Z",
+        },
+      },
+      occurredAt: "2026-01-01T00:00:02.000Z",
+      commandId: "command-session-set-completion",
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+    });
+
+    assert.strictEqual(parsed.type, "thread.session-set");
+    if (parsed.type === "thread.session-set") {
+      assert.deepStrictEqual(parsed.payload.turnCompletion, {
+        turnId: "turn-1",
+        state: "interrupted",
+        completedAt: "2026-01-01T00:00:02.000Z",
+      });
+    }
+  }),
+);
+
 it.effect("parses turn diff input with whitespace ignoring enabled", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeTurnDiffInput({

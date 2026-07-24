@@ -372,6 +372,13 @@ export const OrchestrationLatestTurn = Schema.Struct({
 });
 export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
 
+export const OrchestrationTurnCompletion = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["completed", "interrupted", "error"]),
+  completedAt: IsoDateTime,
+});
+export type OrchestrationTurnCompletion = typeof OrchestrationTurnCompletion.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -864,6 +871,7 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  turnCompletion: Schema.optional(OrchestrationTurnCompletion),
   createdAt: IsoDateTime,
 });
 
@@ -1255,6 +1263,7 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  turnCompletion: Schema.optional(OrchestrationTurnCompletion),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({

@@ -24,6 +24,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
@@ -58,6 +59,7 @@ import {
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
   shouldRestartGrokSessionConfiguration,
+  withLatestTurnStartOwnership,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
@@ -146,6 +148,44 @@ describe("ProviderCommandReactor", () => {
       expect(providerErrorLabel("third_party_driver")).toBe("third_party_driver");
     });
   });
+
+  effectIt.effect("releases turn-start ownership on preflight failure and interruption", () =>
+    Effect.gen(function* () {
+      const owners = new Map<string, string>();
+      yield* withLatestTurnStartOwnership(owners, "thread-1", "failed-preflight", () =>
+        Effect.fail("preflight failed"),
+      ).pipe(Effect.exit);
+      expect(owners.size).toBe(0);
+
+      const preflightStarted = yield* Deferred.make<void>();
+      const interruptedPreflight = yield* withLatestTurnStartOwnership(
+        owners,
+        "thread-1",
+        "interrupted-preflight",
+        () => Deferred.succeed(preflightStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(preflightStarted);
+      expect(owners.get("thread-1")).toBe("interrupted-preflight");
+
+      yield* Fiber.interrupt(interruptedPreflight);
+      expect(owners.size).toBe(0);
+
+      let useCount = 0;
+      const reusableOwnership = withLatestTurnStartOwnership(
+        owners,
+        "thread-1",
+        "reusable-preflight",
+        (transferOwnership) => {
+          useCount += 1;
+          return useCount === 1 ? transferOwnership : Effect.fail("second preflight failed");
+        },
+      );
+      yield* reusableOwnership;
+      owners.delete("thread-1");
+      yield* reusableOwnership.pipe(Effect.exit);
+      expect(owners.size).toBe(0);
+    }),
+  );
 
   it("restarts Grok only when process-level effort or interaction mode changes", () => {
     const high = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.5", [
@@ -2466,6 +2506,100 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session?.status).toBe("running");
       expect(thread?.session?.activeTurnId).toBe(asTurnId("turn-newer-after-restart"));
       expect(thread?.session?.lastError).toBeNull();
+    }),
+  );
+
+  effectIt.effect("does not let an older start cleanup release a newer start's ownership", () =>
+    Effect.gen(function* () {
+      const firstStart = yield* Deferred.make<{
+        readonly threadId: ThreadId;
+        readonly turnId: TurnId;
+      }>();
+      const secondStart = yield* Deferred.make<
+        {
+          readonly threadId: ThreadId;
+          readonly turnId: TurnId;
+        },
+        ProviderAdapterRequestError
+      >();
+      let sendCount = 0;
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurn: () => {
+            sendCount += 1;
+            return sendCount === 1 ? Deferred.await(firstStart) : Deferred.await(secondStart);
+          },
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-owned-start-old"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-owned-start-old"),
+          role: "user",
+          text: "old start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-owned-start-stop"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.stopSession.mock.calls.length === 1));
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-owned-start-new"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-owned-start-new"),
+          role: "user",
+          text: "new start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+
+      yield* Deferred.succeed(firstStart, {
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-retired-owned-start"),
+      });
+      yield* Effect.promise(() => waitFor(() => harness.interruptTurn.mock.calls.length === 1));
+
+      yield* Deferred.fail(
+        secondStart,
+        new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "thread.turn.start",
+          detail: "newer owned start failed",
+        }),
+      );
+
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const readModel = await harness.readModel();
+          const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+          return thread?.session?.status === "error";
+        }),
+      );
+
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session?.status).toBe("error");
+      expect(thread?.session?.activeTurnId).toBeNull();
+      expect(thread?.session?.lastError).toContain("newer owned start failed");
     }),
   );
 

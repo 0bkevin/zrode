@@ -35,7 +35,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             .getSnapshot()
             .pipe(
               Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
+                failEnvironmentInternal("orchestration_snapshot_failed", cause),
               ),
             );
         }),
@@ -63,7 +63,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             .getThreadDetailSnapshotById(args.params.threadId)
             .pipe(
               Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_snapshot_failed", cause),
+                failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
               ),
             );
           if (Option.isNone(snapshot)) {

@@ -1303,6 +1303,137 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("reports the full orchestration snapshot failure reason", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getSnapshot: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "test.full-orchestration-snapshot",
+                }),
+              ),
+          },
+        },
+      });
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/orchestration/snapshot");
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+        readonly traceId: string;
+      }>(response);
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(body, {
+        _tag: "EnvironmentInternalError",
+        code: "internal_error",
+        reason: "orchestration_snapshot_failed",
+        traceId: body.traceId,
+      });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reports the shell orchestration snapshot failure reason", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "test.shell-orchestration-snapshot",
+                }),
+              ),
+          },
+        },
+      });
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/orchestration/shell");
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+        readonly traceId: string;
+      }>(response);
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(body, {
+        _tag: "EnvironmentInternalError",
+        code: "internal_error",
+        reason: "orchestration_snapshot_failed",
+        traceId: body.traceId,
+      });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reports the thread orchestration snapshot failure reason", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshotById: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "test.thread-orchestration-snapshot",
+                }),
+              ),
+          },
+        },
+      });
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl(
+        `/api/orchestration/threads/${encodeURIComponent(defaultThreadId)}`,
+      );
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+        readonly traceId: string;
+      }>(response);
+
+      assert.equal(response.status, 500);
+      assert.deepEqual(body, {
+        _tag: "EnvironmentInternalError",
+        code: "internal_error",
+        reason: "orchestration_thread_snapshot_failed",
+        traceId: body.traceId,
+      });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("retains the missing-thread snapshot 404 response", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/orchestration/threads/missing-thread");
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+        readonly traceId: string;
+      }>(response);
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(body, {
+        _tag: "EnvironmentResourceNotFoundError",
+        code: "not_found",
+        reason: "thread_not_found",
+        traceId: body.traceId,
+      });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves the public environment descriptor without requiring auth", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

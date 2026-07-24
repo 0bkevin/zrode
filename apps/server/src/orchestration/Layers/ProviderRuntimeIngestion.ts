@@ -17,6 +17,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
+  type RuntimeSessionState,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -259,9 +260,23 @@ function normalizeRuntimeTurnState(
   }
 }
 
+function orchestrationTurnCompletionState(
+  value: string | undefined,
+): "completed" | "interrupted" | "error" {
+  switch (normalizeRuntimeTurnState(value)) {
+    case "failed":
+      return "error";
+    case "interrupted":
+    case "cancelled":
+      return "interrupted";
+    case "completed":
+      return "completed";
+  }
+}
+
 function orchestrationSessionStatusFromRuntimeState(
-  state: "starting" | "running" | "waiting" | "ready" | "interrupted" | "stopped" | "error",
-): "starting" | "running" | "ready" | "interrupted" | "stopped" | "error" {
+  state: RuntimeSessionState,
+): "starting" | "running" | "ready" | "stopped" | "error" {
   switch (state) {
     case "starting":
       return "starting";
@@ -270,8 +285,6 @@ function orchestrationSessionStatusFromRuntimeState(
       return "running";
     case "ready":
       return "ready";
-    case "interrupted":
-      return "interrupted";
     case "stopped":
       return "stopped";
     case "error":
@@ -1493,6 +1506,15 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            ...(event.type === "turn.completed" && eventTurnId !== undefined
+              ? {
+                  turnCompletion: {
+                    turnId: eventTurnId,
+                    state: orchestrationTurnCompletionState(event.payload.state),
+                    completedAt: now,
+                  },
+                }
+              : {}),
             createdAt: now,
           });
         }

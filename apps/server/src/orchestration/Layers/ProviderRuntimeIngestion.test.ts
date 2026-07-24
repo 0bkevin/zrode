@@ -371,6 +371,67 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  it("settles an interrupted turn while returning the session to ready", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-interrupted"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId: asTurnId("turn-interrupted"),
+      payload: {},
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session.activeTurnId === "turn-interrupted",
+    );
+    await harness.drain();
+    const sessionSetCountBeforeCompletion = (await harness.readEvents()).filter(
+      (event) => event.type === "thread.session-set",
+    ).length;
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-interrupted"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId: asTurnId("turn-interrupted"),
+      payload: {
+        state: "interrupted",
+      },
+    });
+
+    await harness.drain();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === asThreadId("thread-1"));
+    expect(thread?.latestTurn?.state).toBe("interrupted");
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.activeTurnId).toBeNull();
+
+    await harness.drain();
+    const completionSessionEvents = (await harness.readEvents())
+      .filter((event) => event.type === "thread.session-set")
+      .slice(sessionSetCountBeforeCompletion);
+    expect(completionSessionEvents).toHaveLength(1);
+    expect(completionSessionEvents[0]?.payload).toMatchObject({
+      session: {
+        status: "ready",
+        activeTurnId: null,
+      },
+      turnCompletion: {
+        turnId: "turn-interrupted",
+        state: "interrupted",
+        completedAt: "2026-01-01T00:00:01.000Z",
+      },
+    });
+  });
+
   it("applies provider session.state.changed transitions directly", async () => {
     const harness = await createHarness();
     const waitingAt = "2026-01-01T00:00:00.000Z";

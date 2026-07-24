@@ -224,6 +224,32 @@ function stalePendingRequestDetail(
   return `Stale pending ${requestKind} request: ${requestId}. Provider callback state does not survive app restarts or recovered sessions. Restart the turn to continue.`;
 }
 
+export function withLatestTurnStartOwnership<A, E, R>(
+  owners: Map<string, string>,
+  threadId: string,
+  key: string,
+  use: (transferOwnership: Effect.Effect<void>) => Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  return Effect.suspend(() => {
+    let transferred = false;
+    const releaseIfOwned = Effect.sync(() => {
+      if (owners.get(threadId) === key) {
+        owners.delete(threadId);
+      }
+    });
+    const transferOwnership = Effect.sync(() => {
+      transferred = true;
+    });
+
+    return Effect.sync(() => {
+      owners.set(threadId, key);
+    }).pipe(
+      Effect.andThen(use(transferOwnership)),
+      Effect.ensuring(Effect.suspend(() => (transferred ? Effect.void : releaseIfOwned))),
+    );
+  });
+}
+
 function buildGeneratedWorktreeBranchName(raw: string): string {
   const normalized = raw
     .trim()
@@ -277,6 +303,12 @@ const make = Effect.gen(function* () {
   const threadModelSelections = new Map<string, ModelSelection>();
   const threadInteractionModes = new Map<string, "default" | "plan">();
   const latestTurnStartKeys = new Map<string, string>();
+  const releaseLatestTurnStartKey = (threadId: ThreadId, key: string) =>
+    Effect.sync(() => {
+      if (latestTurnStartKeys.get(threadId) === key) {
+        latestTurnStartKeys.delete(threadId);
+      }
+    });
   // Turn starts run in scoped background fibers so the intent worker remains
   // responsive. Track a per-thread cancellation generation to fence the race
   // where Stop arrives while startSession/sendTurn is still awaiting the
@@ -964,149 +996,174 @@ const make = Effect.gen(function* () {
       });
       return;
     }
-    latestTurnStartKeys.set(event.payload.threadId, key);
     const startGeneration = currentTurnCancellationGeneration(event.payload.threadId);
 
-    const isFirstUserMessageTurn =
-      thread.messages.filter((entry) => entry.role === "user").length === 1;
-    if (isFirstUserMessageTurn) {
-      const project = yield* resolveProject(thread.projectId);
-      const generationCwd =
-        resolveThreadWorkspaceCwd({
-          thread,
-          projects: project ? [project] : [],
-        }) ?? process.cwd();
-      const generationInput = {
-        messageText: message.text,
-        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-      };
+    return yield* withLatestTurnStartOwnership(
+      latestTurnStartKeys,
+      event.payload.threadId,
+      key,
+      (transferOwnership) =>
+        Effect.gen(function* () {
+          const isFirstUserMessageTurn =
+            thread.messages.filter((entry) => entry.role === "user").length === 1;
+          if (isFirstUserMessageTurn) {
+            const project = yield* resolveProject(thread.projectId);
+            const generationCwd =
+              resolveThreadWorkspaceCwd({
+                thread,
+                projects: project ? [project] : [],
+              }) ?? process.cwd();
+            const generationInput = {
+              messageText: message.text,
+              ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+              ...(event.payload.titleSeed !== undefined
+                ? { titleSeed: event.payload.titleSeed }
+                : {}),
+            };
 
-      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-        threadId: event.payload.threadId,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        ...generationInput,
-      }).pipe(Effect.forkScoped);
+            yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
+              threadId: event.payload.threadId,
+              branch: thread.branch,
+              worktreePath: thread.worktreePath,
+              ...generationInput,
+            }).pipe(Effect.forkScoped);
 
-      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
-        yield* maybeGenerateThreadTitleForFirstTurn({
-          threadId: event.payload.threadId,
-          cwd: generationCwd,
-          ...generationInput,
-        }).pipe(Effect.forkScoped);
-      }
-    }
+            if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+              yield* maybeGenerateThreadTitleForFirstTurn({
+                threadId: event.payload.threadId,
+                cwd: generationCwd,
+                ...generationInput,
+              }).pipe(Effect.forkScoped);
+            }
+          }
 
-    const handleTurnStartFailure = (
-      cause: Cause.Cause<unknown>,
-      options?: { readonly retryable?: boolean },
-    ) => {
-      if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.void;
-      }
-      const detail = formatFailureDetail(cause);
-      const retryable = options?.retryable ?? isRetryableTurnStartFailure(cause);
-      const turnStart = {
-        ...(event.payload.modelSelection !== undefined
-          ? { modelSelection: event.payload.modelSelection }
-          : {}),
-        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-        runtimeMode: event.payload.runtimeMode,
-        interactionMode: event.payload.interactionMode,
-        ...(event.payload.sourceProposedPlan !== undefined
-          ? { sourceProposedPlan: event.payload.sourceProposedPlan }
-          : {}),
-      };
-      const stillOwnsLifecycle =
-        latestTurnStartKeys.get(event.payload.threadId) === key &&
-        currentTurnCancellationGeneration(event.payload.threadId) === startGeneration;
-      const updateLifecycle = stillOwnsLifecycle
-        ? setThreadSessionErrorOnTurnStartFailure({
+          const handleTurnStartFailure = (
+            cause: Cause.Cause<unknown>,
+            options?: { readonly retryable?: boolean },
+          ) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              return Effect.void;
+            }
+            const detail = formatFailureDetail(cause);
+            const retryable = options?.retryable ?? isRetryableTurnStartFailure(cause);
+            const turnStart = {
+              ...(event.payload.modelSelection !== undefined
+                ? { modelSelection: event.payload.modelSelection }
+                : {}),
+              ...(event.payload.titleSeed !== undefined
+                ? { titleSeed: event.payload.titleSeed }
+                : {}),
+              runtimeMode: event.payload.runtimeMode,
+              interactionMode: event.payload.interactionMode,
+              ...(event.payload.sourceProposedPlan !== undefined
+                ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+                : {}),
+            };
+            const stillOwnsLifecycle =
+              latestTurnStartKeys.get(event.payload.threadId) === key &&
+              currentTurnCancellationGeneration(event.payload.threadId) === startGeneration;
+            const updateLifecycle = stillOwnsLifecycle
+              ? setThreadSessionErrorOnTurnStartFailure({
+                  threadId: event.payload.threadId,
+                  detail,
+                  createdAt: event.payload.createdAt,
+                })
+              : Effect.void;
+            return updateLifecycle.pipe(
+              Effect.flatMap(() =>
+                appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.turn.start.failed",
+                  summary: "Provider turn start failed",
+                  detail,
+                  turnId: null,
+                  createdAt: event.payload.createdAt,
+                  messageId: event.payload.messageId,
+                  retryable,
+                  turnStart,
+                }),
+              ),
+              Effect.asVoid,
+            );
+          };
+
+          const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
+            handleTurnStartFailure(cause).pipe(
+              Effect.catchCause((recoveryCause) =>
+                Effect.logWarning("provider command reactor failed to recover turn start failure", {
+                  eventType: event.type,
+                  threadId: event.payload.threadId,
+                  cause: Cause.pretty(recoveryCause),
+                  originalCause: Cause.pretty(cause),
+                }),
+              ),
+            );
+
+          const sendTurnRequest = yield* buildSendTurnRequestForThread({
             threadId: event.payload.threadId,
-            detail,
-            createdAt: event.payload.createdAt,
-          })
-        : Effect.void;
-      return updateLifecycle.pipe(
-        Effect.flatMap(() =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.turn.start.failed",
-            summary: "Provider turn start failed",
-            detail,
-            turnId: null,
-            createdAt: event.payload.createdAt,
             messageId: event.payload.messageId,
-            retryable,
-            turnStart,
-          }),
-        ),
-        Effect.asVoid,
-      );
-    };
+            messageText: message.text,
+            ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+            ...(event.payload.modelSelection !== undefined
+              ? { modelSelection: event.payload.modelSelection }
+              : {}),
+            interactionMode: event.payload.interactionMode,
+            createdAt: event.payload.createdAt,
+          }).pipe(
+            Effect.map(Option.some),
+            Effect.catchCause((cause) =>
+              handleTurnStartFailure(cause).pipe(Effect.as(Option.none())),
+            ),
+          );
 
-    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
-      handleTurnStartFailure(cause).pipe(
-        Effect.catchCause((recoveryCause) =>
-          Effect.logWarning("provider command reactor failed to recover turn start failure", {
-            eventType: event.type,
-            threadId: event.payload.threadId,
-            cause: Cause.pretty(recoveryCause),
-            originalCause: Cause.pretty(cause),
-          }),
-        ),
-      );
+          if (Option.isNone(sendTurnRequest)) {
+            return;
+          }
 
-    const sendTurnRequest = yield* buildSendTurnRequestForThread({
-      threadId: event.payload.threadId,
-      messageId: event.payload.messageId,
-      messageText: message.text,
-      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
-      interactionMode: event.payload.interactionMode,
-      createdAt: event.payload.createdAt,
-    }).pipe(
-      Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
-    );
+          // This must finish before sendTurn: otherwise a fast provider can edit the
+          // workspace before the turn's "before" snapshot exists. A failed capture
+          // aborts this attempt so a later runtime event cannot create a late,
+          // incomplete baseline and present it as exact.
+          const baselineCaptured = yield* captureBaselineBeforeTurnStart(
+            event.payload.threadId,
+          ).pipe(
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "failed to capture checkpoint baseline before provider turn start",
+                {
+                  threadId: event.payload.threadId,
+                  cause: Cause.pretty(cause),
+                },
+              ).pipe(
+                Effect.andThen(handleTurnStartFailure(cause, { retryable: true })),
+                Effect.as(false),
+              ),
+            ),
+          );
+          if (!baselineCaptured) {
+            return;
+          }
 
-    if (Option.isNone(sendTurnRequest)) {
-      return;
-    }
-
-    // This must finish before sendTurn: otherwise a fast provider can edit the
-    // workspace before the turn's "before" snapshot exists. A failed capture
-    // aborts this attempt so a later runtime event cannot create a late,
-    // incomplete baseline and present it as exact.
-    const baselineCaptured = yield* captureBaselineBeforeTurnStart(event.payload.threadId).pipe(
-      Effect.as(true),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("failed to capture checkpoint baseline before provider turn start", {
-          threadId: event.payload.threadId,
-          cause: Cause.pretty(cause),
-        }).pipe(
-          Effect.andThen(handleTurnStartFailure(cause, { retryable: true })),
-          Effect.as(false),
-        ),
-      ),
-    );
-    if (!baselineCaptured) {
-      return;
-    }
-
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
-      Effect.tap((turn) =>
-        interruptTurnStartedAfterCancellation({
-          threadId: event.payload.threadId,
-          turnId: turn.turnId,
-          startGeneration,
+          yield* Effect.uninterruptibleMask((restore) =>
+            restore(
+              providerService.sendTurn(sendTurnRequest.value).pipe(
+                Effect.tap((turn) =>
+                  interruptTurnStartedAfterCancellation({
+                    threadId: event.payload.threadId,
+                    turnId: turn.turnId,
+                    startGeneration,
+                  }),
+                ),
+                Effect.catchCause(recoverTurnStartFailure),
+                Effect.ensuring(releaseLatestTurnStartKey(event.payload.threadId, key)),
+              ),
+            ).pipe(
+              Effect.forkScoped,
+              Effect.tap(() => transferOwnership),
+            ),
+          );
         }),
-      ),
-      Effect.catchCause(recoverTurnStartFailure),
-      Effect.forkScoped,
     );
   });
 

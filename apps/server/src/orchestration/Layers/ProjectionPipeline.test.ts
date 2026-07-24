@@ -1448,6 +1448,109 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("applies canonical interrupted completion to the matching persisted turn", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-canonical-completion");
+      const turnId = TurnId.make("turn-canonical-completion");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const startedAt = "2026-01-01T00:00:01.000Z";
+      const completedAt = "2026-01-01T00:00:59.000Z";
+      const readyAt = "2026-01-01T00:01:00.000Z";
+
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-canonical-completion-create"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-canonical-completion-create"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-canonical-completion-create"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-canonical-completion"),
+          title: "Canonical completion",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-canonical-completion-running"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: startedAt,
+        commandId: CommandId.make("cmd-canonical-completion-running"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-canonical-completion-running"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: startedAt,
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-canonical-completion-ready"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: readyAt,
+        commandId: CommandId.make("cmd-canonical-completion-ready"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-canonical-completion-ready"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: readyAt,
+          },
+          turnCompletion: {
+            turnId,
+            state: "interrupted",
+            completedAt,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly state: string;
+        readonly completedAt: string | null;
+      }>`
+        SELECT state, completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `;
+      assert.deepEqual(rows, [{ state: "interrupted", completedAt }]);
+    }),
+  );
+
   it.effect("settles a superseded running turn when a new turn becomes active", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;

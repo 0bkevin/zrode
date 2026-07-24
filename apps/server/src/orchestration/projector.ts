@@ -522,6 +522,10 @@ export function projectEvent(
         // Leaving the "running" session status is the turn-end signal: settle
         // a still-running latest turn so its duration reflects the whole turn.
         const settledTurnState = settledTurnStateForSessionStatus(session.status);
+        const matchingTurnCompletion =
+          thread.latestTurn !== null && payload.turnCompletion?.turnId === thread.latestTurn.turnId
+            ? payload.turnCompletion
+            : undefined;
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
@@ -550,11 +554,11 @@ export function projectEvent(
                     settledTurnState !== null
                   ? {
                       ...thread.latestTurn,
-                      state: settledTurnState,
-                      // A running turn's completedAt can only hold a mid-turn
-                      // placeholder checkpoint timestamp — the session leaving
-                      // "running" is the authoritative turn end.
-                      completedAt: session.updatedAt,
+                      state: matchingTurnCompletion?.state ?? settledTurnState,
+                      // Canonical turn completion is authoritative when
+                      // present. Legacy session-set events retain the prior
+                      // session-derived settlement behavior.
+                      completedAt: matchingTurnCompletion?.completedAt ?? session.updatedAt,
                     }
                   : thread.latestTurn,
             updatedAt: event.occurredAt,
