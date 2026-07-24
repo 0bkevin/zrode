@@ -63,6 +63,7 @@ const make = Effect.gen(function* () {
         requestedAt: event.payload.requestedAt,
       })
       .pipe(
+        Effect.andThen(markImportCompleted(event)),
         Effect.catchCause((cause) => {
           if (Cause.hasInterruptsOnly(cause)) {
             return Effect.interrupt;
@@ -73,10 +74,6 @@ const make = Effect.gen(function* () {
             cause: Cause.pretty(cause),
           });
         }),
-        // Completion is recorded even when the import failed so a persistent
-        // failure does not re-run the scan on every server start. Interrupts
-        // skip it, leaving the request pending for the next start.
-        Effect.andThen(markImportCompleted(event)),
       );
 
   const worker = yield* makeDrainableWorker(processEvent);

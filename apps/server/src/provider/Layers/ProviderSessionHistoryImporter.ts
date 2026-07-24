@@ -1,14 +1,16 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
+  CodexSettings,
   CommandId,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  defaultInstanceIdForDriver,
   MessageId,
+  OpenCodeSettings,
   ProjectId,
   ProviderDriverKind,
   ThreadId,
-  defaultInstanceIdForDriver,
   type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationMessageRole,
@@ -22,7 +24,9 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -37,10 +41,12 @@ import {
   resolveClaudeConfigDirPath,
 } from "../Drivers/ClaudeHome.ts";
 import { materializeCodexShadowHome, resolveCodexHomeLayout } from "../Drivers/CodexHomeLayout.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { OpenCodeRuntime, openCodeRuntimeErrorDetail, runOpenCodeSdk } from "../opencodeRuntime.ts";
 import {
   ProviderSessionHistoryImporter,
+  ProviderSessionHistoryImportError,
   type ProviderSessionHistoryImportInput,
   type ProviderSessionHistoryImporterShape,
 } from "../Services/ProviderSessionHistoryImporter.ts";
@@ -51,12 +57,29 @@ const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 const CURSOR_PROVIDER = ProviderDriverKind.make("cursor");
 const DEVIN_PROVIDER = ProviderDriverKind.make("devin");
 const GROK_PROVIDER = ProviderDriverKind.make("grok");
+const KILOCODE_PROVIDER = ProviderDriverKind.make("kilocode");
+const GITHUB_COPILOT_PROVIDER = ProviderDriverKind.make("githubCopilot");
+const DEFAULT_CODEX_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_PROVIDER);
+const DEFAULT_OPENCODE_INSTANCE_ID = defaultInstanceIdForDriver(OPENCODE_PROVIDER);
+const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+const decodeOpenCodeSettings = Schema.decodeUnknownOption(OpenCodeSettings);
 
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const MAX_IMPORTED_MESSAGES_PER_SESSION = 2_000;
 const OPENCODE_PAGE_LIMIT = 200;
-const OPENCODE_SESSION_PAGE_LIMIT = 200;
+// OpenCode's session `start` parameter is a timestamp filter, not a pagination
+// offset, and the endpoint does not expose a cursor. Request the complete
+// project result set in one call so older sessions are not silently omitted.
+const OPENCODE_SESSION_LIST_LIMIT = Number.MAX_SAFE_INTEGER;
 const CODEX_PAGE_LIMIT = 100;
+const PROVIDER_IMPORT_RETRY_COUNT = 2;
+const CODEX_TOP_LEVEL_SOURCE_KINDS = [
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "unknown",
+] as const satisfies ReadonlyArray<CodexSchema.V2ThreadListParams__ThreadSourceKind>;
 
 interface ImportedHistoryMessage {
   readonly role: OrchestrationMessageRole;
@@ -71,6 +94,60 @@ interface ImportedHistorySession {
   readonly model?: string;
   readonly createdAt: string;
   readonly messages: ReadonlyArray<ImportedHistoryMessage>;
+}
+
+function defaultCodexInstanceSettings(settings: ServerSettings): {
+  readonly config: CodexSettings;
+  readonly environment: NodeJS.ProcessEnv;
+} {
+  const instance = settings.providerInstances[DEFAULT_CODEX_INSTANCE_ID];
+  if (instance === undefined) {
+    return { config: settings.providers.codex, environment: process.env };
+  }
+  if (instance.driver !== CODEX_PROVIDER) {
+    return {
+      config: { ...settings.providers.codex, enabled: false },
+      environment: process.env,
+    };
+  }
+  const decoded = Option.getOrUndefined(decodeCodexSettings(instance.config ?? {}));
+  if (decoded === undefined) {
+    return {
+      config: { ...settings.providers.codex, enabled: false },
+      environment: process.env,
+    };
+  }
+  return {
+    config: { ...decoded, enabled: instance.enabled ?? decoded.enabled },
+    environment: mergeProviderInstanceEnvironment(instance.environment),
+  };
+}
+
+function defaultOpenCodeInstanceSettings(settings: ServerSettings): {
+  readonly config: OpenCodeSettings;
+  readonly environment: NodeJS.ProcessEnv;
+} {
+  const instance = settings.providerInstances[DEFAULT_OPENCODE_INSTANCE_ID];
+  if (instance === undefined) {
+    return { config: settings.providers.opencode, environment: process.env };
+  }
+  if (instance.driver !== OPENCODE_PROVIDER) {
+    return {
+      config: { ...settings.providers.opencode, enabled: false },
+      environment: process.env,
+    };
+  }
+  const decoded = Option.getOrUndefined(decodeOpenCodeSettings(instance.config ?? {}));
+  if (decoded === undefined) {
+    return {
+      config: { ...settings.providers.opencode, enabled: false },
+      environment: process.env,
+    };
+  }
+  return {
+    config: { ...decoded, enabled: instance.enabled ?? decoded.enabled },
+    environment: mergeProviderInstanceEnvironment(instance.environment),
+  };
 }
 
 function stableHash(parts: ReadonlyArray<string>): string {
@@ -138,8 +215,10 @@ function normalizePathValue(path: Path.Path, value: string): string {
 function isSameOrDescendantPath(path: Path.Path, value: string, root: string): boolean {
   const normalizedValue = normalizePathValue(path, value);
   const normalizedRoot = normalizePathValue(path, root);
+  const relative = path.relative(normalizedRoot, normalizedValue);
   return (
-    normalizedValue === normalizedRoot || normalizedValue.startsWith(`${normalizedRoot}${path.sep}`)
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
   );
 }
 
@@ -288,6 +367,7 @@ function messagesFromCodexThread(
 
 function textFromOpenCodePart(part: Part): string {
   if (part.type !== "text") return "";
+  if (part.synthetic === true || part.ignored === true) return "";
   return part.text.trim();
 }
 
@@ -384,43 +464,28 @@ const make = Effect.gen(function* () {
         createdAt: session.createdAt,
       };
 
-      yield* orchestrationEngine.dispatch(command).pipe(
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.interrupt;
-          }
-          return Effect.logWarning("provider session history import dispatch failed", {
-            projectId: input.projectId,
-            provider: session.provider,
-            providerThreadId: session.providerThreadId,
-            cause: Cause.pretty(cause),
-          });
-        }),
-      );
+      yield* orchestrationEngine.dispatch(command);
     });
 
   const importCodexHistory = (input: ProviderSessionHistoryImportInput, settings: ServerSettings) =>
     Effect.scoped(
       Effect.gen(function* () {
-        if (!settings.providers.codex.enabled) return [];
-        const layout = yield* resolveCodexHomeLayout(settings.providers.codex);
+        const codex = defaultCodexInstanceSettings(settings);
+        if (!codex.config.enabled) return [];
+        const layout = yield* resolveCodexHomeLayout(codex.config);
         if (layout.mode === "authOverlay") {
           yield* materializeCodexShadowHome(layout);
         }
 
         const homePath = layout.effectiveHomePath ?? layout.sharedHomePath;
         const env = {
-          ...process.env,
+          ...codex.environment,
           CODEX_HOME: expandHomePath(homePath),
         };
-        const spawnCommand = yield* resolveSpawnCommand(
-          settings.providers.codex.binaryPath,
-          ["app-server"],
-          {
-            env,
-            extendEnv: true,
-          },
-        );
+        const spawnCommand = yield* resolveSpawnCommand(codex.config.binaryPath, ["app-server"], {
+          env,
+          extendEnv: true,
+        });
         const child = yield* spawner
           .spawn(
             ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -435,7 +500,7 @@ const make = Effect.gen(function* () {
             Effect.mapError(
               (cause) =>
                 new CodexErrors.CodexAppServerSpawnError({
-                  command: `${settings.providers.codex.binaryPath} app-server`,
+                  command: `${codex.config.binaryPath} app-server`,
                   cause,
                 }),
             ),
@@ -461,12 +526,14 @@ const make = Effect.gen(function* () {
                 limit: CODEX_PAGE_LIMIT,
                 sortKey: "created_at",
                 sortDirection: "asc",
+                sourceKinds: CODEX_TOP_LEVEL_SOURCE_KINDS,
               },
             );
             for (const thread of response.data) {
               if (
+                thread.parentThreadId == null &&
                 normalizePathValue(path, thread.cwd) ===
-                normalizePathValue(path, input.workspaceRoot)
+                  normalizePathValue(path, input.workspaceRoot)
               ) {
                 listed.set(thread.id, thread);
               }
@@ -524,7 +591,13 @@ const make = Effect.gen(function* () {
       const projectDirectory = path.join(claudeConfigDir, "projects", projectDirectoryName);
       const entries = yield* fs
         .readDirectory(projectDirectory, { recursive: true })
-        .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+        .pipe(
+          Effect.catchTag("PlatformError", (error) =>
+            error.reason._tag === "NotFound"
+              ? Effect.succeed([] as ReadonlyArray<string>)
+              : Effect.fail(error),
+          ),
+        );
       const files = entries
         .filter((entry) => entry.endsWith(".jsonl"))
         .map((entry) => path.join(projectDirectory, entry))
@@ -557,17 +630,7 @@ const make = Effect.gen(function* () {
                 }),
               ),
             );
-          }).pipe(
-            Effect.catchCause((cause) => {
-              if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.interrupt;
-              }
-              return Effect.logDebug("claude history transcript import skipped file", {
-                filePath,
-                cause: Cause.pretty(cause),
-              });
-            }),
-          ),
+          }),
         // Sequential so messages sharing a session id across files accumulate
         // in a deterministic order before the stable timestamp sort.
         { concurrency: 1, discard: true },
@@ -593,24 +656,15 @@ const make = Effect.gen(function* () {
 
   const listOpenCodeSessions = (client: OpencodeClient, workspaceRoot: string) =>
     Effect.gen(function* () {
-      const sessions = [];
-      let start = 0;
-      for (;;) {
-        const response = yield* runOpenCodeSdk("session.list", () =>
-          client.session.list({
-            directory: workspaceRoot,
-            scope: "project",
-            limit: OPENCODE_SESSION_PAGE_LIMIT,
-            start,
-          }),
-        );
-        const page = response.data ?? [];
-        if (page.length === 0) break;
-        sessions.push(...page);
-        if (page.length < OPENCODE_SESSION_PAGE_LIMIT) break;
-        start += page.length;
-      }
-      return sessions;
+      const response = yield* runOpenCodeSdk("session.list", () =>
+        client.session.list({
+          directory: workspaceRoot,
+          scope: "project",
+          roots: true,
+          limit: OPENCODE_SESSION_LIST_LIMIT,
+        }),
+      );
+      return response.data ?? [];
     });
 
   const listOpenCodeMessages = (client: OpencodeClient, workspaceRoot: string, sessionId: string) =>
@@ -641,12 +695,10 @@ const make = Effect.gen(function* () {
           seenMessageIds.add(record.info.id);
         }
         records.unshift(...fresh);
-        const nextBefore = page[0]?.info.id;
-        if (
-          page.length < OPENCODE_PAGE_LIMIT ||
-          nextBefore === undefined ||
-          nextBefore === before
-        ) {
+        // OpenCode returns an opaque pagination token in the response header.
+        // A message id is not a valid `before` cursor.
+        const nextBefore = response.response?.headers.get("X-Next-Cursor")?.trim() || undefined;
+        if (nextBefore === undefined || nextBefore === before) {
           break;
         }
         before = nextBefore;
@@ -660,26 +712,30 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
-        if (!settings.providers.opencode.enabled) return [];
+        const opencode = defaultOpenCodeInstanceSettings(settings);
+        if (!opencode.config.enabled) return [];
         const connection = yield* openCodeRuntime.connectToOpenCodeServer({
-          binaryPath: settings.providers.opencode.binaryPath,
-          serverUrl: settings.providers.opencode.serverUrl,
+          binaryPath: opencode.config.binaryPath,
+          serverUrl: opencode.config.serverUrl,
+          environment: opencode.environment,
         });
         const client = openCodeRuntime.createOpenCodeSdkClient({
           baseUrl: connection.url,
           directory: input.workspaceRoot,
-          ...(settings.providers.opencode.serverPassword.trim().length > 0
-            ? { serverPassword: settings.providers.opencode.serverPassword }
+          ...(opencode.config.serverPassword.trim().length > 0
+            ? { serverPassword: opencode.config.serverPassword }
             : {}),
         });
 
         const sessions = yield* listOpenCodeSessions(client, input.workspaceRoot);
         const normalizedWorkspaceRoot = normalizePathValue(path, input.workspaceRoot);
         const projectSessions = sessions.filter(
-          (session) => normalizePathValue(path, session.directory) === normalizedWorkspaceRoot,
+          (session) =>
+            session.parentID === undefined &&
+            normalizePathValue(path, session.directory) === normalizedWorkspaceRoot,
         );
 
-        const imported: ReadonlyArray<ImportedHistorySession | null> = yield* Effect.forEach(
+        const imported: ReadonlyArray<ImportedHistorySession> = yield* Effect.forEach(
           projectSessions,
           (session) =>
             listOpenCodeMessages(client, input.workspaceRoot, session.id).pipe(
@@ -707,71 +763,81 @@ const make = Effect.gen(function* () {
                   messages,
                 } satisfies ImportedHistorySession;
               }),
-              Effect.catchCause((cause) => {
-                if (Cause.hasInterruptsOnly(cause)) {
-                  return Effect.interrupt;
-                }
-                return Effect.logWarning("opencode history import skipped session", {
-                  sessionId: session.id,
-                  cause: openCodeRuntimeErrorDetail(cause),
-                }).pipe(Effect.as(null));
-              }),
             ),
           { concurrency: 2 },
         );
-        return imported.filter(
-          (session): session is ImportedHistorySession =>
-            session !== null && session.messages.length > 0,
-        );
+        return imported.filter((session) => session.messages.length > 0);
       }),
     );
 
-  const catchProviderImportCause =
-    (input: ProviderSessionHistoryImportInput, provider: ProviderDriverKindType) =>
-    (cause: Cause.Cause<unknown>) => {
-      if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.interrupt;
-      }
-      return Effect.logWarning("provider session history import provider failed", {
-        projectId: input.projectId,
-        provider,
-        cause: Cause.pretty(cause),
-      }).pipe(Effect.as([] as ReadonlyArray<ImportedHistorySession>));
-    };
-
-  const importProviderHistorySafely = (
+  const importProviderHistory = (
     input: ProviderSessionHistoryImportInput,
     settings: ServerSettings,
     provider: ProviderDriverKindType,
-  ) => {
+  ): Effect.Effect<ReadonlyArray<ImportedHistorySession>, ProviderSessionHistoryImportError> => {
+    const unavailable = (detail: string) =>
+      Effect.fail(
+        new ProviderSessionHistoryImportError({
+          projectId: input.projectId,
+          failures: [{ provider, detail }],
+        }),
+      );
+    const normalizeFailure = <E>(
+      effect: Effect.Effect<ReadonlyArray<ImportedHistorySession>, E>,
+    ): Effect.Effect<ReadonlyArray<ImportedHistorySession>, ProviderSessionHistoryImportError> =>
+      effect.pipe(
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.interrupt;
+          }
+          const detail =
+            provider === OPENCODE_PROVIDER
+              ? openCodeRuntimeErrorDetail(Cause.squash(cause))
+              : Cause.pretty(cause);
+          return Effect.fail(
+            new ProviderSessionHistoryImportError({
+              projectId: input.projectId,
+              failures: [{ provider, detail }],
+            }),
+          );
+        }),
+      );
+
     if (provider === CODEX_PROVIDER) {
-      return importCodexHistory(input, settings).pipe(
-        Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.provideService(Path.Path, path),
-        Effect.catchCause(catchProviderImportCause(input, provider)),
+      if (!defaultCodexInstanceSettings(settings).config.enabled) {
+        return unavailable("The selected Codex provider is disabled or has invalid settings.");
+      }
+      return normalizeFailure(
+        importCodexHistory(input, settings).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        ),
       );
     }
     if (provider === CLAUDE_PROVIDER) {
-      return importClaudeHistory(input, settings).pipe(
-        Effect.provideService(Path.Path, path),
-        Effect.catchCause(catchProviderImportCause(input, provider)),
+      if (!defaultClaudeInstanceSettings(settings).config.enabled) {
+        return unavailable("The selected Claude provider is disabled or has invalid settings.");
+      }
+      return normalizeFailure(
+        importClaudeHistory(input, settings).pipe(Effect.provideService(Path.Path, path)),
       );
     }
     if (provider === OPENCODE_PROVIDER) {
-      return importOpenCodeHistory(input, settings).pipe(
-        Effect.catchCause(catchProviderImportCause(input, provider)),
-      );
+      if (!defaultOpenCodeInstanceSettings(settings).config.enabled) {
+        return unavailable("The selected OpenCode provider is disabled or has invalid settings.");
+      }
+      return normalizeFailure(importOpenCodeHistory(input, settings));
     }
-    if (provider === CURSOR_PROVIDER || provider === DEVIN_PROVIDER || provider === GROK_PROVIDER) {
-      return Effect.logInfo("provider session history import skipped unsupported provider", {
-        projectId: input.projectId,
-        provider,
-      }).pipe(Effect.as([] as ReadonlyArray<ImportedHistorySession>));
+    if (
+      provider === CURSOR_PROVIDER ||
+      provider === DEVIN_PROVIDER ||
+      provider === GROK_PROVIDER ||
+      provider === KILOCODE_PROVIDER ||
+      provider === GITHUB_COPILOT_PROVIDER
+    ) {
+      return unavailable(`Session history import is not supported for ${provider}.`);
     }
-    return Effect.logInfo("provider session history import skipped unknown provider", {
-      projectId: input.projectId,
-      provider,
-    }).pipe(Effect.as([] as ReadonlyArray<ImportedHistorySession>));
+    return unavailable(`Unknown session history provider: ${provider}.`);
   };
 
   const importProjectHistory: ProviderSessionHistoryImporterShape["importProjectHistory"] = (
@@ -780,51 +846,105 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const providers = [...new Set(input.providers)];
       if (providers.length === 0) return;
-      const settings = yield* serverSettings.getSettings;
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(
+          (error) =>
+            new ProviderSessionHistoryImportError({
+              projectId: input.projectId,
+              failures: providers.map((provider) => ({
+                provider,
+                detail:
+                  error instanceof Error && error.message.trim().length > 0
+                    ? error.message
+                    : String(error),
+              })),
+            }),
+        ),
+      );
+      const resolvedWorkspaceRoot = normalizePathValue(path, input.workspaceRoot);
+      const canonicalWorkspaceRoot = yield* fs
+        .realPath(resolvedWorkspaceRoot)
+        .pipe(Effect.orElseSucceed(() => resolvedWorkspaceRoot));
       const normalizedInput: ProviderSessionHistoryImportInput = {
         ...input,
-        workspaceRoot: normalizePathValue(path, input.workspaceRoot),
+        workspaceRoot: canonicalWorkspaceRoot,
       };
 
+      const failures: Array<{
+        readonly provider: ProviderDriverKindType;
+        readonly detail: string;
+      }> = [];
       yield* Effect.forEach(
         providers,
         (provider) =>
-          importProviderHistorySafely(normalizedInput, settings, provider).pipe(
-            Effect.flatMap((sessions) =>
-              Effect.forEach(
-                sessions
-                  .map((session) =>
-                    filterSessionToConsentWindow(session, normalizedInput.requestedAt),
-                  )
-                  .filter((session): session is ImportedHistorySession => session !== null),
-                (session) => dispatchImportedSession(normalizedInput, session),
-                {
-                  concurrency: 1,
-                  discard: true,
-                },
+          Effect.suspend(() =>
+            importProviderHistory(normalizedInput, settings, provider).pipe(
+              Effect.flatMap((sessions) =>
+                Effect.forEach(
+                  sessions
+                    .map((session) =>
+                      filterSessionToConsentWindow(session, normalizedInput.requestedAt),
+                    )
+                    .filter((session): session is ImportedHistorySession => session !== null),
+                  (session) => dispatchImportedSession(normalizedInput, session),
+                  {
+                    concurrency: 1,
+                    discard: true,
+                  },
+                ),
               ),
             ),
+          ).pipe(
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.interrupt;
+              }
+              const squashed = Cause.squash(cause);
+              const detail =
+                squashed instanceof ProviderSessionHistoryImportError
+                  ? (squashed.failures.find((failure) => failure.provider === provider)?.detail ??
+                    Cause.pretty(cause))
+                  : provider === OPENCODE_PROVIDER
+                    ? openCodeRuntimeErrorDetail(squashed)
+                    : Cause.pretty(cause);
+              return Effect.logWarning("provider session history import provider attempt failed", {
+                projectId: normalizedInput.projectId,
+                provider,
+                detail,
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderSessionHistoryImportError({
+                      projectId: normalizedInput.projectId,
+                      failures: [{ provider, detail }],
+                    }),
+                  ),
+                ),
+              );
+            }),
+            Effect.retry({ times: PROVIDER_IMPORT_RETRY_COUNT }),
             Effect.tap(() =>
               Effect.logInfo("provider session history import provider completed", {
                 projectId: normalizedInput.projectId,
                 provider,
               }),
             ),
+            Effect.catch((error) =>
+              Effect.sync(() => {
+                failures.push(...error.failures);
+              }),
+            ),
           ),
         { concurrency: 1, discard: true },
       );
-    }).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.interrupt;
-        }
-        return Effect.logWarning("provider session history import failed", {
-          projectId: input.projectId,
-          workspaceRoot: input.workspaceRoot,
-          cause: Cause.pretty(cause),
+
+      if (failures.length > 0) {
+        return yield* new ProviderSessionHistoryImportError({
+          projectId: normalizedInput.projectId,
+          failures,
         });
-      }),
-    );
+      }
+    });
 
   return {
     importProjectHistory,

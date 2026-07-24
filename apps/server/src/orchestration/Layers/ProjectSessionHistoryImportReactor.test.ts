@@ -14,7 +14,10 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { expect, it } from "@effect/vitest";
 
-import { ProviderSessionHistoryImporter } from "../../provider/Services/ProviderSessionHistoryImporter.ts";
+import {
+  ProviderSessionHistoryImporter,
+  ProviderSessionHistoryImportError,
+} from "../../provider/Services/ProviderSessionHistoryImporter.ts";
 import type { ProviderSessionHistoryImportInput } from "../../provider/Services/ProviderSessionHistoryImporter.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectSessionHistoryImportReactor } from "../Services/ProjectSessionHistoryImportReactor.ts";
@@ -103,6 +106,7 @@ function makeHarnessLayer(input: {
   readonly imported: Ref.Ref<ReadonlyArray<ProviderSessionHistoryImportInput>>;
   readonly dispatched: Ref.Ref<ReadonlyArray<OrchestrationCommand>>;
   readonly importerCalled: Deferred.Deferred<void>;
+  readonly importerFailure?: ProviderSessionHistoryImportError;
 }) {
   return ProjectSessionHistoryImportReactorLive.pipe(
     Layer.provideMerge(
@@ -122,6 +126,11 @@ function makeHarnessLayer(input: {
         importProjectHistory: (importInput) =>
           Ref.update(input.imported, (current) => [...current, importInput]).pipe(
             Effect.andThen(Deferred.succeed(input.importerCalled, undefined)),
+            Effect.andThen(
+              input.importerFailure === undefined
+                ? Effect.void
+                : Effect.fail(input.importerFailure),
+            ),
           ),
       }),
     ),
@@ -172,6 +181,46 @@ it.effect("replays pending import requests on start and records a completion eve
       expect(completion.commandId).toBe(
         CommandId.make("history-import-complete-evt-project-import-replay"),
       );
+    }),
+  ),
+);
+
+it.effect("leaves a failed import pending instead of recording a false completion", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const imported = yield* Ref.make<ReadonlyArray<ProviderSessionHistoryImportInput>>([]);
+      const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const importerCalled = yield* Deferred.make<void>();
+      const projectId = ProjectId.make("project-failed-import");
+      const provider = ProviderDriverKind.make("opencode");
+      const request = importRequestedEvent({
+        sequence: 7,
+        eventId: "evt-project-import-failed",
+        projectId,
+        workspaceRoot: "/tmp/failed-project",
+        providers: [provider],
+      });
+
+      const context = yield* Layer.build(
+        makeHarnessLayer({
+          persistedEvents: [request],
+          imported,
+          dispatched,
+          importerCalled,
+          importerFailure: new ProviderSessionHistoryImportError({
+            projectId,
+            failures: [{ provider, detail: "OpenCode was temporarily unavailable." }],
+          }),
+        }),
+      );
+      const reactor = Context.get(context, ProjectSessionHistoryImportReactor);
+
+      yield* reactor.start();
+      yield* Deferred.await(importerCalled);
+      yield* reactor.drain;
+
+      expect(yield* Ref.get(imported)).toHaveLength(1);
+      expect(yield* Ref.get(dispatched)).toHaveLength(0);
     }),
   ),
 );
