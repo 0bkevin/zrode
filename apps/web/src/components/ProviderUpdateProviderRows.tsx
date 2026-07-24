@@ -49,17 +49,32 @@ function resolveProviderRowStatus(input: {
   if (input.error) {
     return { kind: "failed", text: input.error };
   }
-  if (input.result) {
-    switch (input.result.phase) {
+  const liveResult = (() => {
+    if (!input.liveProvider?.updateState) {
+      return undefined;
+    }
+    if (
+      input.liveProvider.updateState.status === "succeeded" &&
+      input.liveProvider.versionAdvisory?.status === "behind_latest" &&
+      input.liveProvider.version !== input.candidate.versionAdvisory.latestVersion
+    ) {
+      return undefined;
+    }
+    const view = getSingleProviderUpdateProgressToastView(input.liveProvider);
+    return isTerminalProviderUpdatePhase(view.phase) ? view : undefined;
+  })();
+  const result = input.result ?? liveResult;
+  if (result) {
+    switch (result.phase) {
       case "succeeded":
         return {
           kind: "success",
           text: `Updated to ${formatVersion(input.liveProvider?.version ?? input.candidate.versionAdvisory.latestVersion)}`,
         };
       case "failed":
-        return { kind: "failed", text: input.result.description };
+        return { kind: "failed", text: result.description };
       case "unchanged":
-        return { kind: "unchanged", text: input.result.description };
+        return { kind: "unchanged", text: result.description };
       case "running":
         return { kind: "loading", text: "Updating…" };
       case "initial":
@@ -212,7 +227,7 @@ export function ProviderUpdateProviderRows({
   );
 
   return (
-    <div className="mt-0.5 flex flex-col gap-1">
+    <div className="mt-0.5 flex w-full min-w-0 max-w-full flex-col gap-1 [overflow-x:clip]">
       {visibleCandidates.map((candidate) => {
         const liveProvider = liveProviderById.get(candidate.instanceId);
         const canUpdate = canOneClickUpdateProviderCandidate(candidate, providers);

@@ -81,7 +81,7 @@ export function ProviderUpdateRow({
   }
 
   return (
-    <div className="flex min-h-7 items-center justify-between gap-2 py-px">
+    <div className="flex min-h-7 w-full min-w-0 max-w-full items-center justify-between gap-2 overflow-x-clip py-px">
       <div className="flex min-w-0 items-baseline gap-1.5">
         <span className="max-w-24 shrink-0 truncate text-xs font-medium leading-4 text-foreground">
           {label}

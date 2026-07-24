@@ -4,11 +4,13 @@ import { providerUpdateToast } from "./ProviderUpdateToast";
 
 describe("providerUpdateToast", () => {
   it("keeps provider details in a collapsed disclosure with compact inline settings", () => {
+    const inlineActions = <button>Update all</button>;
     const toast = providerUpdateToast({
       type: "warning",
       title: "Updates Available: 2 providers",
       details: <div>Provider rows</div>,
       detailCount: 2,
+      inlineActions,
       onClose: vi.fn(),
       onOpenSettings: vi.fn(),
     });
@@ -26,6 +28,7 @@ describe("providerUpdateToast", () => {
         expand: "Show updates",
         collapse: "Hide updates",
       },
+      customActions: inlineActions,
       hideCopyButton: true,
     });
     expect(toast.data?.expandableContent).toBeDefined();

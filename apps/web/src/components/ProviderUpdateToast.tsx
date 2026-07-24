@@ -9,6 +9,7 @@ interface ProviderUpdateToastOptions {
   readonly title: ReactNode;
   readonly details: ReactNode;
   readonly detailCount: number;
+  readonly inlineActions?: ReactNode;
   readonly leadingIcon?: ReactNode;
   readonly onClose: () => void;
   readonly onOpenSettings: () => void;
@@ -24,6 +25,7 @@ export function providerUpdateToast({
   title,
   details,
   detailCount,
+  inlineActions,
   leadingIcon,
   onClose,
   onOpenSettings,
@@ -50,6 +52,7 @@ export function providerUpdateToast({
         expand: `Show ${plural}`,
         collapse: `Hide ${plural}`,
       },
+      customActions: inlineActions,
       hideCopyButton: true,
       leadingIcon,
       onClose,

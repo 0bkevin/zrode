@@ -13,6 +13,8 @@ import type {
   ProviderUpdateCandidate,
   ProviderUpdateRowStatus,
 } from "./ProviderUpdateLaunchNotification.logic";
+import { ProviderUpdateAllButton } from "./ProviderUpdateAllButton";
+import { ProviderUpdateRow } from "./ProviderUpdateRow";
 
 const testState = vi.hoisted(() => ({
   providers: [] as ServerProvider[],
@@ -140,14 +142,60 @@ type RowElement = ReactElement<{
   readonly onUpdate: () => void;
 }>;
 
-function renderRows(candidates: ReadonlyArray<ProviderUpdateCandidate>): RowElement[] {
+type UpdateAllButtonElement = ReactElement<{
+  readonly "aria-label": string;
+  readonly children: unknown;
+  readonly disabled: boolean;
+  readonly onClick: () => void;
+}>;
+
+type ElementWithChildren = ReactElement<{ readonly children?: unknown }>;
+
+function renderContent(candidates: ReadonlyArray<ProviderUpdateCandidate>): ElementWithChildren {
   hooks.beginRender();
-  const output = ProviderUpdateProviderRows({
+  return ProviderUpdateProviderRows({
     candidates,
     environmentId,
     onOpenSettings: vi.fn(),
-  }) as ReactElement<{ readonly children: RowElement | RowElement[] }>;
-  return Array.isArray(output.props.children) ? output.props.children : [output.props.children];
+  }) as ElementWithChildren;
+}
+
+function flattenElements(value: unknown): ElementWithChildren[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(flattenElements);
+  }
+  return value && typeof value === "object" && "props" in value
+    ? [value as ElementWithChildren]
+    : [];
+}
+
+function renderRows(candidates: ReadonlyArray<ProviderUpdateCandidate>): RowElement[] {
+  return flattenElements(renderContent(candidates).props.children)
+    .filter((element) => element.type === ProviderUpdateRow)
+    .map((element) => element as unknown as RowElement);
+}
+
+function renderUpdateAllButton(
+  candidates: ReadonlyArray<ProviderUpdateCandidate>,
+): UpdateAllButtonElement {
+  hooks.beginRender();
+  return ProviderUpdateAllButton({
+    candidates,
+    environmentId,
+  }) as UpdateAllButtonElement;
+}
+
+function elementText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map(elementText).join("");
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value && typeof value === "object" && "props" in value) {
+    return elementText((value as ElementWithChildren).props.children);
+  }
+  return "";
 }
 
 async function flushPromises(): Promise<void> {
@@ -199,6 +247,49 @@ describe("ProviderUpdateProviderRows", () => {
     const finishedRows = renderRows(candidates);
     expect(finishedRows.map((row) => row.props.status.kind)).toEqual(["idle", "success"]);
     expect(finishedRows[1]!.props.status.text).toBe("Updated to v1.1.0");
+  });
+
+  it("updates every one-click provider from the leading update-all action", async () => {
+    const candidates = testState.providers as ProviderUpdateCandidate[];
+    testState.updateProvider.mockImplementation(({ input }: { input: { provider: string } }) =>
+      Promise.resolve(AsyncResult.success({ providers: [provider(input.provider, "succeeded")] })),
+    );
+
+    const updateAllButton = renderUpdateAllButton(candidates);
+    expect(updateAllButton.props["aria-label"]).toBe("Update all providers");
+    expect(updateAllButton.props.disabled).toBe(false);
+
+    updateAllButton.props.onClick();
+    expect(elementText(renderUpdateAllButton(candidates).props.children)).toBe("Updating all…");
+    await flushPromises();
+
+    expect(testState.updateProvider).toHaveBeenCalledTimes(2);
+    expect(testState.updateProvider).toHaveBeenCalledWith({
+      environmentId,
+      input: {
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: ProviderInstanceId.make("codex"),
+      },
+    });
+    expect(testState.updateProvider).toHaveBeenCalledWith({
+      environmentId,
+      input: {
+        provider: ProviderDriverKind.make("cursor"),
+        instanceId: ProviderInstanceId.make("cursor"),
+      },
+    });
+    const finishedButton = renderUpdateAllButton(candidates);
+    expect(finishedButton.props.disabled).toBe(true);
+    expect(elementText(finishedButton.props.children)).toBe("All updated");
+  });
+
+  it("shows live bulk-update success when the provider rows are opened afterward", () => {
+    const candidate = provider("codex") as ProviderUpdateCandidate;
+    testState.providers = [provider("codex", "succeeded")];
+
+    const [row] = renderRows([candidate]);
+    expect(row?.props.status.kind).toBe("success");
+    expect(row?.props.status.text).toBe("Updated to v1.1.0");
   });
 
   it("adds providers that become outdated while the card is already open", () => {

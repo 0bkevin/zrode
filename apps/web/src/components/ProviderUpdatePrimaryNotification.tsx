@@ -14,6 +14,7 @@ import {
   getProviderUpdateInitialToastView,
   providerUpdateNotificationKey,
 } from "./ProviderUpdateLaunchNotification.logic";
+import { ProviderUpdateAllButton } from "./ProviderUpdateAllButton";
 import { ProviderUpdateProviderRows } from "./ProviderUpdateProviderRows";
 import { providerUpdateToast } from "./ProviderUpdateToast";
 import { toastManager } from "./ui/toast";
@@ -158,6 +159,16 @@ export function ProviderUpdatePrimaryNotification() {
           initialView.description
         ),
         detailCount: updateProviders.length,
+        inlineActions:
+          primaryEnvironment && oneClickProviders.length > 1 ? (
+            <ProviderUpdateAllButton
+              candidates={oneClickProviders}
+              environmentId={primaryEnvironment.environmentId}
+              onInteract={() => {
+                hasInteractedRef.current = true;
+              }}
+            />
+          ) : undefined,
         leadingIcon:
           updateProviders.length === 1 ? (
             <ProviderUpdateToastIcon provider={updateProviders[0]!.driver} />

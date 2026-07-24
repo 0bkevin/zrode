@@ -46,6 +46,8 @@ export type ThreadToastData = {
   onClose?: (() => void) | undefined;
   dismissAfterVisibleMs?: number;
   hideCopyButton?: boolean;
+  /** Custom controls rendered before the standard toast actions. */
+  customActions?: ReactNode;
   additionalActions?: ReadonlyArray<{
     id: string;
     props: ComponentPropsWithoutRef<"button">;
@@ -142,7 +144,7 @@ function CopyErrorButton({ text }: { text: string }) {
 
 /** Scrollable cap for long expandable lists (~10rem); keeps the toast from growing without bound. */
 const toastExpandablePanelClassName =
-  "mt-2 max-h-40 min-h-0 overflow-y-auto overscroll-contain pr-0.5 select-text";
+  "mt-2 w-full min-h-0 min-w-0 max-w-full max-h-40 overflow-y-auto [overflow-x:clip] overscroll-contain pr-0.5 select-text";
 
 function ToastExpandableSection({
   children,
@@ -310,10 +312,12 @@ function deriveToastBodyDescriptor(toast: {
       ? toast.description
       : null;
   const hasAdditionalActions = (toast.data?.additionalActions?.length ?? 0) > 0;
+  const hasCustomActions = toast.data?.customActions !== undefined;
   const hasSecondaryAction = toast.data?.secondaryActionProps !== undefined;
   const hasTrailingControls =
     copyErrorText !== null ||
     toast.actionProps !== undefined ||
+    hasCustomActions ||
     hasAdditionalActions ||
     hasSecondaryAction;
   const inlineContentEndPad = hasTrailingControls ? "pr-6" : "pr-10";
@@ -352,6 +356,7 @@ function ToastBodyContent({
 }: ToastBodyContentProps) {
   const additionalActions = toastData?.additionalActions ?? [];
   const secondaryActionProps = toastData?.secondaryActionProps;
+  const customActions = toastData?.customActions;
   const leadingIcon = toastData?.leadingIcon;
   const { className: secondaryActionClassName, ...secondaryActionRest } =
     secondaryActionProps ?? {};
@@ -399,6 +404,7 @@ function ToastBodyContent({
           )}
         >
           {copyErrorText !== null ? <CopyErrorButton text={copyErrorText} /> : null}
+          {customActions}
           {additionalActions.map(({ id, props: { className, ...props } }) => (
             <button
               {...props}
